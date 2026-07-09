@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.fwdrobo.sirius.mapper.JobMapper">
+
+    <resultMap id="JobResultMap" type="com.fwdrobo.sirius.entity.job.Job">
+        <id column="job_id" property="jobId" javaType="java.util.UUID"/>
+        <result column="job_name" property="jobName"/>
+        <result column="job_category" property="jobCategory" javaType="com.fwdrobo.sirius.entity.job.JobCategory"/>
+        <result column="image" property="image"/>
+        <result column="cmd" property="cmd"/>
+        <result column="params" property="params"
+                typeHandler="com.fwdrobo.sirius.handler.JsonbTypeHandler"/>
+        <result column="created_by" property="createdBy" javaType="java.util.UUID"/>
+        <result column="created_at" property="createdAt" javaType="java.time.OffsetDateTime"/>
+        <result column="input_repo_ids" property="inputRepoIds" javaType="java.util.List" typeHandler="com.fwdrobo.sirius.handler.JsonbTypeHandler"/>
+        <result column="output_repo_ids" property="outputRepoIds" javaType="java.util.List" typeHandler="com.fwdrobo.sirius.handler.JsonbTypeHandler"/>
+    </resultMap>
+
+    <sql id="BaseColumns">
+        j.job_id, j.job_name, j.job_category, j.image, j.cmd, j.params, j.created_by, j.created_at, j.updated_at
+    </sql>
+
+    <select id="findById" resultMap="JobResultMap">
+        /*IGNORE_ORG*/
+        SELECT
+        <include refid="BaseColumns"/>,
+        COALESCE((
+        SELECT jsonb_agg(DISTINCT ji.input_repo_id)
+        FROM job_input ji
+        WHERE ji.job_id = j.job_id
+        ), '[]'::jsonb) AS input_repo_ids,
+        COALESCE((
+        SELECT jsonb_agg(DISTINCT jo.output_repo_id)
+        FROM job_output jo
+        WHERE jo.job_id = j.job_id
+        ), '[]'::jsonb) AS output_repo_ids
+        FROM job j
+        WHERE j.job_id = #{jobId}::uuid
+    </select>
+
+    <delete id="deleteById">
+        DELETE
+        FROM public.job
+        WHERE job_id = #{jobId}::uuid
+    </delete>
+
+    <select id="insertJob" resultType="java.util.UUID">
+        INSERT INTO public.job
+            (job_name, job_category, image, cmd, params, created_by, org_id)
+        VALUES (#{jobName},
+                CAST(#{jobCategory} AS job_category),
+                #{image},
+                #{cmd},
+                #{paramsJson, jdbcType=OTHER, typeHandler=com.fwdrobo.sirius.handler.JsonbTypeHandler},
+                #{createdBy},
+                #{orgId})
+            RETURNING job_id
+    </select>
+
+    <update id="updateJob">
+        UPDATE public.job
+        SET job_name     = COALESCE(#{jobName}, job_name),
+            job_category = COALESCE(CAST(#{jobCategory} AS job_category), job_category),
+            image        = COALESCE(#{image}, image),
+            cmd          = COALESCE(#{cmd}, cmd),
+            params       = COALESCE(#{paramsJson, jdbcType=OTHER, typeHandler=com.fwdrobo.sirius.handler.JsonbTypeHandler}, params)
+        WHERE job_id = #{jobId}::uuid
+    </update>
+
+    <select id="findAll" resultMap="JobResultMap">
+        /*IGNORE_ORG*/
+        select
+        <include refid="BaseColumns"/>
+        ,COALESCE(array_agg(ji.input_repo_id) FILTER (WHERE ji.input_repo_id IS NOT NULL), '[]') AS input_repo_ids
+        ,COALESCE(array_agg(ji.output_repo_id) FILTER (WHERE ji.output_repo_id IS NOT NULL), '[]') AS output_repo_ids
+        FROM job j
+        LEFT JOIN job_input ji ON ji.job_id = j.job_id
+        LEFT JOIN job_output jo ON jo.job_id = j.job_id
+        GROUP BY j.job_id
+        order by created_at desc
+    </select>
+
+    <select id="countByFilters" resultType="long">
+        /*IGNORE_ORG*/
+        SELECT COUNT(1) FROM job
+        <where>
+            <if test="jobName != null and jobName != ''">
+                AND job_name = #{jobName}
+            </if>
+            <if test="jobCategory != null">
+                AND job_category = CAST(#{jobCategory} AS job_category)
+            </if>
+            <if test="image != null and image != ''">
+                AND image = #{image}
+            </if>
+        </where>
+    </select>
+
+    <select id="selectPageByFilters" resultMap="JobResultMap">
+        /*IGNORE_ORG*/
+        SELECT
+        <include refid="BaseColumns"/>,
+        COALESCE((
+        SELECT jsonb_agg(DISTINCT ji.input_repo_id)
+        FROM job_input ji
+        WHERE ji.job_id = j.job_id
+        ), '[]'::jsonb) AS input_repo_ids,
+        COALESCE((
+        SELECT jsonb_agg(DISTINCT jo.output_repo_id)
+        FROM job_output jo
+        WHERE jo.job_id = j.job_id
+        ), '[]'::jsonb) AS output_repo_ids
+        FROM job j
+        <where>
+            <if test="jobName != null and jobName != ''">
+                AND j.job_name = #{jobName}
+            </if>
+            <if test="jobCategory != null">
+                AND j.job_category = CAST(#{jobCategory} AS job_category)
+            </if>
+            <if test="image != null and image != ''">
+                AND j.image = #{image}
+            </if>
+        </where>
+        ORDER BY created_at DESC
+        LIMIT #{size} OFFSET #{offset}
+    </select>
+
+</mapper>

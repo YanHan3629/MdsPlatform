@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.fwdrobo.sirius.mapper.MmAssetMapper">
+    <resultMap id="MmAssetMap" type="com.fwdrobo.sirius.entity.mm.MmAsset">
+        <id column="asset_id" property="assetId" javaType="java.util.UUID"/>
+        <result column="dataset_version_id" property="datasetVersionId" javaType="java.util.UUID"/>
+        <result column="file_id" property="fileId" javaType="java.util.UUID"/>
+        <result column="asset_type" property="assetType"/>
+        <result column="logical_path" property="logicalPath"/>
+        <result column="file_name" property="fileName"/>
+        <result column="source_asset_code" property="sourceAssetCode"/>
+        <result column="sha256" property="sha256"/>
+        <result column="size_bytes" property="sizeBytes"/>
+        <result column="content_type" property="contentType"/>
+        <result column="width" property="width"/>
+        <result column="height" property="height"/>
+        <result column="status" property="status"/>
+        <result column="meta" property="meta" typeHandler="com.fwdrobo.sirius.handler.JsonbTypeHandler"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="updated_at" property="updatedAt"/>
+    </resultMap>
+
+    <select id="selectById" resultMap="MmAssetMap">
+        SELECT * FROM public.mm_asset WHERE asset_id = #{assetId}
+    </select>
+
+    <select id="selectByDatasetVersionId" resultMap="MmAssetMap">
+        SELECT DISTINCT a.*
+        FROM public.mm_asset a
+        LEFT JOIN public.mm_asset_text t ON t.asset_id = a.asset_id
+        LEFT JOIN public.mm_asset_tag atg ON atg.asset_id = a.asset_id
+        LEFT JOIN public.mm_tag tg ON tg.tag_id = atg.tag_id
+        LEFT JOIN public.mm_asset_category ac ON ac.asset_id = a.asset_id
+        LEFT JOIN public.mm_category c ON c.category_id = ac.category_id
+        WHERE a.dataset_version_id = #{datasetVersionId}
+        <if test="keyword != null and keyword != ''">
+          AND (a.file_name ILIKE CONCAT('%', #{keyword}, '%') OR t.content ILIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        <if test="tagName != null and tagName != ''">
+          AND tg.tag_name = #{tagName}
+        </if>
+        <if test="categoryName != null and categoryName != ''">
+          AND c.category_name = #{categoryName}
+        </if>
+        ORDER BY a.created_at DESC
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <select id="countByDatasetVersionId" resultType="long">
+        SELECT COUNT(DISTINCT a.asset_id)
+        FROM public.mm_asset a
+        LEFT JOIN public.mm_asset_text t ON t.asset_id = a.asset_id
+        LEFT JOIN public.mm_asset_tag atg ON atg.asset_id = a.asset_id
+        LEFT JOIN public.mm_tag tg ON tg.tag_id = atg.tag_id
+        LEFT JOIN public.mm_asset_category ac ON ac.asset_id = a.asset_id
+        LEFT JOIN public.mm_category c ON c.category_id = ac.category_id
+        WHERE a.dataset_version_id = #{datasetVersionId}
+        <if test="keyword != null and keyword != ''">
+          AND (a.file_name ILIKE CONCAT('%', #{keyword}, '%') OR t.content ILIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        <if test="tagName != null and tagName != ''">
+          AND tg.tag_name = #{tagName}
+        </if>
+        <if test="categoryName != null and categoryName != ''">
+          AND c.category_name = #{categoryName}
+        </if>
+    </select>
+
+    <select id="selectCaptions" resultType="string">
+        SELECT content FROM public.mm_asset_text WHERE asset_id = #{assetId} ORDER BY seq_no ASC, created_at ASC
+    </select>
+
+    <select id="selectTags" resultType="string">
+        SELECT tg.tag_name FROM public.mm_asset_tag atg JOIN public.mm_tag tg ON tg.tag_id = atg.tag_id WHERE atg.asset_id = #{assetId} ORDER BY tg.tag_name ASC
+    </select>
+
+    <select id="selectCategories" resultType="string">
+        SELECT c.category_name FROM public.mm_asset_category ac JOIN public.mm_category c ON c.category_id = ac.category_id WHERE ac.asset_id = #{assetId} ORDER BY c.category_name ASC
+    </select>
+
+    <select id="findSpaceIdByAssetId" resultType="java.util.UUID">
+        SELECT d.space_id FROM public.mm_asset a JOIN public.mm_dataset_version dv ON dv.version_id = a.dataset_version_id JOIN public.mm_dataset d ON d.dataset_id = dv.dataset_id WHERE a.asset_id = #{assetId}
+    </select>
+
+    <select id="findDatasetIdByAssetId" resultType="java.util.UUID">
+        SELECT d.dataset_id FROM public.mm_asset a JOIN public.mm_dataset_version dv ON dv.version_id = a.dataset_version_id JOIN public.mm_dataset d ON d.dataset_id = dv.dataset_id WHERE a.asset_id = #{assetId}
+    </select>
+
+    <select id="findOrCreateTag" resultType="java.util.UUID">
+        WITH existing AS (
+            SELECT tag_id FROM public.mm_tag WHERE space_id = #{spaceId} AND tag_name = #{tagName}
+        ), inserted AS (
+            INSERT INTO public.mm_tag (tag_id, space_id, tag_name, created_by)
+            SELECT gen_random_uuid(), #{spaceId}, #{tagName}, #{createdBy}
+            WHERE NOT EXISTS (SELECT 1 FROM existing)
+            RETURNING tag_id
+        )
+        SELECT tag_id FROM inserted
+        UNION ALL
+        SELECT tag_id FROM existing
+        LIMIT 1
+    </select>
+
+    <insert id="bindTag">
+        INSERT INTO public.mm_asset_tag (asset_id, tag_id, source_type)
+        VALUES (#{assetId}, #{tagId}, #{sourceType})
+        ON CONFLICT (asset_id, tag_id) DO UPDATE SET source_type = EXCLUDED.source_type
+    </insert>
+
+    <delete id="deleteTagsByAssetId">DELETE FROM public.mm_asset_tag WHERE asset_id = #{assetId}</delete>
+
+    <insert id="bindCategory">
+        INSERT INTO public.mm_asset_category (asset_id, category_id, source_type)
+        VALUES (#{assetId}, #{categoryId}, #{sourceType})
+        ON CONFLICT (asset_id, category_id) DO UPDATE SET source_type = EXCLUDED.source_type
+    </insert>
+
+    <delete id="deleteCategoriesByAssetId">DELETE FROM public.mm_asset_category WHERE asset_id = #{assetId}</delete>
+
+    <delete id="deleteByDatasetVersionId">
+        DELETE FROM public.mm_asset WHERE dataset_version_id = #{datasetVersionId}
+    </delete>
+
+    <insert id="upsertBatch">
+        INSERT INTO public.mm_asset (
+            asset_id, dataset_version_id, file_id, asset_type, logical_path, file_name,
+            source_asset_code, sha256, size_bytes, content_type, width, height, status, meta
+        ) VALUES
+        <foreach collection="items" item="item" separator=",">
+            (
+                #{item.assetId}, #{item.datasetVersionId}, #{item.fileId}, #{item.assetType}, #{item.logicalPath}, #{item.fileName},
+                #{item.sourceAssetCode}, #{item.sha256}, #{item.sizeBytes}, #{item.contentType}, #{item.width}, #{item.height}, #{item.status},
+                #{item.meta, typeHandler=com.fwdrobo.sirius.handler.JsonbTypeHandler}
+            )
+        </foreach>
+        ON CONFLICT (dataset_version_id, logical_path) DO UPDATE SET
+            file_id = EXCLUDED.file_id,
+            file_name = EXCLUDED.file_name,
+            source_asset_code = EXCLUDED.source_asset_code,
+            size_bytes = EXCLUDED.size_bytes,
+            content_type = EXCLUDED.content_type,
+            width = EXCLUDED.width,
+            height = EXCLUDED.height,
+            status = EXCLUDED.status,
+            meta = EXCLUDED.meta
+    </insert>
+</mapper>

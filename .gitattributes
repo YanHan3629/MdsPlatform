@@ -1,0 +1,4 @@
+mdsPlatform/services/index-builder/clip_model_chinese/*.bin filter=lfs diff=lfs merge=lfs -text
+mdsPlatform/services/index-builder/clip_model_chinese/*.pt filter=lfs diff=lfs merge=lfs -text
+mdsPlatform/services/search-service/app/clip_model_chinese/*.bin filter=lfs diff=lfs merge=lfs -text
+mdsPlatform/services/search-service/app/clip_model_chinese/*.pt filter=lfs diff=lfs merge=lfs -text

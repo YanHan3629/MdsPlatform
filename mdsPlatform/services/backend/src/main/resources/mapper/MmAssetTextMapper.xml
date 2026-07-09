@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.fwdrobo.sirius.mapper.MmAssetTextMapper">
+    <resultMap id="MmAssetTextMap" type="com.fwdrobo.sirius.entity.mm.MmAssetText">
+        <id column="asset_text_id" property="assetTextId" javaType="java.util.UUID"/>
+        <result column="asset_id" property="assetId" javaType="java.util.UUID"/>
+        <result column="text_role" property="textRole"/>
+        <result column="seq_no" property="seqNo"/>
+        <result column="language_code" property="languageCode"/>
+        <result column="content" property="content"/>
+        <result column="source_type" property="sourceType"/>
+        <result column="meta" property="meta" typeHandler="com.fwdrobo.sirius.handler.JsonbTypeHandler"/>
+        <result column="created_at" property="createdAt"/>
+    </resultMap>
+
+    <insert id="insertBatch">
+        INSERT INTO public.mm_asset_text (
+            asset_text_id, asset_id, text_role, seq_no, language_code, content, source_type, meta
+        ) VALUES
+        <foreach collection="items" item="item" separator=",">
+            (#{item.assetTextId}, #{item.assetId}, #{item.textRole}, #{item.seqNo}, #{item.languageCode}, #{item.content}, #{item.sourceType}, #{item.meta, typeHandler=com.fwdrobo.sirius.handler.JsonbTypeHandler})
+        </foreach>
+    </insert>
+
+    <select id="selectByAssetId" resultMap="MmAssetTextMap">
+        SELECT * FROM public.mm_asset_text WHERE asset_id = #{assetId} ORDER BY seq_no ASC, created_at ASC
+    </select>
+
+    <delete id="deleteByAssetIds">
+        DELETE FROM public.mm_asset_text
+        WHERE asset_id IN
+        <foreach collection="assetIds" item="assetId" open="(" separator="," close=")">
+            #{assetId}
+        </foreach>
+    </delete>
+</mapper>

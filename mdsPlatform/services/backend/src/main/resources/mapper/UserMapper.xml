@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.fwdrobo.sirius.mapper.UserMapper">
+
+    <resultMap id="UserMap" type="com.fwdrobo.sirius.entity.FwdUser">
+        <id column="user_id" property="userId" javaType="java.util.UUID"/>
+        <result column="user_name" property="userName"/>
+        <result column="password_hash" property="passwordHash"/>
+        <result column="org_id" property="orgId" javaType="java.util.UUID" />
+        <result column="status_code" property="statusCode"/>
+        <result column="token_version" property="tokenVersion"/>
+    </resultMap>
+
+    <resultMap id="UserWithRolesMap" type="com.fwdrobo.sirius.entity.FwdUser">
+        <id column="user_id" property="userId" javaType="java.util.UUID"/>
+        <result column="user_name" property="userName"/>
+        <result column="password_hash" property="passwordHash"/>
+        <result column="org_id" property="orgId" javaType="java.util.UUID" />
+        <result column="status_code" property="statusCode"/>
+        <result column="token_version" property="tokenVersion"/>
+        <collection property="roles" ofType="java.lang.String" notNullColumn="role_code">
+            <result column="role_code"/>
+        </collection>
+    </resultMap>
+
+    <sql id="BaseColumns">
+        user_id, user_name, password_hash, org_id, status_code, token_version
+    </sql>
+
+    <insert id="insert">
+        INSERT INTO fwd_user(user_id, user_name, password_hash, org_id, status_code, token_version)
+        VALUES (#{userId}, #{userName}, #{passwordHash}, #{orgId}, #{statusCode}, #{tokenVersion})
+    </insert>
+
+    <select id="selectById" resultMap="UserMap">
+        SELECT
+        <include refid="BaseColumns"/>
+        FROM fwd_user
+        WHERE user_id = #{userId}
+    </select>
+
+    <select id="selectAll" resultMap="UserMap">
+        SELECT
+        <include refid="BaseColumns"/>
+        FROM fwd_user
+        WHERE status_code IS NOT NULL
+        ORDER BY user_id DESC
+    </select>
+
+    <select id="selectByUsername" resultMap="UserMap">
+        SELECT
+        <include refid="BaseColumns"/>
+        FROM fwd_user
+        WHERE user_name = #{userName}
+          AND status_code IS NOT NULL
+    </select>
+
+    <select id="existsByUsername" resultType="int">
+        SELECT COUNT(1) FROM fwd_user WHERE status_code IS NOT NULL AND user_name = #{userName}
+    </select>
+
+    <update id="updateStatus">
+        UPDATE fwd_user
+        SET status_code = #{statusCode}
+        WHERE user_id = #{userId}
+    </update>
+
+    <update id="incrementTokenVersion">
+        UPDATE fwd_user
+        SET token_version = token_version + 1
+        WHERE user_id = #{userId}
+    </update>
+
+    <update id="incrementTokenVersionForNonAdmin">
+        UPDATE fwd_user
+        SET token_version = token_version + 1
+        WHERE user_role != 'ADMIN' AND status_code IS NOT NULL
+    </update>
+
+    <update id="updatePassword">
+        UPDATE fwd_user
+        SET password_hash = #{passwordHash},
+            token_version = token_version + 1
+        WHERE user_id = #{userId}
+    </update>
+
+    <select id="selectByOrg" resultMap="UserWithRolesMap">
+        SELECT
+        u.user_id, u.user_name, u.password_hash, u.org_id, u.status_code, u.token_version, r.role_code
+        FROM fwd_user u
+        LEFT JOIN user_role ur ON ur.user_id = u.user_id
+        LEFT JOIN role r ON r.role_id = ur.role_id
+        WHERE u.org_id = #{orgId}
+        AND u.status_code IS NOT NULL
+        ORDER BY u.user_id DESC, r.role_code ASC
+    </select>
+
+</mapper>

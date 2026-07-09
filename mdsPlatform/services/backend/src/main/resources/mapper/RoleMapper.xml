@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.fwdrobo.sirius.mapper.RoleMapper">
+
+    <resultMap id="RoleMap" type="com.fwdrobo.sirius.entity.permission.Role">
+        <id column="role_id" property="roleId" javaType="java.util.UUID"/>
+        <result column="org_id" property="orgId" javaType="java.util.UUID"/>
+        <result column="role_code" property="roleCode"/>
+        <result column="role_name" property="roleName"/>
+        <result column="is_builtin" property="isBuiltin" javaType="java.lang.Boolean"/>
+        <result column="created_at" property="createdAt" javaType="java.time.OffsetDateTime"/>
+        <result column="created_by" property="createdBy" javaType="java.util.UUID"/>
+        <result column="updated_at" property="updatedAt" javaType="java.time.OffsetDateTime"/>
+        <result column="updated_by" property="updatedBy" javaType="java.util.UUID"/>
+    </resultMap>
+
+    <sql id="BaseColumns">
+        role_id, org_id, role_code, role_name, is_builtin, created_at, created_by, updated_at, updated_by
+    </sql>
+
+    <select id="selectById" resultMap="RoleMap">
+        SELECT
+        <include refid="BaseColumns"/>
+        FROM role
+        WHERE role_id = #{roleId}
+    </select>
+
+    <select id="selectAll" resultMap="RoleMap">
+        SELECT
+        <include refid="BaseColumns"/>
+        FROM role
+        ORDER BY is_builtin DESC, role_code ASC
+    </select>
+
+    <select id="selectByOrgIdAndCode" resultMap="RoleMap">
+        SELECT
+        <include refid="BaseColumns"/>
+        FROM role
+        WHERE org_id = #{orgId} AND role_code = #{roleCode}
+            LIMIT 1
+    </select>
+
+    <select id="insert" resultType="java.util.UUID">
+        INSERT INTO role (role_id, org_id, role_code, role_name, is_builtin)
+        VALUES (COALESCE(#{roleId}, gen_random_uuid()),
+                #{orgId},
+                #{roleCode},
+                #{roleName},
+                COALESCE(#{isBuiltin}, FALSE))
+        RETURNING role_id
+    </select>
+
+    <update id="update">
+        UPDATE role
+        SET
+            role_code = COALESCE(#{roleCode}, role_code),
+            role_name = COALESCE(#{roleName}, role_name),
+            is_builtin = COALESCE(#{isBuiltin}, is_builtin)
+        WHERE role_id = #{roleId}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM role WHERE role_id = #{roleId}
+    </delete>
+
+    <select id="selectPerIdsByRoleId" resultType="java.util.UUID">
+        SELECT per_id
+        FROM role_permission
+        WHERE role_id = #{roleId}
+    </select>
+
+    <delete id="deleteRolePermissions">
+        DELETE FROM role_permission WHERE role_id = #{roleId}
+    </delete>
+
+    <insert id="insertRolePermissions">
+        INSERT INTO role_permission (role_id, per_id)
+        VALUES
+        <foreach collection="perIds" item="pid" separator=",">
+            (#{roleId}, #{pid})
+        </foreach>
+        ON CONFLICT DO NOTHING
+    </insert>
+
+    <select id="selectRolesByUserId" resultMap="RoleMap">
+        SELECT
+            r.role_id, org_id, role_code, role_name, is_builtin, r.created_at, r.created_by, r.updated_at, r.updated_by
+        FROM user_role ur join role r on ur.role_id = r.role_id
+        WHERE ur.user_id = #{userId}
+    </select>
+
+    <insert id="insertUserRoles">
+        INSERT INTO user_role (user_id, role_id)
+        VALUES
+        <foreach collection="roleIds" item="rid" separator=",">
+            (#{userId}, #{rid})
+        </foreach>
+        ON CONFLICT DO NOTHING
+    </insert>
+
+    <delete id="deleteUserRolesByUserId">
+        DELETE FROM user_role
+        WHERE user_id = #{userId}
+    </delete>
+
+    <select id="selectByIds" resultMap="RoleMap">
+        SELECT
+        <include refid="BaseColumns"/>
+        FROM role
+        WHERE role_id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </select>
+
+</mapper>

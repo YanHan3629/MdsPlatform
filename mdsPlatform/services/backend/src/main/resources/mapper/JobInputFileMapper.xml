@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.fwdrobo.sirius.mapper.JobInputFileMapper">
+    <insert id="batchInsertJobInputFiles">
+        INSERT INTO public.job_input_file(job_id, repo_id, logical_path)
+        <choose>
+            <when test="logicalPaths != null and logicalPaths.size() > 0">
+                <trim prefix="VALUES" suffixOverrides=",">
+                    <foreach collection="logicalPaths" item="logicalPath">
+                        (#{jobId}::uuid,#{repoId}::uuid,#{logicalPath,jdbcType=VARCHAR}),
+                    </foreach>
+                </trim>
+            </when>
+            <otherwise>
+                VALUES (#{jobId}::uuid,#{repoId}::uuid,'*ALL*')
+            </otherwise>
+        </choose>
+        ON CONFLICT (job_id, repo_id, logical_path) DO NOTHING
+    </insert>
+    
+    <delete id="deleteByJobId">
+        DELETE FROM public.job_input_file
+        WHERE job_id = #{jobId}
+    </delete>
+
+    <select id="findByJobId" resultType="com.fwdrobo.sirius.entity.job.JobInputFile">
+        SELECT
+            repo_id AS repoId,
+            <!-- DB sentinel '*ALL*' means repo-wide input; map it to null for service-side empty-list assembly. -->
+            NULLIF(logical_path, '*ALL*') AS logicalPath
+        FROM public.job_input_file
+        WHERE job_id = #{jobId}
+        ORDER BY repo_id, logical_path
+    </select>
+</mapper>

@@ -1,0 +1,21 @@
+# IDE配置
+.idea/
+.vscode/
+
+# 编译输出目录
+target/
+
+# 本地构建与环境配置文件
+docker-compose.override.yml
+setup.sh
+.env
+
+# AGENT相关
+prompts/
+AGENTS.md
+.ai-workspace/
+
+# 静态测试页
+*.html
+*.css
+*.js

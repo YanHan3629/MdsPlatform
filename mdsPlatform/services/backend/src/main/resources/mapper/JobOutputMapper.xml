@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.fwdrobo.sirius.mapper.JobOutputMapper">
+
+    <delete id="deleteByJobId">
+        DELETE FROM public.job_output
+        WHERE job_id = #{jobId}
+    </delete>
+
+    <insert id="insert">
+        INSERT INTO public.job_output
+            (job_id, output_repo_id, params)
+        VALUES
+            (#{jobId},
+             #{repoId},
+             CAST(#{paramsJson} AS jsonb))
+    </insert>
+
+    <select id="findByJobId" resultType="java.lang.String">
+        SELECT output::text
+        FROM public.job_output
+        WHERE job_id = #{jobId}
+    </select>
+
+</mapper>

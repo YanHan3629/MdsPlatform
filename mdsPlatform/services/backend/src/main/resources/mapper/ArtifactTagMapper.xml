@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.fwdrobo.sirius.mapper.ArtifactTagMapper">
+
+    <resultMap id="ArtifactTagMap" type="com.fwdrobo.sirius.entity.artifact.ArtifactTag">
+        <id column="repo_id" property="repoId" javaType="java.util.UUID"/>
+        <id column="tag_name" property="tagName"/>
+        <result column="commit_id" property="commitId" javaType="java.util.UUID"/>
+        <result column="created_by" property="createdBy" javaType="java.util.UUID"/>
+        <result column="created_at" property="createdAt" javaType="java.time.OffsetDateTime"/>
+        <result column="updated_at" property="updatedAt" javaType="java.time.OffsetDateTime"/>
+    </resultMap>
+
+    <select id="selectByRepoAndTag" resultMap="ArtifactTagMap">
+        SELECT repo_id, tag_name, commit_id, created_by, created_at, updated_at
+        FROM public.artifact_tag
+        WHERE repo_id = #{repoId}
+          AND tag_name = #{tagName}
+    </select>
+
+    <select id="selectByRepoId" resultMap="ArtifactTagMap">
+        SELECT repo_id, tag_name, commit_id, created_by, created_at, updated_at
+        FROM public.artifact_tag
+        WHERE repo_id = #{repoId}
+        ORDER BY tag_name ASC
+    </select>
+
+</mapper>

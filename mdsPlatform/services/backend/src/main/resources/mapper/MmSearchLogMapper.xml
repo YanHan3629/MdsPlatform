@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.fwdrobo.sirius.mapper.MmSearchLogMapper">
+    <insert id="insert" parameterType="com.fwdrobo.sirius.entity.mm.MmSearchLog">
+        INSERT INTO public.mm_search_log (
+            search_log_id, dataset_id, dataset_version_id, index_version_id, query_type,
+            query_text, query_asset_id, query_temp_file_key, top_k, result_count,
+            latency_ms, request_user_id, meta
+        ) VALUES (
+            #{searchLogId}, #{datasetId}, #{datasetVersionId}, #{indexVersionId}, #{queryType},
+            #{queryText}, #{queryAssetId}, #{queryTempFileKey}, #{topK}, #{resultCount},
+            #{latencyMs}, #{requestUserId}, #{meta, typeHandler=com.fwdrobo.sirius.handler.JsonbTypeHandler}
+        )
+    </insert>
+</mapper>

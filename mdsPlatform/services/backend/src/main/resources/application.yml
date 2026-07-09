@@ -1,0 +1,98 @@
+server:
+  port: 8888
+  compression:
+    enabled: true
+    mime-types: application/json,application/xml,text/plain,text/html,text/xml
+    min-response-size: 2048   # 小于 2KB 不压缩，避免浪费 CPU
+
+spring:
+  application:
+    name: sirius-backend
+  datasource:
+    url: jdbc:postgresql://db:5432/siriusdb
+    username: sirius
+    password: siriuspwd
+    driver-class-name: org.postgresql.Driver
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    baseline-version: 1
+    baseline-description: existing-schema
+    validate-on-migrate: true
+    clean-disabled: true
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: ${SPRING_SERVLET_MULTIPART_MAX_FILE_SIZE:5GB}
+      max-request-size: ${SPRING_SERVLET_MULTIPART_MAX_REQUEST_SIZE:5GB}
+
+minio:
+  endpoint: ${MINIO_ENDPOINT:http://minio:9000}
+  publicEndpoint: ${MINIO_PUBLIC_ENDPOINT:${MINIO_ENDPOINT:http://minio:9000}}
+  accessKey: ${MINIO_ACCESS_KEY:minioadmin}
+  secretKey: ${MINIO_SECRET_KEY:minioadmin123}
+  presignAccessKey: ${MINIO_PRESIGN_ACCESS_KEY}
+  presignSecretKey: ${MINIO_PRESIGN_SECRET_KEY}
+  bucket: ${MINIO_BUCKET:siriusdb-files}
+
+mybatis:
+  mapper-locations: classpath:/mapper/*.xml
+  type-aliases-package: com.fwdrobo.sirius.entity
+  type-handlers-package: com.fwdrobo.sirius.handler
+  configuration:
+    map-underscore-to-camel-case: true
+
+app:
+  jwt:
+    # 生产环境建议放到环境变量/密钥管理
+    # TODO: 生产环境需更换为随机且保密的密钥，并配置到环境变量或密钥管理系统中
+    secret: "MF75WaQGPq504qPRAZKOFyX2qyJ01jeLaVXGL4YORIA="
+    access-expiration-seconds: 7200    # 30 minutes
+    refresh-expiration-seconds: 1296000 # 15 days
+  auth-cache:
+    user-ttl-seconds: 900
+  docker:
+    binary: docker
+    cmdTimeoutSeconds: 30
+    eventsReconnectBackoffMs: 2000
+    labelApp: sirius-backend
+    host: http://host.docker.internal:8888
+    log-streamer:
+      max-part-size: 5m       # 日志分段上传大小，默认 5m（生产环境可设置 10m 或 25m）
+      flush-interval-ms: 60000  # 强制刷新间隔（毫秒），默认 1 分钟）
+    servers:
+      LOCAL: "unix:///var/run/docker.sock"
+      GPU_01: "unix:///var/run/docker.sock"
+
+  reconcile:
+    startup: true
+    enabled: true
+    startupDelayMs: 5000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: shutdown
+  endpoint:
+    shutdown:
+      enabled: true
+
+springdoc:
+  swagger-ui:
+    tags-sorter: alpha
+    operations-sorter: method
+
+mm:
+  search:
+    base-url: ${MM_SEARCH_BASE_URL:http://localhost:18080}
+    preview-expire-seconds: ${MM_PREVIEW_EXPIRE_SECONDS:600}
+
+  index-builder:
+    image: ${MM_INDEX_BUILDER_IMAGE:sirius-mm-index-builder:latest}
+    cmd: ${MM_INDEX_BUILDER_CMD:python /app/build_index.py}

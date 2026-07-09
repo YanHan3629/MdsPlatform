@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.fwdrobo.sirius.mapper.ArtifactCommitMapper">
+
+    <!-- ArtifactCommitService -->
+    <resultMap id="ArtifactCommitMap" type="com.fwdrobo.sirius.entity.artifact.ArtifactCommit">
+        <id column="commit_id" property="commitId" javaType="java.util.UUID"/>
+        <result column="repo_id" property="repoId" javaType="java.util.UUID"/>
+        <result column="commit_status" property="commitStatus"/>
+        <result column="commit_source" property="commitSource"/>
+        <result column="created_by" property="createdBy" javaType="java.util.UUID"/>
+        <result column="published_by" property="publishedBy" javaType="java.util.UUID"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="published_at" property="publishedAt"/>
+        <result column="comment" property="comment"/>
+        <result column="meta" property="meta" typeHandler="com.fwdrobo.sirius.handler.JsonbTypeHandler"/>
+    </resultMap>
+
+    <insert id="insert" parameterType="com.fwdrobo.sirius.entity.artifact.ArtifactCommit">
+        INSERT INTO public.artifact_commit (commit_id, repo_id, commit_status, commit_source, created_by, comment, meta)
+        VALUES (
+            #{commitId},
+            #{repoId},
+            #{commitStatus},
+            #{commitSource},
+            #{createdBy},
+            #{comment},
+            #{meta, typeHandler=com.fwdrobo.sirius.handler.JsonbTypeHandler}
+        )
+    </insert>
+
+    <select id="selectByRepoId" resultMap="ArtifactCommitMap">
+        SELECT commit_id, repo_id, commit_status, commit_source, created_by, published_by, created_at, published_at, comment, meta
+        FROM public.artifact_commit
+        WHERE repo_id = #{repoId}
+        ORDER BY created_at DESC
+    </select>
+
+    <select id="selectByRepoIdPaged" resultMap="ArtifactCommitMap">
+        SELECT commit_id, repo_id, commit_status, commit_source, created_by, published_by, created_at, published_at, comment, meta
+        FROM public.artifact_commit
+        WHERE repo_id = #{query.repoId}
+        <if test="query.commitStatusOrNull != null">
+            AND commit_status = #{query.commitStatusOrNull}
+        </if>
+        <if test="query.commitSourceOrNull != null">
+            AND commit_source = #{query.commitSourceOrNull}
+        </if>
+        ORDER BY ${query.sortByOrDefault} ${query.sortOrderOrDefault}
+        LIMIT #{query.limit} OFFSET #{query.offset}
+    </select>
+
+    <select id="countByRepoId" resultType="long">
+        SELECT COUNT(*)
+        FROM public.artifact_commit
+        WHERE repo_id = #{query.repoId}
+        <if test="query.commitStatusOrNull != null">
+            AND commit_status = #{query.commitStatusOrNull}
+        </if>
+        <if test="query.commitSourceOrNull != null">
+            AND commit_source = #{query.commitSourceOrNull}
+        </if>
+    </select>
+
+    <select id="selectCommitIdsByRepoId" resultType="java.util.UUID">
+        SELECT commit_id
+        FROM public.artifact_commit
+        WHERE repo_id = #{repoId}
+        ORDER BY created_at DESC
+    </select>
+
+    <select id="selectByRepoAndCommit" resultMap="ArtifactCommitMap">
+        SELECT commit_id, repo_id, commit_status, commit_source, created_by, published_by, created_at, published_at, comment, meta
+        FROM public.artifact_commit
+        WHERE repo_id = #{repoId}
+          AND commit_id = #{commitId}
+    </select>
+
+    <select id="selectDraftByRepoId" resultMap="ArtifactCommitMap">
+        SELECT commit_id, repo_id, commit_status, commit_source, created_by, published_by, created_at, published_at, comment, meta
+        FROM public.artifact_commit
+        WHERE repo_id = #{repoId}
+          AND commit_status = 'DRAFT'
+        ORDER BY created_at DESC
+        LIMIT 1
+    </select>
+
+    <select id="selectLatestPublishedByRepoId" resultMap="ArtifactCommitMap">
+        SELECT commit_id, repo_id, commit_status, commit_source, created_by, published_by, created_at, published_at, comment, meta
+        FROM public.artifact_commit
+        WHERE repo_id = #{repoId}
+          AND commit_status = 'PUBLISHED'
+        ORDER BY published_at DESC, created_at DESC
+        LIMIT 1
+    </select>
+
+    <update id="publishDraft">
+        UPDATE public.artifact_commit
+        SET commit_status = 'PUBLISHED',
+            published_at = now(),
+            published_by = #{publishedBy},
+            comment = #{comment}
+        WHERE repo_id = #{repoId}
+          AND commit_id = #{commitId}
+          AND commit_status = 'DRAFT'
+    </update>
+
+    <!-- FileService -->
+    <select id="selectStatusByRepoAndId" resultType="java.lang.String">
+        SELECT commit_status
+        FROM public.artifact_commit
+        WHERE repo_id = #{repoId}
+          AND commit_id = #{commitId}
+    </select>
+
+    <!-- ManifestService -->
+    <update id="updateStatus">
+        UPDATE public.artifact_commit
+        SET commit_status = #{status}
+        WHERE commit_id = #{commitId}
+    </update>
+
+    <!-- 统计指定 repo 下指定状态的 commit 数量 -->
+    <select id="countByRepoIdAndStatus" resultType="long">
+        SELECT COUNT(*)
+        FROM public.artifact_commit
+        WHERE repo_id = #{repoId}
+        <if test="status != null">
+            AND commit_status = #{status}
+        </if>
+    </select>
+</mapper>

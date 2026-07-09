@@ -1,0 +1,152 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: siriusdb
+      POSTGRES_USER: sirius
+      POSTGRES_PASSWORD: siriuspwd
+    volumes:
+      - ../../../data/pgdata:/var/lib/postgresql/data
+    # 如果你不需要宿主机直接连 DB，建议删掉 ports，避免 5432 冲突
+    ports:
+      - "15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sirius -d siriusdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    volumes:
+      - ../../../data/minio_data:/data
+    ports:
+      - "19000:9000"   # S3 API（需要宿主机访问才保留）
+      - "19001:9001"   # Web Console
+
+  minio-init:
+    image: minio/mc:latest
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_started
+    volumes:
+      - ./src/main/resources/script/minio:/scripts:ro
+
+    environment:
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+      MINIO_BUCKET: ${MINIO_BUCKET:-siriusdb-files}
+      MINIO_PRESIGN_ACCESS_KEY: ${MINIO_PRESIGN_ACCESS_KEY:-sirius-presign}
+      MINIO_PRESIGN_SECRET_KEY: ${MINIO_PRESIGN_SECRET_KEY:-12345678}
+      MINIO_POLICY_NAME: sirius-presign-readonly-policy
+    entrypoint: ["/bin/sh", "/scripts/init-minio.sh"]
+
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"
+    networks:
+      - shared-net
+
+  search-service:
+    build:
+      context: ../search-service
+    image: sirius-mm-search-service:latest
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18080/healthz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "${MM_SEARCH_HOST_PORT:-18080}:18080"
+    environment:
+      BACKEND_BASE_URL: http://sirius:8888
+      BACKEND_BEARER_TOKEN: ${BACKEND_BEARER_TOKEN:-}
+      MODEL_PATH: ${MM_SEARCH_MODEL_PATH:-/app/app/clip_model_chinese}
+      LOCAL_CACHE_DIR: /tmp/mm-search-cache
+    networks:
+      - default
+      - shared-net
+
+  index-builder-prewarm:
+    build:
+      context: ../index-builder
+    image: sirius-mm-index-builder:latest
+    restart: "no"
+    command: ["python", "-V"]
+    networks:
+      - default
+      - shared-net
+
+
+
+  sirius:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+      search-service:
+        condition: service_healthy
+      index-builder-prewarm:
+        condition: service_completed_successfully
+
+    ports:
+      - "8888:8888"
+    volumes:
+      - ../../../data/log/sirius:/var/log/sirius   # 宿主机:容器
+      - ../../../dataset:/data/multimodal-dataset:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - default
+      - shared-net
+
+
+    environment:
+      LOG_PATH: /var/log/sirius
+      # ---- PostgreSQL（容器内用 db 作为 host）----
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/siriusdb
+      SPRING_DATASOURCE_USERNAME: sirius
+      SPRING_DATASOURCE_PASSWORD: siriuspwd
+
+      # ---- MinIO（容器内用 minio 作为 host）----
+      MINIO_ENDPOINT: http://minio:9000
+      # ---- MinIO 预签名 URL 对外地址 MinIO服务器IP（前端可访问）----
+      MINIO_PUBLIC_ENDPOINT: http://100.64.135.60:19000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+      MINIO_PRESIGN_ACCESS_KEY: sirius-presign
+      MINIO_PRESIGN_SECRET_KEY: 12345678
+      MINIO_BUCKET: siriusdb-files
+
+      MM_SEARCH_BASE_URL: http://search-service:18080
+      MM_INDEX_BUILDER_CMD: "MODEL_PATH=/app/clip_model_chinese python /app/build_index.py"
+
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      DATA_SPACE_VAL2017_DIR: /data/multimodal-dataset/val2017
+      DATA_SPACE_VAL2017_CAPTIONS: /data/multimodal-dataset/captions_val2017.json
+      SSH_HOST: 192.168.222.222
+
+
+volumes:
+  minio_data:
+
+networks:
+  shared-net:
+    external: true

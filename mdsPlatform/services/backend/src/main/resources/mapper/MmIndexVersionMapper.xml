@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.fwdrobo.sirius.mapper.MmIndexVersionMapper">
+    <resultMap id="MmIndexVersionMap" type="com.fwdrobo.sirius.entity.mm.MmIndexVersion">
+        <id column="index_version_id" property="indexVersionId" javaType="java.util.UUID"/>
+        <result column="dataset_id" property="datasetId" javaType="java.util.UUID"/>
+        <result column="dataset_version_id" property="datasetVersionId" javaType="java.util.UUID"/>
+        <result column="index_repo_id" property="indexRepoId" javaType="java.util.UUID"/>
+        <result column="index_commit_id" property="indexCommitId" javaType="java.util.UUID"/>
+        <result column="index_status" property="indexStatus"/>
+        <result column="index_type" property="indexType"/>
+        <result column="model_name" property="modelName"/>
+        <result column="model_version" property="modelVersion"/>
+        <result column="embedding_dim" property="embeddingDim"/>
+        <result column="image_index_path" property="imageIndexPath"/>
+        <result column="text_index_path" property="textIndexPath"/>
+        <result column="metadata_path" property="metadataPath"/>
+        <result column="manifest_path" property="manifestPath"/>
+        <result column="image_count" property="imageCount"/>
+        <result column="text_count" property="textCount"/>
+        <result column="build_job_id" property="buildJobId" javaType="java.util.UUID"/>
+        <result column="build_run_id" property="buildRunId" javaType="java.util.UUID"/>
+        <result column="error_message" property="errorMessage"/>
+        <result column="meta" property="meta" typeHandler="com.fwdrobo.sirius.handler.JsonbTypeHandler"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="updated_at" property="updatedAt"/>
+        <result column="ready_at" property="readyAt"/>
+    </resultMap>
+    <insert id="insert" parameterType="com.fwdrobo.sirius.entity.mm.MmIndexVersion">
+        INSERT INTO public.mm_index_version (
+            index_version_id, dataset_id, dataset_version_id, index_repo_id, index_commit_id,
+            index_status, index_type, model_name, model_version, embedding_dim,
+            image_index_path, text_index_path, metadata_path, manifest_path,
+            image_count, text_count, build_job_id, build_run_id, error_message, meta
+        ) VALUES (
+            #{indexVersionId}, #{datasetId}, #{datasetVersionId}, #{indexRepoId}, #{indexCommitId},
+            #{indexStatus}, #{indexType}, #{modelName}, #{modelVersion}, #{embeddingDim},
+            #{imageIndexPath}, #{textIndexPath}, #{metadataPath}, #{manifestPath},
+            COALESCE(#{imageCount}, 0), COALESCE(#{textCount}, 0), #{buildJobId}, #{buildRunId}, #{errorMessage},
+            #{meta, typeHandler=com.fwdrobo.sirius.handler.JsonbTypeHandler}
+        )
+    </insert>
+    <update id="update" parameterType="com.fwdrobo.sirius.entity.mm.MmIndexVersion">
+        UPDATE public.mm_index_version
+        SET dataset_id = COALESCE(#{datasetId}, dataset_id),
+            dataset_version_id = COALESCE(#{datasetVersionId}, dataset_version_id),
+            index_repo_id = COALESCE(#{indexRepoId}, index_repo_id),
+            index_commit_id = COALESCE(#{indexCommitId}, index_commit_id),
+            index_status = COALESCE(#{indexStatus}, index_status),
+            index_type = COALESCE(#{indexType}, index_type),
+            model_name = COALESCE(#{modelName}, model_name),
+            model_version = COALESCE(#{modelVersion}, model_version),
+            embedding_dim = COALESCE(#{embeddingDim}, embedding_dim),
+            image_index_path = COALESCE(#{imageIndexPath}, image_index_path),
+            text_index_path = COALESCE(#{textIndexPath}, text_index_path),
+            metadata_path = COALESCE(#{metadataPath}, metadata_path),
+            manifest_path = COALESCE(#{manifestPath}, manifest_path),
+            image_count = COALESCE(#{imageCount}, image_count),
+            text_count = COALESCE(#{textCount}, text_count),
+            build_job_id = COALESCE(#{buildJobId}, build_job_id),
+            build_run_id = COALESCE(#{buildRunId}, build_run_id),
+            error_message = COALESCE(#{errorMessage}, error_message),
+            meta = COALESCE(#{meta, typeHandler=com.fwdrobo.sirius.handler.JsonbTypeHandler}, meta),
+            ready_at = COALESCE(#{readyAt}, ready_at)
+        WHERE index_version_id = #{indexVersionId}
+    </update>
+    <select id="selectById" resultMap="MmIndexVersionMap">SELECT * FROM public.mm_index_version WHERE index_version_id = #{indexVersionId}</select>
+    <select id="selectLatestByDatasetVersionId" resultMap="MmIndexVersionMap">SELECT * FROM public.mm_index_version WHERE dataset_version_id = #{datasetVersionId} ORDER BY created_at DESC LIMIT 1</select>
+    <select id="selectByDatasetVersionId" resultMap="MmIndexVersionMap">SELECT * FROM public.mm_index_version WHERE dataset_version_id = #{datasetVersionId} ORDER BY created_at DESC</select>
+    <update id="markReady">
+        UPDATE public.mm_index_version
+        SET index_status = 'READY', index_commit_id = #{indexCommitId}, image_index_path = #{imageIndexPath},
+            text_index_path = #{textIndexPath}, metadata_path = #{metadataPath}, manifest_path = #{manifestPath},
+            embedding_dim = #{embeddingDim}, image_count = #{imageCount}, text_count = #{textCount},
+            error_message = NULL, ready_at = now()
+        WHERE index_version_id = #{indexVersionId}
+    </update>
+    <update id="markFailed">UPDATE public.mm_index_version SET index_status = 'FAILED', error_message = #{errorMessage} WHERE index_version_id = #{indexVersionId}</update>
+    <update id="markDeprecated">UPDATE public.mm_index_version SET index_status = 'DEPRECATED' WHERE index_version_id = #{indexVersionId}</update>
+</mapper>

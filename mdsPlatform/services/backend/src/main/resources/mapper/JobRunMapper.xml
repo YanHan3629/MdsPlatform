@@ -1,0 +1,307 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.fwdrobo.sirius.mapper.JobRunMapper">
+
+    <resultMap id="JobRunResultMap" type="com.fwdrobo.sirius.entity.job.JobRun">
+        <result column="run_id" property="runId"/>
+        <result column="job_id" property="jobId"/>
+        <result column="org_id" property="orgId"/>
+        <result column="run_status" property="runStatus" javaType="com.fwdrobo.sirius.entity.job.RunStatus"/>
+        <result column="started_at" property="startedAt"/>
+        <result column="finished_at" property="finishedAt"/>
+        <result column="error_message" property="errorMessage"/>
+        <result column="logs_uri" property="logsUri"/>
+        <result column="metrics" property="metrics"
+                jdbcType="OTHER"
+                typeHandler="com.fwdrobo.sirius.handler.JsonbTypeHandler"/>
+        <result column="created_by" property="createdBy"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="reserved_gpu" property="reservedGpu"/>
+        <result column="reserved_cpu" property="reservedCpu" jdbcType="NUMERIC"/>
+        <result column="reserved_memory_mb" property="reservedMemoryMb"/>
+        <result column="runtime_quota_released" property="runtimeQuotaReleased"/>
+        <result column="container_id" property="containerId"/>
+        <result column="container_name" property="containerName"/>
+        <result column="docker_host" property="dockerHost"/>
+        <result column="container_status" property="containerStatus"/>
+        <result column="docker_status" property="dockerStatus"/>
+        <result column="exit_code" property="exitCode"/>
+        <result column="last_seen_at" property="lastSeenAt"/>
+    </resultMap>
+
+    <sql id="JobRunColumns">
+        run_id, job_id, org_id, run_status, started_at, finished_at, error_message, logs_uri, metrics,
+              created_by, created_at, reserved_gpu, reserved_cpu, reserved_memory_mb, runtime_quota_released,
+              container_id, container_name, docker_host, container_status, docker_status, exit_code, last_seen_at
+    </sql>
+
+    <select id="insertRun" resultType="java.util.UUID">
+        INSERT INTO public.job_run
+            (run_id, run_status, metrics, created_by)
+        VALUES (COALESCE(#{runId}::uuid, gen_random_uuid()),
+                'QUEUED',
+                CAST(#{metricsJson} AS jsonb),
+                #{createdBy}) RETURNING run_id
+    </select>
+
+    <!-- INSERT -->
+    <insert id="insert" parameterType="com.fwdrobo.sirius.entity.job.JobRun">
+        INSERT INTO job_run (
+        <include refid="JobRunColumns"/>
+        ) VALUES (
+        #{runId},
+        #{jobId},
+        #{orgId},
+        CAST(#{runStatus} AS run_status),
+        #{startedAt},
+        #{finishedAt},
+        #{errorMessage},
+        #{logsUri},
+        #{metrics, jdbcType=OTHER, typeHandler=com.fwdrobo.sirius.handler.JsonbTypeHandler},
+        #{createdBy},
+        #{createdAt},
+        #{reservedGpu},
+        #{reservedCpu},
+        #{reservedMemoryMb},
+        #{runtimeQuotaReleased},
+        #{containerId},
+        #{containerName},
+        #{dockerHost},
+        #{containerStatus},
+        #{dockerStatus},
+        #{exitCode},
+        #{lastSeenAt}
+        )
+    </insert>
+
+    <!-- SELECT by run_id -->
+    <select id="selectByRunId" resultMap="JobRunResultMap">
+        SELECT
+        <include refid="JobRunColumns"/>
+        FROM job_run
+        WHERE run_id = #{runId}
+    </select>
+
+    <!-- SELECT latest runs by job_id -->
+    <select id="selectByJobId" resultMap="JobRunResultMap">
+        SELECT
+        <include refid="JobRunColumns"/>
+        FROM job_run
+        WHERE job_id = #{jobId}
+        ORDER BY created_at DESC
+        LIMIT #{limit}
+        OFFSET #{offset}
+    </select>
+
+    <!-- UPDATE (动态更新：只更新非 null 字段) -->
+    <update id="update" parameterType="com.fwdrobo.sirius.entity.job.JobRun">
+        UPDATE job_run
+        <set>
+            <if test="jobId != null">job_id = #{jobId},</if>
+            <if test="runId != null">run_id = #{runId},</if>
+            <if test="runStatus != null">run_status = CAST(#{runStatus} AS run_status),</if>
+            <if test="startedAt != null">started_at = #{startedAt},</if>
+            <if test="finishedAt != null">finished_at = #{finishedAt},</if>
+            <if test="errorMessage != null">error_message = #{errorMessage},</if>
+            <if test="logsUri != null">logs_uri = #{logsUri},</if>
+            <if test="metrics != null">
+                metrics = #{metrics, jdbcType=OTHER, typeHandler=com.fwdrobo.sirius.handler.JsonbTypeHandler},
+            </if>
+            <if test="reservedGpu != null">reserved_gpu = #{reservedGpu},</if>
+            <if test="reservedCpu != null">reserved_cpu = #{reservedCpu},</if>
+            <if test="reservedMemoryMb != null">reserved_memory_mb = #{reservedMemoryMb},</if>
+            <if test="runtimeQuotaReleased != null">runtime_quota_released = #{runtimeQuotaReleased},</if>
+            <if test="containerId != null">container_id = #{containerId},</if>
+            <if test="containerName != null">container_name = #{containerName},</if>
+            <if test="dockerHost != null">docker_host = #{dockerHost},</if>
+            <if test="containerStatus != null">container_status = #{containerStatus},</if>
+            <if test="dockerStatus != null">docker_status = #{dockerStatus},</if>
+            <if test="exitCode != null">exit_code = #{exitCode},</if>
+            <if test="lastSeenAt != null">last_seen_at = #{lastSeenAt},</if>
+
+        </set>
+        WHERE run_id = #{runId}
+    </update>
+
+    <!-- 常见：只更新状态/时间/错误（更安全，避免把别的字段覆盖掉） -->
+    <update id="updateStatusAndTimes">
+        UPDATE job_run
+        <set>
+            <if test="runStatus != null">run_status = CAST(#{runStatus} AS run_status),</if>
+            <if test="startedAt != null">started_at = #{startedAt},</if>
+            <if test="finishedAt != null">finished_at = #{finishedAt},</if>
+            <if test="exitCode != null">exit_code = #{exitCode},</if>
+            <if test="errorMessage != null">error_message = #{errorMessage},</if>
+            <if test="containerStatus != null">container_status = #{containerStatus},</if>
+            <if test="dockerStatus != null">docker_status = #{dockerStatus},</if>
+            <if test="lastSeenAt != null">last_seen_at = #{lastSeenAt}</if>
+        </set>
+        WHERE run_id = #{runId}
+    </update>
+
+    <select id="findByContainerId" resultMap="JobRunResultMap" parameterType="string">
+        select
+        <include refid="JobRunColumns"/>
+        from job_run
+        where container_id = #{containerId}
+        limit 1
+    </select>
+
+    <select id="findByStatusIn" resultMap="JobRunResultMap" parameterType="map">
+        select
+        <include refid="JobRunColumns"/>
+        from job_run
+        where container_status in
+        <foreach collection="statuses" item="st" open="(" separator="," close=")">
+            #{st}
+        </foreach>
+        order by finished_at desc
+    </select>
+
+    <select id="findAll" resultMap="JobRunResultMap">
+        select
+        <include refid="JobRunColumns"/>
+        from job_run
+        order by created_at desc
+    </select>
+    <select id="findRunsByJobId" resultMap="JobRunResultMap">
+        select
+        <include refid="JobRunColumns"/>
+        from job_run where job_id = #{jobId, jdbcType=OTHER}
+        order by created_at desc
+    </select>
+
+    <update id="updateContainerByRunId">
+        update job_run
+        set container_id     = #{containerId},
+            container_name   = #{containerName},
+            run_status       = CAST(#{runStatus} AS run_status),
+            container_status = #{containerStatus},
+            docker_status    = #{dockerStatus},
+            exit_code        = #{exitCode},
+            started_at       = #{startedAt},
+            finished_at      = #{finishedAt},
+            last_seen_at     = #{lastSeenAt},
+            error_message    = #{errorMessage}
+        where run_id = #{runId, jdbcType=OTHER}
+    </update>
+
+    <update id="markRuntimeQuotaReleased">
+        UPDATE job_run
+        SET runtime_quota_released = 1
+        WHERE run_id = #{runId}
+          AND runtime_quota_released = 0
+    </update>
+
+    <select id="selectExpiredRuns" resultMap="JobRunResultMap">
+        select
+        <include refid="JobRunColumns"/>
+        from job_run
+        WHERE (finished_at &lt; #{cutoff}
+        OR last_seen_at &lt; #{cutoff})
+        AND container_status != 'REMOVED'
+        AND (container_id IS NOT NULL OR container_name IS NOT NULL)
+        ORDER BY created_at ASC
+    </select>
+
+    <select id="countByFilters" resultType="long">
+        SELECT COUNT(1) FROM job_run
+        <where>
+            job_id = #{jobId}::uuid
+            <if test="dockerStatus != null and dockerStatus != ''">
+                AND docker_status = #{dockerStatus}
+            </if>
+            <if test="containerStatus != null">
+                AND container_status = CAST(#{containerStatus} AS container_status)
+            </if>
+            <if test="containerId != null and containerId != ''">
+                AND container_id = #{containerId}
+            </if>
+            <if test="containerName != null and containerName != ''">
+                AND container_name = #{containerName}
+            </if>
+        </where>
+    </select>
+
+
+    <select id="selectPageByFilters" resultMap="JobRunResultMap">
+        SELECT
+        <include refid="JobRunColumns"/>
+        FROM job_run
+        <where>
+            job_id = #{jobId}::uuid
+            <if test="dockerStatus != null and dockerStatus != ''">
+                AND docker_status = #{dockerStatus}
+            </if>
+            <if test="containerStatus != null">
+                AND container_status = CAST(#{containerStatus} AS container_status)
+            </if>
+            <if test="containerId != null and containerId != ''">
+                AND container_id = #{containerId}
+            </if>
+            <if test="containerName != null and containerName != ''">
+                AND container_name = #{containerName}
+            </if>
+        </where>
+        ORDER BY created_at DESC
+        LIMIT #{size} OFFSET #{offset}
+    </select>
+
+    <!-- 查询单个 Job 的最近一次运行记录 -->
+    <select id="selectLatestRunByJobId" resultMap="JobRunResultMap">
+        SELECT DISTINCT ON (job_id)
+            run_id,
+            job_id,
+            run_status,
+            started_at,
+            finished_at,
+            error_message,
+            logs_uri,
+            metrics,
+            created_by,
+            created_at,
+            container_id,
+            container_name,
+            docker_host,
+            container_status,
+            docker_status,
+            exit_code,
+            last_seen_at
+        FROM job_run
+        WHERE job_id = #{jobId}
+        ORDER BY job_id, last_seen_at DESC NULLS LAST, created_at DESC
+        LIMIT 1
+    </select>
+
+    <!-- 批量查询指定 Job 的最近一次运行记录 -->
+    <select id="selectLatestRunsByJobIds" resultMap="JobRunResultMap">
+        SELECT DISTINCT ON (job_id)
+            run_id,
+            job_id,
+            run_status,
+            started_at,
+            finished_at,
+            error_message,
+            logs_uri,
+            metrics,
+            created_by,
+            created_at,
+            container_id,
+            container_name,
+            docker_host,
+            container_status,
+            docker_status,
+            exit_code,
+            last_seen_at
+        FROM job_run
+        WHERE job_id IN
+        <foreach collection="jobIds" item="jobId" open="(" separator="," close=")">
+            #{jobId, jdbcType=OTHER}
+        </foreach>
+        ORDER BY job_id, last_seen_at DESC NULLS LAST, created_at DESC
+    </select>
+
+</mapper>

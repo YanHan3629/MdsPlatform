@@ -1,0 +1,12 @@
+﻿{
+    "indexVersionId":  "441f6f1c-8540-41bd-b2a4-c49454315619",
+    "datasetId":  "d7d2ab41-bd09-4ccc-a70f-b44135154294",
+    "datasetVersionId":  "ba96a198-1b16-4135-9590-b9cc283009fd",
+    "indexStatus":  "READY",
+    "indexType":  "IMAGE_TEXT",
+    "modelName":  "clip-chinese-full",
+    "buildJobId":  "9cddf18d-6e56-43ac-bbba-430c582d2c7b",
+    "buildRunId":  "86f19e40-c034-4baf-a0e0-8c82896a80c7",
+    "readyAt":  "2026-06-13T10:21:02.204917Z",
+    "errorMessage":  null
+}

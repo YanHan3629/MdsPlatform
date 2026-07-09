@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.fwdrobo.sirius.mapper.PermissionMapper">
+
+    <resultMap id="PermissionMap" type="com.fwdrobo.sirius.entity.permission.Permission">
+        <id column="per_id" property="perId" javaType="java.util.UUID"/>
+        <result column="per_code" property="perCode"/>
+        <result column="per_name" property="perName"/>
+        <result column="category" property="category"/>
+        <result column="description" property="description"/>
+        <result column="is_builtin" property="isBuiltin"/>
+        <result column="parent_id" property="parentId" javaType="java.util.UUID"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="created_by" property="createdBy" javaType="java.util.UUID"/>
+        <result column="updated_at" property="updatedAt"/>
+        <result column="updated_by" property="updatedBy" javaType="java.util.UUID"/>
+    </resultMap>
+
+    <sql id="BaseColumns">
+        per_id, per_code, per_name, category, description, is_builtin, parent_id, created_at, created_by, updated_at, updated_by
+    </sql>
+
+    <select id="selectById" resultMap="PermissionMap">
+        SELECT
+        <include refid="BaseColumns"/>
+        FROM permission
+        WHERE per_id = #{perId}
+    </select>
+
+    <select id="selectByCode" resultMap="PermissionMap">
+        SELECT
+        <include refid="BaseColumns"/>
+        FROM permission
+        WHERE per_code = #{perCode} LIMIT 1
+    </select>
+
+    <select id="selectAll" resultMap="PermissionMap">
+        SELECT
+        <include refid="BaseColumns"/>
+        FROM permission
+        <where>
+            <if test="category != null and category != ''">
+                category = #{category}
+            </if>
+        </where>
+        ORDER BY category, per_code
+    </select>
+
+    <select id="selectByParentId" resultMap="PermissionMap">
+        SELECT
+        <include refid="BaseColumns"/>
+        FROM permission
+        WHERE parent_id = #{parentId}
+        ORDER BY per_code
+    </select>
+
+    <select id="insert" resultType="java.util.UUID">
+        INSERT INTO permission (per_id,
+                                per_code,
+                                per_name,
+                                category,
+                                description,
+                                is_builtin,
+                                parent_id,
+                                created_at,
+                                created_by)
+        VALUES (COALESCE(#{perId}, gen_random_uuid()),
+                #{perCode},
+                #{perName},
+                #{category},
+                #{description},
+                COALESCE(#{isBuiltin}, TRUE),
+                #{parentId},
+                #{createdAt},
+                #{createdBy})
+
+        RETURNING per_id
+    </select>
+
+    <update id="update">
+        UPDATE permission
+        SET per_code    = COALESCE(#{perCode}, per_code),
+            per_name    = COALESCE(#{perName}, per_name),
+            category    = COALESCE(#{category}, category),
+            description = COALESCE(#{description}, description),
+            is_builtin  = COALESCE(#{isBuiltin}, is_builtin),
+            parent_id   = COALESCE(#{parentId}, parent_id),
+            updated_at   = #{updatedAt},
+            updated_by   = #{updatedBy}
+        WHERE per_id = #{perId}
+    </update>
+
+    <delete id="deleteById">
+        DELETE
+        FROM permission
+        WHERE per_id = #{perId}
+    </delete>
+
+    <select id="selectByIds" resultMap="PermissionMap">
+        SELECT
+        <include refid="BaseColumns"/>
+        FROM permission
+        WHERE per_id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </select>
+
+</mapper>

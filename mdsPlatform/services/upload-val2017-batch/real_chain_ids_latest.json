@@ -1,0 +1,8 @@
+﻿{
+    "backend":  "http://localhost:8888",
+    "token":  "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZG1pbiIsImlhdCI6MTc4MTM0Mzc2MSwiZXhwIjoxNzgxMzUwOTYxLCJ0b2tlbl90eXBlIjoiQUNDRVNTIiwidG9rZW5fdmVyc2lvbiI6MCwicm9sZSI6WyJTVVBFUl9BRE1JTiJdfQ.RkUXsUhVL1_t_enuf13ZRXhC8At4ZzAh0KMCYSJWQTY",
+    "spaceId":  "1ccd9b05-5937-47e6-9566-b0ac0f4055c0",
+    "datasetId":  "d7d2ab41-bd09-4ccc-a70f-b44135154294",
+    "versionId":  "ba96a198-1b16-4135-9590-b9cc283009fd",
+    "createdAt":  "2026-06-13T16:24:49"
+}

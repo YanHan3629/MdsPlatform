@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.fwdrobo.sirius.mapper.ArtifactFileMapper">
+
+    <resultMap id="AddOrReplaceFileResultMap" type="com.fwdrobo.sirius.entity.file.AddOrReplaceFileResult">
+        <id property="fileId" column="file_id" jdbcType="OTHER"/>
+        <result property="inserted" column="inserted" jdbcType="BOOLEAN"/>
+    </resultMap>
+
+    <resultMap id="FileRespMap" type="com.fwdrobo.sirius.dto.file.FileResp">
+        <id     property="fileId"      column="file_id" jdbcType="OTHER"/>
+        <result property="commitId"    column="commit_id" jdbcType="OTHER"/>
+        <result property="deviceId"    column="device_id" jdbcType="OTHER"/>
+        <result property="logicalPath" column="logical_path"/>
+        <result property="fileKey"     column="file_key"/>
+        <result property="sizeBytes"   column="size_bytes" jdbcType="BIGINT"/>
+        <result property="contentType" column="content_type"/>
+        <result property="createdAt"   column="created_at"/>
+        <result property="updatedAt"   column="updated_at"/>
+    </resultMap>
+
+    <select id="addOrReplaceFile" resultMap="AddOrReplaceFileResultMap">
+        INSERT INTO public.artifact_file (
+            commit_id, logical_path, bucket_name, file_key, content_type, device_id
+        )
+        VALUES (
+            #{commitId}, #{logicalPath}, #{bucketName}, #{fileKey}, #{contentType}, #{deviceId}
+        )
+        ON CONFLICT (commit_id, logical_path)
+        DO UPDATE SET
+            bucket_name = EXCLUDED.bucket_name,
+            file_key = EXCLUDED.file_key,
+            content_type = EXCLUDED.content_type,
+            device_id = EXCLUDED.device_id
+        RETURNING file_id, (created_at = updated_at) AS inserted
+    </select>
+
+    <select id="addOrReplaceFileFull" resultMap="AddOrReplaceFileResultMap">
+        INSERT INTO public.artifact_file (
+        commit_id, logical_path, bucket_name, file_key,
+        minio_version_id, etag, size_bytes, content_type, device_id
+        )
+        VALUES (
+        #{commitId}, #{logicalPath}, #{bucketName}, #{fileKey},
+        #{versionId}, #{etag}, #{size}, #{contentType}, #{deviceId}
+        )
+        ON CONFLICT (commit_id, logical_path)
+        DO UPDATE SET
+        bucket_name = EXCLUDED.bucket_name,
+        file_key = EXCLUDED.file_key,
+        minio_version_id = EXCLUDED.minio_version_id,
+        etag = EXCLUDED.etag,
+        size_bytes = EXCLUDED.size_bytes,
+        content_type = EXCLUDED.content_type,
+        device_id = EXCLUDED.device_id
+        RETURNING file_id, (created_at = updated_at) AS inserted
+    </select>
+
+    <select id="selectFilesByIds" resultMap="FileRespMap">
+        SELECT
+        af.file_id,
+        af.commit_id,
+        af.device_id,
+        af.logical_path,
+        af.file_key,
+        af.size_bytes,
+        af.content_type,
+        af.created_at,
+        af.updated_at
+        FROM public.artifact_file af
+        WHERE af.file_id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id, jdbcType=OTHER}
+        </foreach>
+    </select>
+
+    <delete id="deleteByIdAndCommitId">
+        DELETE FROM public.artifact_file
+        WHERE file_id = #{fileId} AND commit_id = #{commitId}
+    </delete>
+
+    <select id="selectFileKeysByCommitId" resultType="java.lang.String">
+        SELECT file_key
+        FROM public.artifact_file
+        WHERE commit_id = #{commitId}
+        ORDER BY created_at DESC
+    </select>
+
+    <select id="selectByCommitIdAndPath" resultMap="FileRespMap">
+        SELECT
+            af.file_id,
+            af.commit_id,
+            af.device_id,
+            af.logical_path,
+            af.file_key,
+            af.size_bytes,
+            af.content_type,
+            af.created_at,
+            af.updated_at
+        FROM public.artifact_file af
+        WHERE af.commit_id = #{commitId}
+          AND af.logical_path = #{logicalPath}
+    </select>
+
+</mapper>

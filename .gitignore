@@ -1,0 +1,45 @@
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Git
+*.swp
+*.swo
+
+# Java / Maven
+**/target/
+*.class
+*.jar
+*.war
+*.zip
+
+# Python
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.mypy_cache/
+**/.venv/
+**/venv/
+
+# Env / secrets
+.env
+.env.*
+*.pem
+*.key
+*.p12
+
+# Logs
+*.log
+logs/
+
+# Docker volumes (local data)
+data/
+
+# External datasets (not part of the platform code)
+dataset/
+
+# Temporary upload/debug artifacts
+upload_failed_*.json
+upload_summary_*.json

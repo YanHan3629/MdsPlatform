@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.fwdrobo.sirius.mapper.MmDatasetMapper">
+    <resultMap id="MmDatasetMap" type="com.fwdrobo.sirius.entity.mm.MmDataset">
+        <id column="dataset_id" property="datasetId" javaType="java.util.UUID"/>
+        <result column="space_id" property="spaceId" javaType="java.util.UUID"/>
+        <result column="dataset_name" property="datasetName"/>
+        <result column="dataset_type" property="datasetType"/>
+        <result column="modality_type" property="modalityType"/>
+        <result column="description" property="description"/>
+        <result column="raw_repo_id" property="rawRepoId" javaType="java.util.UUID"/>
+        <result column="index_repo_id" property="indexRepoId" javaType="java.util.UUID"/>
+        <result column="owner_user_id" property="ownerUserId" javaType="java.util.UUID"/>
+        <result column="org_id" property="orgId" javaType="java.util.UUID"/>
+        <result column="status" property="status"/>
+        <result column="meta" property="meta" typeHandler="com.fwdrobo.sirius.handler.JsonbTypeHandler"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="updated_at" property="updatedAt"/>
+    </resultMap>
+    <insert id="insert" parameterType="com.fwdrobo.sirius.entity.mm.MmDataset">
+        INSERT INTO public.mm_dataset (
+            dataset_id, space_id, dataset_name, dataset_type, modality_type, description,
+            raw_repo_id, index_repo_id, owner_user_id, org_id, status, meta
+        ) VALUES (
+            #{datasetId}, #{spaceId}, #{datasetName}, #{datasetType}, #{modalityType}, #{description},
+            #{rawRepoId}, #{indexRepoId}, #{ownerUserId}, #{orgId}, #{status},
+            #{meta, typeHandler=com.fwdrobo.sirius.handler.JsonbTypeHandler}
+        )
+    </insert>
+    <select id="selectById" resultMap="MmDatasetMap">SELECT * FROM public.mm_dataset WHERE dataset_id = #{datasetId}</select>
+    <select id="selectBySpaceIdAndName" resultMap="MmDatasetMap">SELECT * FROM public.mm_dataset WHERE space_id = #{spaceId} AND dataset_name = #{datasetName}</select>
+    <select id="selectBySpaceId" resultMap="MmDatasetMap">SELECT * FROM public.mm_dataset WHERE space_id = #{spaceId} ORDER BY created_at DESC LIMIT #{limit} OFFSET #{offset}</select>
+    <select id="countBySpaceId" resultType="long">SELECT COUNT(*) FROM public.mm_dataset WHERE space_id = #{spaceId}</select>
+</mapper>

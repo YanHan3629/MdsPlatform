@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.fwdrobo.sirius.mapper.JobRunInputMapper">
+
+    <insert id="insert">
+        INSERT INTO public.job_run_input
+            (run_id, job_id, input_repo_id, input_commit_id, input_order, params)
+        VALUES
+            (#{runId},
+             #{jobId},
+             #{repoId},
+             #{commitId},
+             #{order},
+             CAST(#{paramsJson} AS jsonb))
+    </insert>
+
+</mapper>

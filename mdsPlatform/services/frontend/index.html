@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>产业链数据空间平台</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="logo">DS</div>
+        <div>
+          <b>产业链数据空间平台</b>
+          <span>Haier Smart Home · Chain Data Space</span>
+        </div>
+      </div>
+      <nav>
+        <a href="#dashboard" class="active">总览驾驶舱</a>
+        <a href="#provider">供给方工作台</a>
+        <a href="#market">链主消费搜索</a>
+        <a href="#contracts">合约与推送</a>
+      </nav>
+      <section class="business-panel">
+        <div class="business-title">业务链路</div>
+        <div class="tree-root">
+          <span class="caret">▾</span><span class="check">✓</span><span class="folder">📁</span>
+          <div><b>海尔智家</b><small>链主企业 / 数据消费方</small></div>
+        </div>
+        <div id="businessTree" class="business-tree"></div>
+      </section>
+      <div class="api-box">
+        <label>后端 API</label>
+        <input id="apiBase" value="/api/data-space" />
+        <button id="reloadBtn" class="btn block">同步数据</button>
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">家电产业链 · 冰箱场景</p>
+          <h1>产业链数据空间平台</h1>
+        </div>
+        <div class="top-actions">
+          <span id="health" class="badge muted">连接中</span>
+          <button id="demoDispatchBtn" class="btn primary">立即检查推送</button>
+        </div>
+      </header>
+
+      <section id="dashboard" class="page show">
+        <div id="kpis" class="kpi-grid"></div>
+        <div class="grid two">
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <p class="eyebrow">Flow</p>
+                <h2>产业链数据存储与消费流程</h2>
+              </div>
+              <span class="badge">7 步闭环</span>
+            </div>
+            <div id="flow" class="flow"></div>
+          </section>
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <p class="eyebrow">Events</p>
+                <h2>实时流转事件</h2>
+              </div>
+              <span class="badge">自动刷新</span>
+            </div>
+            <div id="events" class="events"></div>
+          </section>
+        </div>
+        <section class="card">
+          <div class="card-head">
+            <div>
+              <p class="eyebrow">Catalog</p>
+              <h2>家电产业链资源目录与治理数据集</h2>
+            </div>
+            <div class="filters">
+              <input id="catalogKeyword" placeholder="搜索目录 / 数据集 / 模态" />
+              <select id="catalogStatus">
+                <option value="">全部状态</option>
+                <option value="READY">READY</option>
+                <option value="PENDING">PENDING</option>
+              </select>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>名称</th><th>业务域</th><th>来源</th><th>模态</th><th>样本量</th><th>质量</th><th>索引</th><th>状态</th></tr></thead>
+              <tbody id="catalogTable"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="provider" class="page">
+        <div class="grid two">
+          <section class="card form-card">
+            <div class="card-head"><div><p class="eyebrow">Step 1</p><h2>企业 / 组织注册认证</h2></div></div>
+            <form id="spaceForm" class="form-grid">
+              <label>组织名称<input name="orgName" required value="海尔智家产业链-制造业务中心" /></label>
+              <label>角色<select name="role"><option value="PROVIDER">数据供给方</option><option value="CONSUMER">链主消费方</option></select></label>
+              <label>业务域<select name="businessCode" id="spaceBusinessSelect"></select></label>
+              <label class="full">说明<textarea name="description">接入家电产业链冰箱业务数据，作为数据供给方。</textarea></label>
+              <button class="btn primary" type="submit">注册空间</button>
+            </form>
+            <div id="spaces" class="compact-list"></div>
+          </section>
+
+          <section class="card form-card">
+            <div class="card-head"><div><p class="eyebrow">Step 2</p><h2>数据源接入与文件上传</h2></div></div>
+            <form id="sourceForm" class="form-grid">
+              <label>认证空间<select name="spaceId" id="sourceSpaceSelect" required></select></label>
+              <label>业务域<select name="businessCode" id="sourceBusinessSelect" required></select></label>
+              <label>数据资源名称<input name="sourceName" required value="智能冰箱压缩机运行数据源" /></label>
+              <label>数据资源类型<select name="sourceType"><option>LOCAL_UPLOAD</option><option>OBJECT_STORAGE</option><option>API_STREAM</option><option>DATABASE</option></select></label>
+              <label>模态<select name="modalityType"><option>IMAGE_TEXT</option><option>IMAGE</option><option>TEXT</option><option>VIDEO</option><option>AUDIO</option><option>AUDIO_TEXT</option></select></label>
+              <label class="full">上传方式<input name="uploadMethods" value="本地文件,文件夹批量,对象存储清单,接口接入" /></label>
+              <button class="btn primary" type="submit">接入数据资源</button>
+            </form>
+            <form id="uploadForm" class="upload-box">
+              <select name="sourceId" id="uploadSourceSelect" required></select>
+              <input name="files" type="file" multiple />
+              <button class="btn" type="submit">上传冰箱数据文件元数据</button>
+            </form>
+          </section>
+        </div>
+
+        <div class="grid three">
+          <section class="card form-card">
+            <p class="eyebrow">Step 3</p><h2>创建资源目录</h2>
+            <form id="catalogForm" class="stack-form">
+              <select name="sourceId" id="catalogSourceSelect" required></select>
+              <input name="catalogName" required value="冰箱压缩机运行资源目录" />
+              <input name="tags" value="家电,冰箱,压缩机,运行,质检" />
+              <button class="btn primary" type="submit">创建目录</button>
+            </form>
+          </section>
+          <section class="card form-card">
+            <p class="eyebrow">Step 4</p><h2>治理加工形成数据集</h2>
+            <form id="governForm" class="stack-form">
+              <select name="sourceId" id="governSourceSelect" required></select>
+              <input name="datasetName" required value="冰箱压缩机运行治理数据集" />
+              <input name="version" value="v1.0" />
+              <input name="qualityScore" type="number" min="0" max="100" step="0.1" value="96.8" />
+              <input name="sampleCount" type="number" value="32000" />
+              <button class="btn primary" type="submit">治理生成数据集</button>
+            </form>
+          </section>
+          <section class="card form-card">
+            <p class="eyebrow">Step 5-6</p><h2>索引构建与产品发布</h2>
+            <form id="indexForm" class="stack-form mini-gap">
+              <select name="datasetId" id="indexDatasetSelect" required></select>
+              <input name="modelName" value="CLIP-Chinese-Fridge-QA" />
+              <button class="btn" type="submit">构建索引</button>
+            </form>
+            <form id="publishForm" class="stack-form mini-gap">
+              <select name="datasetId" id="publishDatasetSelect" required></select>
+              <input name="productName" required value="冰箱压缩机运行数据产品" />
+              <button class="btn primary" type="submit">发布数据产品</button>
+            </form>
+          </section>
+        </div>
+      </section>
+
+      <section id="market" class="page">
+        <section class="card">
+          <div class="card-head">
+            <div><p class="eyebrow">Search</p><h2>海尔智家搜索业务域数据资源 / 产品并发起消费意向</h2></div>
+            <div class="filters">
+              <input id="productKeyword" placeholder="冰箱、质检、供应链、售后、压缩机..." />
+              <select id="productBusiness"><option value="">全部业务域</option></select>
+              <select id="productModality"><option value="">全部模态</option><option>IMAGE_TEXT</option><option>IMAGE</option><option>TEXT</option><option>VIDEO</option><option>AUDIO</option><option>AUDIO_TEXT</option></select>
+              <button id="searchBtn" class="btn">搜索</button>
+            </div>
+          </div>
+          <div id="productGrid" class="product-grid"></div>
+        </section>
+        <section class="card form-card">
+          <div class="card-head"><div><p class="eyebrow">Intent</p><h2>消费意向</h2></div></div>
+          <form id="intentForm" class="form-grid">
+            <label>数据产品<select name="productId" id="intentProductSelect" required></select></label>
+            <label>消费方<input name="consumerName" value="海尔智家" /></label>
+            <label>期望发送时间<input name="expectedSendTime" id="expectedSendTime" /></label>
+            <label class="full">消费目的<textarea name="purpose">用于冰箱质量追溯、供应链协同、售后服务优化和家电产业链业务验证。</textarea></label>
+            <button class="btn primary" type="submit">提交消费意向</button>
+          </form>
+        </section>
+      </section>
+
+      <section id="contracts" class="page">
+        <div class="grid two">
+          <section class="card form-card">
+            <div class="card-head"><div><p class="eyebrow">Contract</p><h2>确认数据源与发送时间</h2></div></div>
+            <form id="contractForm" class="form-grid">
+              <label>消费意向<select name="intentId" id="contractIntentSelect" required></select></label>
+              <label>发送时间<input name="sendTime" id="sendTime" type="datetime-local" required /></label>
+              <label>质量达标线<input name="qualityThreshold" type="number" min="0" max="100" step="0.1" value="95" /></label>
+              <label>消费方接收地址<input name="receiverEndpoint" value="s3://haier-chain-owner/data-space/fridge/" /></label>
+              <button class="btn primary" type="submit">生成合约并进入自动推送</button>
+            </form>
+          </section>
+          <section class="card">
+            <div class="card-head"><div><p class="eyebrow">Delivery</p><h2>推送结果</h2></div><span class="badge">根据合约自动执行</span></div>
+            <div id="deliveries" class="compact-list"></div>
+          </section>
+        </div>
+        <section class="card">
+          <div class="card-head"><div><p class="eyebrow">Contracts</p><h2>合约列表</h2></div></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>合约</th><th>产品</th><th>提供方 / 消费方</th><th>发送时间</th><th>质量线</th><th>推送状态</th><th>操作</th></tr></thead>
+              <tbody id="contractTable"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast"></div>
+  <script src="./app.js"></script>
+</body>
+</html>

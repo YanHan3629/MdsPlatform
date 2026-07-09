@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.fwdrobo.sirius.mapper.OrgStorageUsageMapper">
+
+    <resultMap id="OrgStorageUsageMap" type="com.fwdrobo.sirius.entity.permission.OrgStorageUsage">
+        <id column="org_id" property="orgId"/>
+        <result column="used_storage_bytes" property="usedStorageBytes" jdbcType="BIGINT"/>
+        <result column="used_gpu" property="usedGpu" jdbcType="INTEGER"/>
+        <result column="used_cpu" property="usedCpu" jdbcType="NUMERIC"/>
+        <result column="used_memory_mb" property="usedMemoryMb" jdbcType="INTEGER"/>
+        <result column="updated_at" property="updatedAt" javaType="java.time.OffsetDateTime"/>
+    </resultMap>
+
+    <insert id="initIfAbsent">
+        INSERT INTO org_storage_usage(org_id, used_storage_bytes)
+        VALUES (#{orgId}, 0)
+        ON CONFLICT (org_id) DO NOTHING
+    </insert>
+
+    <select id="selectUsedStorageBytes" resultType="java.lang.Long">
+        SELECT used_storage_bytes
+        FROM org_storage_usage
+        WHERE org_id = #{orgId}
+    </select>
+
+    <update id="addUsedStorageBytes">
+        UPDATE org_storage_usage
+        SET used_storage_bytes = used_storage_bytes + #{delta}
+        WHERE org_id = #{orgId}
+    </update>
+
+    <update id="reserveStorageIfWithinQuota">
+        UPDATE org_storage_usage osu
+        SET used_storage_bytes = osu.used_storage_bytes + #{delta}
+        FROM public.org o
+        JOIN public.license_quota_policy p
+          ON p.license_type = o.license_type
+         AND p.status = 1
+        WHERE osu.org_id = #{orgId}
+          AND o.org_id = osu.org_id
+          AND osu.used_storage_bytes + #{delta} &lt;= p.storage_quota_bytes
+    </update>
+
+    <update id="reduceUsedStorageBytes">
+        UPDATE org_storage_usage
+        SET used_storage_bytes = GREATEST(0, used_storage_bytes - #{delta})
+        WHERE org_id = #{orgId}
+    </update>
+
+    <select id="selectByOrgId" resultMap="OrgStorageUsageMap">
+        SELECT
+            org_id,
+            used_storage_bytes,
+            used_gpu,
+            used_cpu,
+            used_memory_mb,
+            updated_at
+        FROM org_storage_usage
+        WHERE org_id = #{orgId}
+    </select>
+
+    <update id="addRuntimeUsage">
+        UPDATE org_storage_usage
+        SET used_gpu = used_gpu + #{gpuDelta},
+            used_cpu = used_cpu + #{cpuDelta},
+            used_memory_mb = used_memory_mb + #{memoryMbDelta}
+        WHERE org_id = #{orgId}
+    </update>
+
+    <update id="reserveRuntimeUsageIfWithinQuota">
+        UPDATE org_storage_usage osu
+        SET used_gpu = osu.used_gpu + #{gpuDelta},
+            used_cpu = osu.used_cpu + #{cpuDelta},
+            used_memory_mb = osu.used_memory_mb + #{memoryMbDelta}
+        FROM public.org o
+        JOIN public.license_quota_policy p
+          ON p.license_type = o.license_type
+         AND p.status = 1
+        WHERE osu.org_id = #{orgId}
+          AND o.org_id = osu.org_id
+          AND osu.used_gpu + #{gpuDelta} &lt;= p.max_gpu
+          AND osu.used_cpu + #{cpuDelta} &lt;= p.max_cpu
+          AND osu.used_memory_mb + #{memoryMbDelta} &lt;= p.max_memory_mb
+    </update>
+
+    <update id="reduceRuntimeUsage">
+        UPDATE org_storage_usage
+        SET used_gpu = GREATEST(0, used_gpu - #{gpuDelta}),
+            used_cpu = GREATEST(0, used_cpu - #{cpuDelta}),
+            used_memory_mb = GREATEST(0, used_memory_mb - #{memoryMbDelta})
+        WHERE org_id = #{orgId}
+    </update>
+
+</mapper>

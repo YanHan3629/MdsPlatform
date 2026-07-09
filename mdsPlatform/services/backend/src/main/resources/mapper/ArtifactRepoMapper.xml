@@ -1,0 +1,202 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.fwdrobo.sirius.mapper.ArtifactRepoMapper">
+
+    <resultMap id="ArtifactRepoMap" type="com.fwdrobo.sirius.entity.artifact.ArtifactRepo">
+        <id column="repo_id" property="repoId" javaType="java.util.UUID"/>
+        <result column="repo_name" property="repoName"/>
+        <result column="repo_type" property="repoType"/>
+        <result column="description" property="description"/>
+        <result column="owner_user_id" property="ownerUserId" javaType="java.util.UUID"/>
+        <result column="visibility" property="visibility"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="updated_at" property="updatedAt"/>
+    </resultMap>
+
+    <resultMap id="ArtifactRepoNameMap" type="com.fwdrobo.sirius.entity.artifact.ArtifactRepo">
+        <id column="repo_id" property="repoId" javaType="java.util.UUID"/>
+        <result column="repo_name" property="repoName"/>
+    </resultMap>
+
+    <insert id="insert" parameterType="com.fwdrobo.sirius.entity.artifact.ArtifactRepo">
+        INSERT INTO public.artifact_repo (repo_id, repo_name, repo_type, description, owner_user_id, visibility, org_id)
+        VALUES (
+            #{repoId},
+            #{repoName},
+            #{repoType},
+            #{description},
+            #{ownerUserId},
+            #{visibility},
+            #{orgId}
+        )
+    </insert>
+
+    <update id="update" parameterType="com.fwdrobo.sirius.entity.artifact.ArtifactRepo">
+        UPDATE public.artifact_repo
+        SET repo_name = COALESCE(#{repoName}, repo_name),
+        repo_type = COALESCE(#{repoType}, repo_type),
+        description = COALESCE(#{description}, description),
+        owner_user_id = COALESCE(#{ownerUserId}, owner_user_id),
+        visibility = COALESCE(#{visibility}, visibility)
+        WHERE repo_id = #{repoId}::uuid
+    </update>
+
+    <select id="selectById" parameterType="java.util.UUID" resultMap="ArtifactRepoMap">
+        SELECT 
+            repo_id, 
+            repo_name, 
+            repo_type, 
+            description, 
+            owner_user_id, 
+            visibility, 
+            created_at, 
+            COALESCE(
+                (SELECT MAX(published_at) 
+                 FROM public.artifact_commit ac 
+                 WHERE ac.repo_id = artifact_repo.repo_id 
+                   AND ac.commit_status = 'PUBLISHED'),
+                updated_at
+            ) as updated_at,
+            CASE 
+                WHEN EXISTS (
+                    SELECT 1 
+                    FROM public.artifact_commit ac 
+                    WHERE ac.repo_id = artifact_repo.repo_id 
+                      AND ac.commit_status = 'DRAFT'
+                ) THEN 'draft'
+                ELSE 'published'
+            END as repo_status
+        FROM public.artifact_repo
+        WHERE repo_id = #{repoId}
+    </select>
+
+    <select id="selectByName" parameterType="java.lang.String" resultMap="ArtifactRepoMap">
+        SELECT 
+            repo_id, 
+            repo_name, 
+            repo_type, 
+            description, 
+            owner_user_id, 
+            visibility, 
+            created_at, 
+            COALESCE(
+                (SELECT MAX(published_at) 
+                 FROM public.artifact_commit ac 
+                 WHERE ac.repo_id = artifact_repo.repo_id 
+                   AND ac.commit_status = 'PUBLISHED'),
+                updated_at
+            ) as updated_at
+        FROM public.artifact_repo
+        WHERE repo_name = #{repoName}
+    </select>
+
+    <select id="selectAll" resultMap="ArtifactRepoMap">
+        SELECT 
+            repo_id, 
+            repo_name, 
+            repo_type, 
+            description, 
+            owner_user_id, 
+            visibility, 
+            created_at, 
+            COALESCE(
+                (SELECT MAX(published_at) 
+                 FROM public.artifact_commit ac 
+                 WHERE ac.repo_id = artifact_repo.repo_id 
+                   AND ac.commit_status = 'PUBLISHED'),
+                updated_at
+            ) as updated_at
+        FROM public.artifact_repo
+        ORDER BY created_at DESC
+    </select>
+
+    <select id="selectByPage" resultMap="ArtifactRepoMap">
+        SELECT 
+            ar.repo_id, 
+            ar.repo_name, 
+            ar.repo_type, 
+            ar.description, 
+            ar.owner_user_id, 
+            ar.visibility, 
+            ar.created_at, 
+            COALESCE(
+                (SELECT MAX(published_at) 
+                 FROM public.artifact_commit ac 
+                 WHERE ac.repo_id = ar.repo_id 
+                   AND ac.commit_status = 'PUBLISHED'),
+                ar.updated_at
+            ) as updated_at
+        FROM public.artifact_repo ar
+        LEFT JOIN public.fwd_user u ON ar.owner_user_id = u.user_id
+        <where>
+            <if test="query.visibilityOrNull != null">
+                AND ar.visibility = #{query.visibilityOrNull}
+            </if>
+            <if test="query.repoTypeOrNull != null">
+                AND ar.repo_type = #{query.repoTypeOrNull}
+            </if>
+            <if test="query.ownerUserIdOrNull != null">
+                AND ar.owner_user_id = #{query.ownerUserIdOrNull}
+            </if>
+            <if test="query.ownerUserNameOrNull != null">
+                AND u.user_name = #{query.ownerUserNameOrNull}
+            </if>
+            <if test="query.searchKeyword != null and query.searchKeyword != ''">
+                AND (ar.repo_name ILIKE CONCAT('%', #{query.searchKeyword}, '%')
+                     OR ar.description ILIKE CONCAT('%', #{query.searchKeyword}, '%'))
+            </if>
+        </where>
+        ORDER BY ${query.sortByOrDefault} ${query.sortOrderOrDefault}
+        LIMIT #{query.limit} OFFSET #{query.offset}
+    </select>
+
+    <select id="countByQuery" resultType="long">
+        SELECT COUNT(*)
+        FROM public.artifact_repo ar
+        LEFT JOIN public.fwd_user u ON ar.owner_user_id = u.user_id
+        <where>
+            <if test="query.visibilityOrNull != null">
+                AND ar.visibility = #{query.visibilityOrNull}
+            </if>
+            <if test="query.repoTypeOrNull != null">
+                AND ar.repo_type = #{query.repoTypeOrNull}
+            </if>
+            <if test="query.ownerUserIdOrNull != null">
+                AND ar.owner_user_id = #{query.ownerUserIdOrNull}
+            </if>
+            <if test="query.ownerUserNameOrNull != null">
+                AND u.user_name = #{query.ownerUserNameOrNull}
+            </if>
+            <if test="query.searchKeyword != null and query.searchKeyword != ''">
+                AND (ar.repo_name ILIKE CONCAT('%', #{query.searchKeyword}, '%')
+                     OR ar.description ILIKE CONCAT('%', #{query.searchKeyword}, '%'))
+            </if>
+        </where>
+    </select>
+
+    <select id="selectArtifactsByIds" resultMap="ArtifactRepoNameMap">
+        SELECT 
+            repo_id, repo_name
+        FROM public.artifact_repo
+        <choose>
+            <when test="repoIds != null and repoIds.size() > 0">
+                WHERE repo_id IN
+                <foreach collection="repoIds" item="repoId" open="(" separator="," close=")">
+                    #{repoId}
+                </foreach>
+            </when>
+            <otherwise>
+                WHERE 1 = 0
+            </otherwise>
+        </choose>
+    </select>
+
+    <delete id="deleteById">
+        DELETE FROM public.artifact_repo
+        WHERE repo_id = #{repoId}
+    </delete>
+
+</mapper>

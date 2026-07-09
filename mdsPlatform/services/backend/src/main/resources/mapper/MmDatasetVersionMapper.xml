@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.fwdrobo.sirius.mapper.MmDatasetVersionMapper">
+    <resultMap id="MmDatasetVersionMap" type="com.fwdrobo.sirius.entity.mm.MmDatasetVersion">
+        <id column="version_id" property="versionId" javaType="java.util.UUID"/>
+        <result column="dataset_id" property="datasetId" javaType="java.util.UUID"/>
+        <result column="version_name" property="versionName"/>
+        <result column="raw_commit_id" property="rawCommitId" javaType="java.util.UUID"/>
+        <result column="version_status" property="versionStatus"/>
+        <result column="sample_count" property="sampleCount" javaType="java.lang.Long"/>
+        <result column="image_count" property="imageCount" javaType="java.lang.Long"/>
+        <result column="text_count" property="textCount" javaType="java.lang.Long"/>
+        <result column="active_index_version_id" property="activeIndexVersionId" javaType="java.util.UUID"/>
+        <result column="comment" property="comment"/>
+        <result column="meta" property="meta" typeHandler="com.fwdrobo.sirius.handler.JsonbTypeHandler"/>
+        <result column="created_by" property="createdBy" javaType="java.util.UUID"/>
+        <result column="published_by" property="publishedBy" javaType="java.util.UUID"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="updated_at" property="updatedAt"/>
+        <result column="published_at" property="publishedAt"/>
+    </resultMap>
+    <insert id="insert" parameterType="com.fwdrobo.sirius.entity.mm.MmDatasetVersion">
+        INSERT INTO public.mm_dataset_version (
+            version_id, dataset_id, version_name, raw_commit_id, version_status,
+            sample_count, image_count, text_count, active_index_version_id, comment, meta,
+            created_by, published_by, published_at
+        ) VALUES (
+            #{versionId}, #{datasetId}, #{versionName}, #{rawCommitId}, #{versionStatus},
+            #{sampleCount}, #{imageCount}, #{textCount}, #{activeIndexVersionId}, #{comment},
+            #{meta, typeHandler=com.fwdrobo.sirius.handler.JsonbTypeHandler},
+            #{createdBy}, #{publishedBy}, #{publishedAt}
+        )
+    </insert>
+    <update id="update" parameterType="com.fwdrobo.sirius.entity.mm.MmDatasetVersion">
+        UPDATE public.mm_dataset_version
+        SET version_name = COALESCE(#{versionName}, version_name),
+            raw_commit_id = COALESCE(#{rawCommitId}, raw_commit_id),
+            version_status = COALESCE(#{versionStatus}, version_status),
+            sample_count = COALESCE(#{sampleCount}, sample_count),
+            image_count = COALESCE(#{imageCount}, image_count),
+            text_count = COALESCE(#{textCount}, text_count),
+            active_index_version_id = COALESCE(#{activeIndexVersionId}, active_index_version_id),
+            comment = COALESCE(#{comment}, comment),
+            meta = COALESCE(#{meta, typeHandler=com.fwdrobo.sirius.handler.JsonbTypeHandler}, meta),
+            created_by = COALESCE(#{createdBy}, created_by),
+            published_by = COALESCE(#{publishedBy}, published_by),
+            published_at = COALESCE(#{publishedAt}, published_at)
+        WHERE version_id = #{versionId}
+    </update>
+    <select id="selectById" resultMap="MmDatasetVersionMap">SELECT * FROM public.mm_dataset_version WHERE version_id = #{versionId}</select>
+    <select id="selectByDatasetIdAndVersionName" resultMap="MmDatasetVersionMap">SELECT * FROM public.mm_dataset_version WHERE dataset_id = #{datasetId} AND version_name = #{versionName}</select>
+    <select id="selectByDatasetId" resultMap="MmDatasetVersionMap">SELECT * FROM public.mm_dataset_version WHERE dataset_id = #{datasetId} ORDER BY created_at DESC LIMIT #{limit} OFFSET #{offset}</select>
+    <select id="countByDatasetId" resultType="long">SELECT COUNT(*) FROM public.mm_dataset_version WHERE dataset_id = #{datasetId}</select>
+    <update id="updateActiveIndexVersion">UPDATE public.mm_dataset_version SET active_index_version_id = #{activeIndexVersionId}, version_status = #{versionStatus} WHERE version_id = #{versionId}</update>
+</mapper>

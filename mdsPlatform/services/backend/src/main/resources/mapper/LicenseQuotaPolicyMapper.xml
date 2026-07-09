@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.fwdrobo.sirius.mapper.LicenseQuotaPolicyMapper">
+
+    <resultMap id="LicenseQuotaPolicyMap" type="com.fwdrobo.sirius.entity.permission.LicenseQuotaPolicy">
+        <id column="license_type" property="licenseType"/>
+        <result column="storage_quota_bytes" property="storageQuotaBytes" jdbcType="BIGINT"/>
+        <result column="max_gpu" property="maxGpu" jdbcType="INTEGER"/>
+        <result column="max_cpu" property="maxCpu" jdbcType="NUMERIC"/>
+        <result column="max_memory_mb" property="maxMemoryMb" jdbcType="INTEGER"/>
+        <result column="max_runtime_seconds" property="maxRuntimeSeconds" jdbcType="INTEGER"/>
+        <result column="status" property="status" jdbcType="INTEGER"/>
+        <result column="updated_at" property="updatedAt" javaType="java.time.OffsetDateTime"/>
+    </resultMap>
+
+    <select id="selectActiveByLicenseType" resultMap="LicenseQuotaPolicyMap">
+        SELECT
+            license_type,
+            storage_quota_bytes,
+            max_gpu,
+            max_cpu,
+            max_memory_mb,
+            max_runtime_seconds,
+            status,
+            updated_at
+        FROM public.license_quota_policy
+        WHERE license_type = #{licenseType}
+          AND status = 1
+    </select>
+
+    <select id="selectAllActivePolicies" resultMap="LicenseQuotaPolicyMap">
+        SELECT
+            license_type,
+            storage_quota_bytes,
+            max_gpu,
+            max_cpu,
+            max_memory_mb,
+            max_runtime_seconds,
+            status,
+            updated_at
+        FROM public.license_quota_policy
+        WHERE status = 1
+        ORDER BY license_type
+    </select>
+
+</mapper>
