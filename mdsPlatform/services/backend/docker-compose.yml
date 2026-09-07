@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: sirius
       POSTGRES_PASSWORD: siriuspwd
     volumes:
-      - ../../../data/pgdata:/var/lib/postgresql/data
+      - "${DATASPACE_STORAGE_ROOT:-../../../../Multimodal Data Space Platform}/data/pgdata:/var/lib/postgresql/data"
     # 如果你不需要宿主机直接连 DB，建议删掉 ports，避免 5432 冲突
     ports:
       - "15432:5432"
@@ -25,7 +25,7 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin123
     volumes:
-      - ../../../data/minio_data:/data
+      - "${DATASPACE_STORAGE_ROOT:-../../../../Multimodal Data Space Platform}/data/minio_data:/data"
     ports:
       - "19000:9000"   # S3 API（需要宿主机访问才保留）
       - "19001:9001"   # Web Console
@@ -109,8 +109,8 @@ services:
     ports:
       - "8888:8888"
     volumes:
-      - ../../../data/log/sirius:/var/log/sirius   # 宿主机:容器
-      - ../../../dataset:/data/multimodal-dataset:ro
+      - "${DATASPACE_STORAGE_ROOT:-../../../../Multimodal Data Space Platform}/data/log/sirius:/var/log/sirius"
+      - "${DATASPACE_STORAGE_ROOT:-../../../../Multimodal Data Space Platform}/dataset:/data/multimodal-dataset:ro"
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - default

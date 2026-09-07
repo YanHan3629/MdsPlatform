@@ -15,10 +15,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Default dataset root is resolved relative to this script (repo-root/dataset/val2017)
+# 默认从独立存储目录读取；DATASPACE_STORAGE_ROOT 可覆盖存储根目录。
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 if ([string]::IsNullOrWhiteSpace($LocalRoot)) {
-    $LocalRoot = Join-Path $scriptDir "../../../dataset/val2017"
+    $storageRoot = $env:DATASPACE_STORAGE_ROOT
+    if ([string]::IsNullOrWhiteSpace($storageRoot)) {
+        $storageRoot = Join-Path $scriptDir "../../../../Multimodal Data Space Platform"
+    }
+    $LocalRoot = Join-Path $storageRoot "dataset/val2017"
 }
 
 function Normalize-SlashPath {

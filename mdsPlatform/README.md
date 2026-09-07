@@ -21,6 +21,21 @@ cd services/backend
 docker compose up -d
 ```
 
+## 数据存储
+
+运行数据与代码仓库分开保存。默认存储根目录为与 `MdsPlatform` 同级的：
+
+```text
+Multimodal Data Space Platform/
+├── data/
+│   ├── pgdata/       # PostgreSQL
+│   ├── minio_data/   # MinIO 对象
+│   └── log/sirius/   # 后端日志
+└── dataset/          # 可选的本地导入数据集
+```
+
+如需使用其他位置，在启动 Compose 前设置 `DATASPACE_STORAGE_ROOT`。该变量应指向包含 `data` 和 `dataset` 的目录。
+
 访问前端界面：`http://localhost:8888/data-space/index.html`
 
 ## 平台四层页面
