@@ -1,0 +1,12 @@
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.mypy_cache/
+venv/
+.venv/
+.git/
+.gitignore
+*.log
+.env
+.env.*
+Qwen3.5-0.8B/

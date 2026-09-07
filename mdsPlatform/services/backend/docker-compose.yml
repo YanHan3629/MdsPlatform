@@ -126,8 +126,8 @@ services:
 
       # ---- MinIO（容器内用 minio 作为 host）----
       MINIO_ENDPOINT: http://minio:9000
-      # ---- MinIO 预签名 URL 对外地址 MinIO服务器IP（前端可访问）----
-      MINIO_PUBLIC_ENDPOINT: http://100.64.135.60:19000
+      # ---- MinIO 预签名 URL 对外地址（容器网络内可达，供检索/问答服务拉取索引 bundle）----
+      MINIO_PUBLIC_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin123
       MINIO_PRESIGN_ACCESS_KEY: sirius-presign
@@ -136,6 +136,9 @@ services:
 
       MM_SEARCH_BASE_URL: http://search-service:18080
       MM_INDEX_BUILDER_CMD: "MODEL_PATH=/app/clip_model_chinese python /app/build_index.py"
+
+      # 任务容器回连后端的地址：job 容器运行在默认网桥，用网关 IP 而非 host.docker.internal
+      APP_DOCKER_HOST: http://172.17.0.1:8888
 
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PORT: 6379

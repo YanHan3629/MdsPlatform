@@ -1,0 +1,4 @@
+# 本地/GPU 主机直接以 vLLM 方式运行 Qwen3.5 时的依赖（参考仓库同款）
+uvicorn[standard]==0.30.6
+vllm==0.17.0
+python-multipart==0.0.9

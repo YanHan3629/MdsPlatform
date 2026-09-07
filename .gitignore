@@ -40,6 +40,9 @@ data/
 # External datasets (not part of the platform code)
 dataset/
 
+# Local multimodal QA model weights (too large for regular Git storage)
+mdsPlatform/services/qa-service/Qwen3.5-0.8B/*.safetensors
+
 # Temporary upload/debug artifacts
 upload_failed_*.json
 upload_summary_*.json

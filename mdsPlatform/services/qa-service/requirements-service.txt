@@ -1,0 +1,11 @@
+# 问答包装服务（FastAPI）依赖；vLLM 模型服务端由独立容器提供
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+pydantic==2.9.2
+requests==2.32.3
+# 索引 bundle 消费（与 search-service 相同的数据互通格式）
+numpy==1.26.4
+pandas==2.2.2
+faiss-cpu==1.8.0.post1
+pyarrow==17.0.0

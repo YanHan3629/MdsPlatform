@@ -1,0 +1,59 @@
+services:
+  vllm:
+    # 支持 Qwen3.5 的 vLLM 官方镜像；如需其他 tag 可用环境变量 VLLM_IMAGE 覆盖
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.17.0}
+    command:
+      - --model
+      - /models/Qwen3.5-0.8B
+      - --served-model-name
+      - Qwen/Qwen3.5-0.8B
+      - --tensor-parallel-size
+      - "1"
+      - --max-model-len
+      - "2048"
+      - --gpu-memory-utilization
+      - "0.78"
+      - --max-num-seqs
+      - "2"
+      - --limit-mm-per-prompt
+      - '{"image": 2}'
+      - --enforce-eager
+      - --skip-mm-profiling
+    volumes:
+      - ./Qwen3.5-0.8B:/models/Qwen3.5-0.8B:ro
+    ports:
+      - "8000:8000"
+    ipc: host
+    shm_size: 1g
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/v1/models', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
+
+  qa-service:
+    build: .
+    image: sirius-mm-qa-service:latest
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      VLLM_BASE_URL: http://vllm:8000
+      MODEL_NAME: Qwen/Qwen3.5-0.8B
+      LLM_BACKEND: vllm
+      DEFAULT_MAX_TOKENS: "512"
+      BACKEND_BASE_URL: http://host.docker.internal:8888
+      SEARCH_SERVICE_BASE_URL: http://host.docker.internal:18080
+    ports:
+      - "18081:18081"
+    depends_on:
+      vllm:
+        condition: service_healthy
