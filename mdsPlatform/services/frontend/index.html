@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>产业链数据空间平台</title>
   <link rel="stylesheet" href="./styles.css" />
+  <link rel="stylesheet" href="./qa.css" />
 </head>
 <body>
   <div class="shell">
@@ -20,6 +21,7 @@
         <a href="#dashboard" class="active">总览驾驶舱</a>
         <a href="#provider">供给方工作台</a>
         <a href="#market">链主消费搜索</a>
+        <a href="#qa">多模态问答</a>
         <a href="#contracts">合约与推送</a>
       </nav>
       <section class="business-panel">
@@ -124,8 +126,8 @@
             </form>
             <form id="uploadForm" class="upload-box">
               <select name="sourceId" id="uploadSourceSelect" required></select>
-              <input name="files" type="file" multiple />
-              <button class="btn" type="submit">上传冰箱数据文件元数据</button>
+              <input name="files" type="file" multiple accept=".jpg,.jpeg,.png,.svg,.txt,.csv,.json,.jsonl,.xlsx,.pdf,.obj,.step,.parquet,.index" />
+              <button class="btn" type="submit">按格式分类上传数据文件</button>
             </form>
           </section>
         </div>
@@ -192,6 +194,41 @@
         </section>
       </section>
 
+      <section id="qa" class="page">
+        <div class="card">
+          <div class="card-head"><div><p class="eyebrow">数据空间 · Qwen3.5</p><h2>多模态问答</h2></div><span id="qaHealth" class="badge muted">检查模型状态</span></div>
+          <p>选择已建立索引的数据集，结合文字和图片提问。回答会附带检索来源，便于核对依据。</p>
+          <form id="qaLogin" class="filters">
+            <input name="userName" aria-label="数据空间账号" placeholder="数据空间账号" autocomplete="username" required />
+            <input name="password" aria-label="密码" type="password" placeholder="密码" autocomplete="current-password" required />
+            <button class="btn" type="submit">登录数据空间</button>
+          </form>
+          <div class="filters mini-gap"><span id="qaAccount">尚未登录</span><button id="qaLogout" class="btn link" type="button" hidden>退出登录</button><button id="qaRefresh" class="btn link" type="button">刷新数据集与模型状态</button></div>
+        </div>
+        <div class="grid two mini-gap">
+          <div class="card form-card">
+            <form id="qaForm" class="form-grid">
+              <label class="full">检索数据集<select id="qaDataset"><option value="">不使用数据空间检索</option></select></label>
+              <p id="qaDatasetInfo" class="full">登录后加载当前组织真实的 READY 索引；演示目录不作为检索依据。</p>
+              <label>输入模式<select name="inputMode" id="qaInputMode"><option value="hybrid">用户资料 + 数据空间</option><option value="question_only">仅问题 + 数据空间</option><option value="user_data_only">仅使用用户资料</option></select></label>
+              <label>任务<select name="taskType"><option value="general_qa">通用问答</option><option value="chain_risk_analysis">产业链风险分析</option><option value="demand_evaluation">需求评判</option><option value="data_summary">数据摘要</option></select></label>
+              <label>检索类型<select name="retrievalType" id="qaRetrievalType"><option value="auto">自动判断</option><option value="text_to_image">文字检索</option><option value="image_to_text">图片检索</option><option value="dual">文字与图片双路检索</option><option value="none">不检索</option></select></label>
+              <label>检索数量<input name="topK" type="number" value="3" min="1" max="50" required /></label>
+              <label class="full">问题<textarea name="question" maxlength="8000" placeholder="例如：这些质检记录反映了哪些问题？请注明来源。" required></textarea></label>
+              <label class="full">补充资料<textarea name="context" id="qaContext" placeholder="可粘贴文本依据（每条最多使用前 500 字符）"></textarea></label>
+              <label class="full">图片（最多 2 张，每张不超过 10 MB）<input name="images" id="qaImages" type="file" accept="image/jpeg,image/png,image/webp" multiple /></label>
+              <button id="qaSubmit" class="btn primary" type="submit">提交问题</button>
+            </form>
+          </div>
+          <div class="card" aria-live="polite">
+            <h2>回答与依据</h2><p id="qaProgress">等待提问</p>
+            <p id="qaNotice" class="qa-notice" hidden></p>
+            <div id="qaAnswer" class="qa-answer"></div>
+            <p id="qaMeta"></p><div id="qaSources" class="compact-list"></div>
+          </div>
+        </div>
+      </section>
+
       <section id="contracts" class="page">
         <div class="grid two">
           <section class="card form-card">
@@ -224,5 +261,6 @@
 
   <div id="toast" class="toast"></div>
   <script src="./app.js"></script>
+  <script src="./qa.js"></script>
 </body>
 </html>

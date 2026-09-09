@@ -1,0 +1,7 @@
+.git
+**/Qwen3.5-0.8B
+**/clip_model_chinese
+**/__pycache__
+**/.venv
+.env*
+**/*.log

@@ -63,8 +63,9 @@ def _compute_confidence(choices: list) -> Tuple[float, str]:
 class QaService:
     """多模态问答核心：收集依据 -> 可选检索 -> 组装消息 -> 调用 vLLM -> 统一响应。"""
 
-    def __init__(self, client: Optional[VllmClient] = None):
+    def __init__(self, client: Optional[VllmClient] = None, bearer_token=None):
         self.client = client or vllm_default_client
+        self.bearer_token = settings.backend_bearer_token if bearer_token is None else bearer_token
         self._search_client = None
         self._bundle_retriever = None
         self._retrieval_planner = RetrievalPlanner(IntentAnalyzer(self.client))
@@ -75,7 +76,7 @@ class QaService:
         if self._search_client is None:
             from adapters.search_client import SearchServiceClient
 
-            self._search_client = SearchServiceClient()
+            self._search_client = SearchServiceClient(self.bearer_token)
         return self._search_client
 
     def _get_bundle_retriever(self):
@@ -124,7 +125,7 @@ class QaService:
 
             if retrieval_type in ("text_to_image", "dual"):
                 text_items, from_backend = [], False
-                if settings.backend_bearer_token:
+                if self.bearer_token:
                     try:
                         text_items = client.backend_multimodal_search(
                             dataset_id, version_id, index_version_id, question, top_k
@@ -145,7 +146,9 @@ class QaService:
                     preview = preview or str(item.get("logicalPath") or "")
                     key = append_record(item, "search_text_to_image", rank, preview)
                     url = item.get("previewUrl") if from_backend else None
-                    if url and len(downloaded_by_key) < settings.max_retrieved_images:
+                    content_type = item.get("contentType") or ""
+                    is_image = content_type.startswith("image/") if content_type else str(item.get("logicalPath") or "").lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+                    if url and is_image and len(downloaded_by_key) < settings.max_retrieved_images:
                         try:
                             data = client.download_preview(url)
                             if data:

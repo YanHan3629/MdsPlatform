@@ -12,6 +12,13 @@ class TextToImageService:
     def search(self, req):
         loaded = registry.ensure_loaded(str(req.datasetId), str(req.versionId), str(req.indexVersionId))
         vector = self.encoder.encode_text(req.query)
+        if loaded.unified_index is not None and loaded.unified_metadata is not None:
+            candidate_count = min(loaded.unified_index.ntotal, max(req.topK, req.topK * 5))
+            scores, indices = FaissRetriever.search(loaded.unified_index, vector, candidate_count)
+            items = ResultAssembler.assemble_unified_as_text_to_image(
+                scores, indices, loaded.unified_metadata, req.topK
+            )
+            return TextToImageResp(items=items)
         scores, indices = FaissRetriever.search(loaded.image_index, vector, req.topK)
         items = ResultAssembler.assemble_text_to_image(scores, indices, loaded.image_metadata)
         return TextToImageResp(items=items)

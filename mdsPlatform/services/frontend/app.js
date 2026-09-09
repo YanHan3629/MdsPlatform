@@ -276,7 +276,8 @@ function bindForms() {
     const payload = new FormData();
     [...files].forEach(f => payload.append('files', f));
     const r = await api(`/sources/${sourceId}/files`, { method: 'POST', body: payload });
-    toast(r.message);
+    const formats = Object.entries(r.source?.formatCounts || {}).map(([k, v]) => `${k}:${v}`).join('、');
+    toast(formats ? `${r.message}（${formats}）` : r.message);
     load();
   };
   $('#catalogForm').onsubmit = async e => { e.preventDefault(); const v = formData(e.currentTarget); const sourceId = v.sourceId; delete v.sourceId; await json(`/sources/${sourceId}/catalogs`, v); toast('资源目录已创建'); load(); };

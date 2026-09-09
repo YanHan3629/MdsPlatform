@@ -1,6 +1,7 @@
 package com.fwdrobo.sirius.dto.file;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fwdrobo.sirius.util.DataFileFormatClassifier;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -25,4 +26,12 @@ public class FileResp {
     private String contentType;
     private OffsetDateTime createdAt;
     private OffsetDateTime updatedAt;
+
+    public String getFileFormat() {
+        return DataFileFormatClassifier.classify(logicalPath, contentType).format();
+    }
+
+    public String getStorageCategory() {
+        return DataFileFormatClassifier.classify(logicalPath, contentType).storageCategory();
+    }
 }

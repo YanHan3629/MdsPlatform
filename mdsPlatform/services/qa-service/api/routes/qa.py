@@ -8,7 +8,7 @@ from adapters.vllm_client import VllmClientError
 from core.config import settings
 from schemas.qa_req import QaRequest
 from schemas.qa_resp import QAResponse
-from services.qa_service import service
+from services.qa_service import QaService, service
 
 router = APIRouter()
 
@@ -52,11 +52,15 @@ async def ask_question(request: Request):
     images（仅 multipart）。
     """
     content_type = request.headers.get("content-type", "").lower()
+    authorization = request.headers.get("authorization", "")
+    # Keep credentials local to the request; concurrent users must never share a token.
+    token = authorization[7:].strip() if authorization.lower().startswith("bearer ") else None
+    request_service = QaService(client=service.client, bearer_token=token)
     try:
         if "application/json" in content_type:
             req = QaRequest.model_validate(await request.json())
             return await run_in_threadpool(
-                service.answer,
+                request_service.answer,
                 question=req.question,
                 input_mode=req.input_mode,
                 task_type=req.task_type,
@@ -108,7 +112,7 @@ async def ask_question(request: Request):
         }
         req = QaRequest.model_validate(payload)
         return await run_in_threadpool(
-            service.answer,
+            request_service.answer,
             question=req.question,
             input_mode=req.input_mode,
             task_type=req.task_type,

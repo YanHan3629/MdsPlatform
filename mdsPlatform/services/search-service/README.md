@@ -11,6 +11,10 @@
 - text faiss index
 - image metadata parquet
 - text metadata parquet
+- unified faiss index（新版索引）
+- unified metadata parquet（包含原始格式、表示类型、命中位置和时间窗口）
+
+当 bundle 包含统一索引时，文本和图像查询都使用 CLIP 共享向量空间检索所有文件格式，并按 `asset_id` 聚合多个页面、表格窗口或模型视图。旧版 bundle 仍自动回退到原图像/文本索引。
 
 运行前需要：
 1. 配置 `BACKEND_BASE_URL`

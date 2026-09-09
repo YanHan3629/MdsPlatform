@@ -14,6 +14,7 @@ import com.fwdrobo.sirius.entity.file.AddOrReplaceFileResult;
 import com.fwdrobo.sirius.mapper.ArtifactCommitMapper;
 import com.fwdrobo.sirius.mapper.ArtifactFileMapper;
 import com.fwdrobo.sirius.util.ExceptionUtils;
+import com.fwdrobo.sirius.util.DataFileFormatClassifier;
 import com.fwdrobo.sirius.util.GlobUtils;
 import com.fwdrobo.sirius.util.PathUtils;
 import io.minio.StatObjectResponse;
@@ -74,7 +75,10 @@ public class FileService {
         ensureCommitStatusIs(artifactId, commitId, CommitStatus.DRAFT);
 
         String logicalPath = PathUtils.normalizePath(path);
-        String objectKey = buildWorkspaceKey(artifactId, commitId, logicalPath);
+        FileResp existingFile = artifactFileMapper.selectByCommitIdAndPath(commitId, logicalPath);
+        String objectKey = existingFile == null
+                ? buildWorkspaceKey(artifactId, commitId, logicalPath, contentType)
+                : existingFile.getFileKey();
         validateExpire(expire);
 
         // upsert 文件元信息，再写入 manifest
@@ -113,8 +117,10 @@ public class FileService {
         ensureCommitStatusIs(artifactId, commitId, CommitStatus.DRAFT);
 
         String logicalPath = PathUtils.normalizePath(path);
-        String objectKey = buildWorkspaceKey(artifactId, commitId, logicalPath);
         FileResp existingFile = artifactFileMapper.selectByCommitIdAndPath(commitId, logicalPath);
+        String objectKey = existingFile == null
+                ? buildWorkspaceKey(artifactId, commitId, logicalPath, contentType)
+                : existingFile.getFileKey();
         long previousSize = normalizeSize(existingFile == null ? null : existingFile.getSizeBytes());
         long reservedBytes = trialLimitService.reserveUploadQuota(size, previousSize);
         boolean quotaSettled = false;
@@ -219,7 +225,6 @@ public class FileService {
         ensureCommitStatusIs(artifactId, commitId, CommitStatus.DRAFT);
 
         String logicalPath = PathUtils.normalizePath(path);
-        String objectKey = buildWorkspaceKey(artifactId, commitId, logicalPath);
         // 先改 manifest，再删除 DB/对象
         UUID fileId = manifestService.removeFileEntry(artifactId, commitId, logicalPath);
         if (fileId == null) {
@@ -228,7 +233,9 @@ public class FileService {
         FileResp existingFile = artifactFileMapper.selectFilesByIds(List.of(fileId)).stream().findFirst().orElse(null);
         long deletedSize = normalizeSize(existingFile == null ? null : existingFile.getSizeBytes());
         artifactFileMapper.deleteByIdAndCommitId(fileId, commitId);
-        minioService.removeObject(objectKey);
+        if (existingFile != null) {
+            minioService.removeObject(existingFile.getFileKey());
+        }
         trialLimitService.reduceUsedStorageAfterSuccess(deletedSize);
     }
 
@@ -433,13 +440,14 @@ public class FileService {
     }
 
     // 生成存储文件的 key
-    private String buildWorkspaceKey(UUID artifactId, UUID commitId, String path) {
-        String p = PathUtils.normalizePath(path);
+    String buildWorkspaceKey(UUID artifactId, UUID commitId, String path, String contentType) {
+        String p = PathUtils.normalizePath(path).replace('\\', '/');
         // 去掉前导 "/"，避免拼接时产生重复分隔符
         if (p.startsWith("/")) {
             p = p.substring(1);
         }
-        return "workspace/" + artifactId.toString() + "/" + commitId.toString() + "/" + p;
+        String category = DataFileFormatClassifier.classify(p, contentType).storageCategory();
+        return "workspace/" + artifactId + "/" + commitId + "/" + category + "/" + p;
     }
 
 

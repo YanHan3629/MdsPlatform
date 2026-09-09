@@ -76,6 +76,15 @@ class VllmClient:
         }
         if response_format is not None:
             payload["response_format"] = response_format
+        if any(isinstance(message.get("content"), list) and any(
+            part.get("type") == "image_url" for part in message["content"]
+        ) for message in messages):
+            # Bound visual tokens for the existing 2048-token / 4 GB configuration.
+            # Original files and the CLIP query images remain unchanged.
+            payload["mm_processor_kwargs"] = {
+                "min_pixels": 65536,
+                "max_pixels": max(65536, settings.max_image_pixels),
+            }
         return self._request("POST", "/v1/chat/completions", payload)
 
 

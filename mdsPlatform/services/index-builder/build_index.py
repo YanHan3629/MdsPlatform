@@ -1,18 +1,18 @@
-import hashlib
-import io
 import json
 import os
-import uuid
 from pathlib import Path
 
 import faiss
 import numpy as np
 import pandas as pd
+import requests
 import torch
 import torch.nn.functional as F
 from PIL import Image
 from transformers import AutoModel, AutoProcessor, CLIPModel, CLIPProcessor
-import requests
+
+from representations import build_representations
+
 
 INPUT_DIR = Path(os.environ.get("INPUT_DIR", "/tmp/in"))
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/tmp/out"))
@@ -26,40 +26,8 @@ READY_PATH = os.environ.get("BACKEND_CALLBACK_READY") or os.environ.get("backend
 FAILED_PATH = os.environ.get("BACKEND_CALLBACK_FAILED") or os.environ.get("backendCallbackFailed")
 OUTPUT_COMMIT_ID = os.environ.get("OUTPUT_COMMIT_ID")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-
-def deterministic_asset_id(dataset_version_id: str, logical_path: str) -> str:
-    source = f"{dataset_version_id}:{normalize_path(logical_path)}".encode("utf-8")
-    md5 = bytearray(hashlib.md5(source).digest())
-    md5[6] = (md5[6] & 0x0F) | 0x30
-    md5[8] = (md5[8] & 0x3F) | 0x80
-    return str(uuid.UUID(bytes=bytes(md5)))
-
-
-def normalize_path(path: str) -> str:
-    path = path.replace("\\", "/")
-    if not path.startswith("/"):
-        path = "/" + path
-    while "//" in path:
-        path = path.replace("//", "/")
-    return path
-
-
-def find_captions_json() -> Path:
-    candidates = sorted(INPUT_DIR.rglob("*.json"))
-    for path in candidates:
-        if "caption" in path.name.lower():
-            return path
-    raise FileNotFoundError("captions json not found under /tmp/in")
-
-
-def index_input_files() -> dict[str, Path]:
-    mapping = {}
-    for file in INPUT_DIR.rglob("*"):
-        if file.is_file():
-            rel = "/" + file.relative_to(INPUT_DIR).as_posix()
-            mapping[file.name] = Path(rel)
-    return mapping
+IMAGE_BATCH_SIZE = int(os.environ.get("IMAGE_BATCH_SIZE", "16"))
+TEXT_BATCH_SIZE = int(os.environ.get("TEXT_BATCH_SIZE", "32"))
 
 
 def load_model():
@@ -80,58 +48,99 @@ def load_model():
     return model, processor
 
 
-def encode_images(model, processor, image_paths: list[Path], batch_size: int = 32) -> np.ndarray:
+def encode_images(model, processor, image_paths: list[Path], batch_size: int = IMAGE_BATCH_SIZE) -> np.ndarray:
     features = []
-    for i in range(0, len(image_paths), batch_size):
-        batch_paths = image_paths[i:i + batch_size]
-        images = [Image.open(path).convert("RGB") for path in batch_paths]
+    for index in range(0, len(image_paths), batch_size):
+        batch_paths = image_paths[index:index + batch_size]
+        images = []
+        for path in batch_paths:
+            with Image.open(path) as image:
+                images.append(image.convert("RGB"))
         inputs = processor(images=images, return_tensors="pt")
-        inputs = {k: v.to(DEVICE) for k, v in inputs.items() if hasattr(v, "to")}
+        inputs = {key: value.to(DEVICE) for key, value in inputs.items() if hasattr(value, "to")}
         with torch.no_grad():
-            batch_features = model.get_image_features(**inputs)
-            batch_features = F.normalize(batch_features, dim=-1)
+            batch_features = F.normalize(model.get_image_features(**inputs), dim=-1)
         features.append(batch_features.cpu().numpy())
-    return np.concatenate(features, axis=0)
+    return np.concatenate(features, axis=0) if features else np.empty((0, 0), dtype="float32")
 
 
-def encode_texts(model, processor, texts: list[str], batch_size: int = 32) -> np.ndarray:
+def encode_texts(model, processor, texts: list[str], batch_size: int = TEXT_BATCH_SIZE) -> np.ndarray:
     features = []
-    for i in range(0, len(texts), batch_size):
-        batch_texts = texts[i:i + batch_size]
+    for index in range(0, len(texts), batch_size):
+        batch_texts = texts[index:index + batch_size]
         inputs = processor(text=batch_texts, return_tensors="pt", padding=True, truncation=True, max_length=77)
-        inputs = {k: v.to(DEVICE) for k, v in inputs.items() if hasattr(v, "to")}
+        inputs = {key: value.to(DEVICE) for key, value in inputs.items() if hasattr(value, "to")}
         with torch.no_grad():
-            batch_features = model.get_text_features(**inputs)
-            batch_features = F.normalize(batch_features, dim=-1)
+            batch_features = F.normalize(model.get_text_features(**inputs), dim=-1)
         features.append(batch_features.cpu().numpy())
-    return np.concatenate(features, axis=0)
+    return np.concatenate(features, axis=0) if features else np.empty((0, 0), dtype="float32")
 
 
-def build_index(vectors: np.ndarray) -> faiss.Index:
-    dim = vectors.shape[1]
-    index = faiss.IndexFlatIP(dim)
-    index.add(vectors.astype("float32"))
+def build_index(vectors: np.ndarray, embedding_dim: int) -> faiss.Index:
+    index = faiss.IndexFlatIP(embedding_dim)
+    if len(vectors):
+        index.add(vectors.astype("float32"))
     return index
 
 
-def write_outputs(image_index, text_index, image_meta: pd.DataFrame, text_meta: pd.DataFrame, embedding_dim: int):
+def metadata_frame(rows: list[dict]) -> pd.DataFrame:
+    safe_rows = [{key: value for key, value in row.items() if key != "actual_path"} for row in rows]
+    columns = [
+        "asset_id", "logical_path", "source_format", "representation_id",
+        "representation_type", "kind", "text", "locator", "manifest_path", "preview_path",
+    ]
+    return pd.DataFrame(safe_rows).reindex(columns=columns)
+
+
+def write_outputs(image_vectors: np.ndarray, text_vectors: np.ndarray,
+                  image_rows: list[dict], text_rows: list[dict],
+                  manifests: list[dict], embedding_dim: int):
     image_dir = OUTPUT_DIR / "indexes" / "image"
     text_dir = OUTPUT_DIR / "indexes" / "text"
-    image_dir.mkdir(parents=True, exist_ok=True)
-    text_dir.mkdir(parents=True, exist_ok=True)
+    unified_dir = OUTPUT_DIR / "indexes" / "unified"
+    representation_dir = OUTPUT_DIR / "representations"
+    for directory in (image_dir, text_dir, unified_dir, representation_dir):
+        directory.mkdir(parents=True, exist_ok=True)
 
-    image_index_path = image_dir / "faiss.index"
-    text_index_path = text_dir / "faiss.index"
-    image_meta_path = image_dir / "id_map.parquet"
-    text_meta_path = text_dir / "id_map.parquet"
-    manifest_path = OUTPUT_DIR / "indexes" / "manifest.json"
+    image_index = build_index(image_vectors, embedding_dim)
+    text_index = build_index(text_vectors, embedding_dim)
+    unified_vectors = np.concatenate([image_vectors, text_vectors], axis=0)
+    unified_index = build_index(unified_vectors, embedding_dim)
 
-    faiss.write_index(image_index, str(image_index_path))
-    faiss.write_index(text_index, str(text_index_path))
-    image_meta.to_parquet(image_meta_path, index=False)
-    text_meta.to_parquet(text_meta_path, index=False)
+    image_meta = metadata_frame(image_rows)
+    text_meta = metadata_frame(text_rows)
+    unified_meta = pd.concat([image_meta, text_meta], ignore_index=True)
+
+    faiss.write_index(image_index, str(image_dir / "faiss.index"))
+    faiss.write_index(text_index, str(text_dir / "faiss.index"))
+    faiss.write_index(unified_index, str(unified_dir / "faiss.index"))
+    image_meta.to_parquet(image_dir / "id_map.parquet", index=False)
+    text_meta.to_parquet(text_dir / "id_map.parquet", index=False)
+    unified_meta.to_parquet(unified_dir / "id_map.parquet", index=False)
+
+    representation_catalog = {
+        "schemaVersion": "1.0",
+        "datasetId": DATASET_ID,
+        "datasetVersionId": VERSION_ID,
+        "assetCount": len(manifests),
+        "textRepresentationCount": len(text_rows),
+        "visualRepresentationCount": len(image_rows),
+        "assets": [
+            {
+                "assetId": item["assetId"],
+                "sourcePath": item["sourcePath"],
+                "sourceFormat": item["sourceFormat"],
+                "manifestPath": f"/representations/manifests/{item['assetId']}.json",
+            }
+            for item in manifests
+        ],
+    }
+    (representation_dir / "manifest.json").write_text(
+        json.dumps(representation_catalog, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     manifest = {
+        "schemaVersion": "2.0",
         "datasetId": DATASET_ID,
         "datasetVersionId": VERSION_ID,
         "indexVersionId": INDEX_VERSION_ID,
@@ -141,10 +150,17 @@ def write_outputs(image_index, text_index, image_meta: pd.DataFrame, text_meta: 
         "textIndexPath": "/indexes/text/faiss.index",
         "imageMetadataPath": "/indexes/image/id_map.parquet",
         "textMetadataPath": "/indexes/text/id_map.parquet",
-        "imageCount": len(image_meta),
-        "textCount": len(text_meta),
+        "unifiedIndexPath": "/indexes/unified/faiss.index",
+        "unifiedMetadataPath": "/indexes/unified/id_map.parquet",
+        "representationManifestPath": "/representations/manifest.json",
+        "imageCount": len(image_rows),
+        "textCount": len(text_rows),
+        "unifiedCount": len(unified_meta),
+        "assetCount": len(manifests),
     }
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    (OUTPUT_DIR / "indexes" / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     return manifest
 
 
@@ -161,13 +177,17 @@ def callback_ready(manifest: dict):
         "textIndexPath": manifest["textIndexPath"],
         "imageMetadataPath": manifest["imageMetadataPath"],
         "textMetadataPath": manifest["textMetadataPath"],
+        "unifiedIndexPath": manifest["unifiedIndexPath"],
+        "unifiedMetadataPath": manifest["unifiedMetadataPath"],
+        "representationManifestPath": manifest["representationManifestPath"],
         "manifestPath": "/indexes/manifest.json",
         "embeddingDim": manifest["embeddingDim"],
         "imageCount": manifest["imageCount"],
         "textCount": manifest["textCount"],
+        "unifiedCount": manifest["unifiedCount"],
     }
-    resp = requests.post(url, headers=headers, json=body, timeout=60)
-    resp.raise_for_status()
+    response = requests.post(url, headers=headers, json=body, timeout=60)
+    response.raise_for_status()
 
 
 def callback_failed(message: str):
@@ -177,82 +197,37 @@ def callback_failed(message: str):
     headers = {"Content-Type": "application/json"}
     if BACKEND_BEARER_TOKEN:
         headers["Authorization"] = f"Bearer {BACKEND_BEARER_TOKEN}"
-    resp = requests.post(url, headers=headers, json={"errorMessage": message}, timeout=60)
-    resp.raise_for_status()
+    response = requests.post(url, headers=headers, json={"errorMessage": message}, timeout=60)
+    response.raise_for_status()
 
 
 def main():
     try:
-        captions_path = find_captions_json()
-        basename_to_path = index_input_files()
-        data = json.loads(captions_path.read_text(encoding="utf-8"))
-        images = data.get("images", [])
-        annotations = data.get("annotations", [])
-        image_id_to_captions: dict[int, list[str]] = {}
-        for ann in annotations:
-            image_id = ann.get("image_id")
-            caption = ann.get("caption")
-            if image_id is None or not caption:
-                continue
-            image_id_to_captions.setdefault(image_id, []).append(str(caption).strip())
-
-        rows = []
-        for image in images:
-            file_name = image.get("file_name")
-            image_id = image.get("id")
-            if not file_name:
-                continue
-            logical_path = basename_to_path.get(file_name) or basename_to_path.get(Path(file_name).name)
-            if logical_path is None:
-                continue
-            actual_path = INPUT_DIR / logical_path.relative_to("/")
-            if not actual_path.exists():
-                continue
-            captions = image_id_to_captions.get(image_id, [])
-            asset_id = deterministic_asset_id(VERSION_ID, logical_path.as_posix())
-            rows.append({
-                "asset_id": asset_id,
-                "logical_path": normalize_path(logical_path.as_posix()),
-                "actual_path": actual_path,
-                "file_name": file_name,
-                "captions": captions,
-            })
-
-        if not rows:
-            raise RuntimeError("no valid image-caption pairs found")
+        if not VERSION_ID:
+            raise RuntimeError("VERSION_ID/versionId is required")
+        bundle = build_representations(INPUT_DIR, OUTPUT_DIR, VERSION_ID)
+        if not bundle.manifests:
+            raise RuntimeError("no supported business files found")
+        if not bundle.text_units:
+            raise RuntimeError("no text representations generated")
 
         model, processor = load_model()
-        image_paths = [row["actual_path"] for row in rows]
-        image_vectors = encode_images(model, processor, image_paths)
+        text_vectors = encode_texts(model, processor, [row["text"] for row in bundle.text_units])
+        image_vectors = encode_images(model, processor, [row["actual_path"] for row in bundle.visual_units])
+        embedding_dim = text_vectors.shape[1]
+        if image_vectors.size and image_vectors.shape[1] != embedding_dim:
+            raise RuntimeError("CLIP text and image embeddings are not in the same vector space")
+        if not image_vectors.size:
+            image_vectors = np.empty((0, embedding_dim), dtype="float32")
 
-        text_rows = []
-        for row in rows:
-            captions = row["captions"] or [row["file_name"]]
-            for caption in captions:
-                text_rows.append({
-                    "asset_id": row["asset_id"],
-                    "logical_path": row["logical_path"],
-                    "text": caption,
-                })
-        text_vectors = encode_texts(model, processor, [r["text"] for r in text_rows])
-
-        image_index = build_index(image_vectors)
-        text_index = build_index(text_vectors)
-
-        image_meta = pd.DataFrame([
-            {
-                "asset_id": row["asset_id"],
-                "logical_path": row["logical_path"],
-                "texts": row["captions"] or [row["file_name"]],
-            }
-            for row in rows
-        ])
-        text_meta = pd.DataFrame(text_rows)
-        manifest = write_outputs(image_index, text_index, image_meta, text_meta, image_vectors.shape[1])
+        manifest = write_outputs(
+            image_vectors, text_vectors, bundle.visual_units, bundle.text_units,
+            bundle.manifests, embedding_dim,
+        )
         callback_ready(manifest)
-    except Exception as e:
+    except Exception as exc:
         try:
-            callback_failed(str(e))
+            callback_failed(str(exc))
         finally:
             raise
 

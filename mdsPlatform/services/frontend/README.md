@@ -4,8 +4,10 @@
 
 ## 访问方式
 
-- 直接打开：`services/frontend/index.html`
 - 后端启动后访问：`http://localhost:8888/data-space/index.html`
+- 问答入口：`http://localhost:8888/data-space/index.html#qa`
+
+从仓库根目录运行 `./start-all.ps1` 启动完整项目。问答页使用数据空间账号登录，加载当前组织真实的 READY 数据集，支持文本、图片、RAG 回答及来源下载。前端通过同源 `/api/data-space/qa` 接口通信，不能通过直接双击 HTML 文件完成登录和问答。
 
 ## 本次场景
 

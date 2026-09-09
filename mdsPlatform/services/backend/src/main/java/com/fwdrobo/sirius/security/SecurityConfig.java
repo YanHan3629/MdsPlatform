@@ -53,6 +53,8 @@ public class SecurityConfig {
                         .requestMatchers("/ws/**").permitAll()
                         // 数据空间流通演示页面与闭环 API 可直接访问，便于前后端联调和方案展示
                         .requestMatchers("/", "/index.html", "/data-space/**", "/favicon.ico").permitAll()
+                        .requestMatchers("/api/data-space/qa/health").permitAll()
+                        .requestMatchers("/api/data-space/qa", "/api/data-space/qa/**").authenticated()
                         .requestMatchers("/api/data-space/**").permitAll()
                         // 鏀捐鐧诲綍鍜屽埛鏂版帴鍙?
                         .requestMatchers(HttpMethod.POST, "/api/auth/login", "/api/auth/refresh").permitAll()

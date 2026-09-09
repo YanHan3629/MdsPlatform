@@ -8,9 +8,13 @@ public record MmIndexReadyReq(
         String textIndexPath,
         String imageMetadataPath,
         String textMetadataPath,
+        String unifiedIndexPath,
+        String unifiedMetadataPath,
+        String representationManifestPath,
         String manifestPath,
         Integer embeddingDim,
         Long imageCount,
-        Long textCount
+        Long textCount,
+        Long unifiedCount
 ) {
 }

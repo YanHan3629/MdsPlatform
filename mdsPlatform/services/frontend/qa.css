@@ -1,0 +1,8 @@
+[hidden]{display:none!important}
+.qa-answer{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8;margin:16px 0}
+.qa-notice{padding:12px;background:#fff7e6;border-radius:12px;color:#925b00}
+#qaSources .compact{overflow-wrap:anywhere}
+#qaSources .compact>div{min-width:0}
+#qaDataset{max-width:100%}
+#qaProgress,#qaMeta,#qaDatasetInfo{color:var(--muted)}
+.btn:disabled{opacity:.55;cursor:wait}

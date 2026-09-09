@@ -40,6 +40,17 @@ class ManifestLoader:
         text_meta_file = self.backend.download_to(
             bundle["textMetadataUrl"], self._target_path(base_dir, bundle["textMetadataPath"])
         )
+        unified_index = None
+        unified_metadata = None
+        if bundle.get("unifiedIndexUrl") and bundle.get("unifiedMetadataUrl"):
+            unified_index_file = self.backend.download_to(
+                bundle["unifiedIndexUrl"], self._target_path(base_dir, bundle["unifiedIndexPath"])
+            )
+            unified_meta_file = self.backend.download_to(
+                bundle["unifiedMetadataUrl"], self._target_path(base_dir, bundle["unifiedMetadataPath"])
+            )
+            unified_index = faiss.read_index(str(unified_index_file))
+            unified_metadata = pd.read_parquet(unified_meta_file)
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
         return {
@@ -49,4 +60,6 @@ class ManifestLoader:
             "text_index": faiss.read_index(str(text_index_file)),
             "image_metadata": pd.read_parquet(image_meta_file),
             "text_metadata": pd.read_parquet(text_meta_file),
+            "unified_index": unified_index,
+            "unified_metadata": unified_metadata,
         }

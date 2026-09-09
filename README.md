@@ -1,80 +1,111 @@
 # 产业链数据空间平台
 
-面向产业链多方数据安全共享与可信流通的后端平台。以链主企业为中心，连接各业务域供给方，实现数据注册认证、安全接入、治理索引、产品发布、消费搜索、合约自动推送的完整闭环。
+面向产业链多方数据共享、检索与分析的完整项目。数据空间前端、Spring Boot 后端、多模态检索、统一模态索引、多模态问答和 Qwen3.5 模型服务通过一套 Docker Compose 运行。
 
 ## 技术栈
 
 | 组件 | 技术 |
 |---|---|
-| 业务后端 | Java Spring Boot + MyBatis + Flyway |
-| 在线检索 | Python FastAPI |
-| 离线索引构建 | Python (容器任务) |
-| 数据库 | PostgreSQL 16 |
-| 对象存储 | MinIO |
-| 缓存 | Redis |
-| 容器化 | Docker Compose |
+| 前端 | HTML / CSS / JavaScript，由后端统一提供 |
+| 业务后端 | Java 17 / Spring Boot / MyBatis / Flyway |
+| 多模态检索与索引 | FastAPI / CLIP / FAISS |
+| 多模态问答 | FastAPI / Qwen3.5-0.8B / vLLM |
+| 存储 | PostgreSQL 16 / MinIO / Redis |
+| 部署 | Docker Compose，项目名 `multimodal-dataspace` |
 
 ## 快速启动
 
-```bash
-cd services/backend
-docker compose up -d
+前置条件：Docker Desktop（Linux 容器与 NVIDIA GPU 支持）、支持 `include` 的 Docker Compose v2、Java 17 和 Maven。本地模型放在 `mdsPlatform/services/qa-service/Qwen3.5-0.8B/`，CLIP 模型沿用检索与索引服务各自的模型目录。
+
+在仓库根目录运行：
+
+```powershell
+.\start-all.ps1
 ```
 
-访问前端界面：`http://localhost:8888/data-space/index.html`
+已构建镜像时可跳过构建：
 
-## 平台四层页面
+```powershell
+.\start-all.ps1 -NoBuild
+```
 
-| 页面 | 说明 |
-|---|---|
-| **总览驾驶舱** | KPI 指标卡、7 步闭环流程、实时事件面板、资源目录表格 |
-| **供给方工作台** | 企业注册认证 → 数据源接入上传（MinIO）→ 资源目录 → 治理加工 → 索引构建 → 产品发布 |
-| **链主消费搜索** | 按关键词/业务域/模态搜索数据产品，预览样本，发起消费意向 |
-| **合约与推送** | 确认合约（数据源、发送时间、质量线），按约定自动加密推送，交付记录审计 |
+统一入口：`http://localhost:8888/data-space/index.html`
+
+多模态问答：`http://localhost:8888/data-space/index.html#qa`
+
+```powershell
+docker compose ps
+docker compose logs --tail 100 qa-service vllm
+.\stop-all.ps1
+```
+
+停止脚本保留容器及数据。问答与 vLLM 的编排统一放在根目录 `compose.yml`，数据空间基础服务由其引入后端编排文件。`qa-service` 与 `search-service` 均只保留服务代码、Dockerfile 和依赖等文件，请从根目录启动完整项目。
+
+## 数据空间问答
+
+1. 在“多模态问答”页面登录已有数据空间账号。
+2. 选择当前组织已建立 READY 索引的真实数据集，页面自动携带数据集、版本和索引 UUID。
+3. 输入问题，可补充文本或最多两张图片，选择任务和检索类型。
+4. 查看回答、检索路由及引用依据；“下载来源文件”通过后端校验权限并读取原文件。
+
+支持纯用户资料、仅问题检索和混合输入；支持文字检索、图片检索和双路检索。输入或选择已明确检索类型时直接使用规则，仅歧义输入调用 Qwen3.5 分析意图。
+
+前端统一请求 `/api/data-space/qa`，后端校验账号组织及索引范围，再调用问答服务。问答服务在项目内通过 `sirius`、`search-service` 和 `vllm` 服务名通信，请求凭据相互隔离。来源文件通过同源后端下载，浏览器无需访问容器内的 MinIO 主机名。
+
+演示驾驶舱中的 `ds-…` 目录和数据库中的真实索引是不同的记录。问答页只列出数据库中可检索的真实索引，不会把演示 READY 标签作为检索成功的依据。旧索引仍兼容；跨格式统一描述需要重新构建索引。
 
 ## 核心 API
 
-接口前缀：`/api/data-space`
+| 接口 | 说明 |
+|---|---|
+| `POST /api/auth/login` | 数据空间账号登录 |
+| `GET /api/data-space/qa/health` | 问答服务与模型状态 |
+| `GET /api/data-space/qa/datasets` | 当前组织可用的真实数据集与索引 |
+| `POST /api/data-space/qa` | JSON 或 multipart 问答 |
+| `POST /api/data-space/qa/search` | 使用指定索引检索并保留统一描述 |
+| `GET /api/data-space/qa/assets/{datasetId}/{versionId}/{assetId}` | 校验权限后下载来源 |
 
-```text
-GET  /snapshot                          # 全局快照
-POST /spaces/register                   # 空间注册
-POST /spaces/{spaceId}/verify           # 空间认证
-POST /sources                           # 数据源接入
-POST /sources/{sourceId}/files          # 文件上传
-POST /sources/{sourceId}/catalogs       # 资源目录
-POST /sources/{sourceId}/govern         # 治理加工
-POST /datasets/{datasetId}/build-index  # 索引构建
-POST /datasets/{datasetId}/publish      # 产品发布
-GET  /products/search                   # 产品搜索
-POST /intents                           # 消费意向
-POST /contracts                         # 生成合约
-POST /contracts/{contractId}/dispatch   # 合约推送
+除健康检查外，问答接口需要 `Authorization: Bearer <token>`。问答请求字段沿用 [问答服务说明](mdsPlatform/services/qa-service/README.md)。
+
+## 数据与资源
+
+业务数据沿用仓库外的 `../Multimodal Data Space Platform/`：数据库位于 `data/pgdata`，文件位于 `data/minio_data`，可导入样本位于 `dataset`。可通过绝对路径环境变量 `DATASPACE_STORAGE_ROOT` 修改位置。
+
+本地 4 GB 显存配置保留：2048 token 上下文、最多 2 张图片、GPU 使用率 0.78、并发序列数 2、默认回答上限 512 token。模型启动需要一定时间，页面会显示实际模型就绪状态。
+
+如果本机镜像源无法获取标准基础镜像，但已有依赖完整的 `backend-sirius:latest` 和 `sirius-mm-qa-service:baseline`，可在 Maven 打包成功后离线更新应用层：
+
+```powershell
+docker build -f scripts/refresh-local.Dockerfile --target backend -t sirius-backend:latest .
+docker build -f scripts/refresh-local.Dockerfile --target qa -t sirius-mm-qa-service:latest .
+.\start-all.ps1 -NoBuild
 ```
-
-## 数据安全设计
-
-- **数据隔离**：各供给方 MinIO 存储物理隔离，密钥独立管理
-- **权限管控**：基于身份的访问控制，未授权产品不可见
-- **传输加密**：推送端到端加密，数字签名可验证完整性与来源
-- **全链审计**：注册 → 接入 → 索引 → 消费 → 推送 → 交付，全链路可追溯
 
 ## 项目结构
 
+```text
+MdsPlatform/
+├── compose.yml                 # 统一 Docker 项目入口
+├── start-all.ps1 / stop-all.ps1 # 统一启停
+├── scripts/                    # 本地镜像更新与联调工具
+└── mdsPlatform/services/
+    ├── frontend/               # 数据空间与问答页面
+    ├── backend/                # 业务 API、问答代理与权限
+    ├── search-service/         # 在线多模态检索
+    ├── index-builder/          # 统一描述与索引
+    └── qa-service/             # 问答、意图路由、RAG 与模型编排
 ```
-services/
-├── backend/           # Spring Boot 主服务
-│   ├── src/main/java/com/fwdrobo/sirius/
-│   │   ├── dataspace/     # 数据空间流通闭环
-│   │   ├── minio/         # MinIO 配置
-│   │   ├── service/       # 业务服务层
-│   │   ├── controller/    # API 控制层
-│   │   └── security/      # JWT 认证
-│   ├── src/main/resources/
-│   │   ├── static/data-space/   # 前端页面
-│   │   ├── script/minio/        # MinIO 初始化脚本
-│   │   └── db/migration/        # Flyway 迁移
-│   └── docker-compose.yml
-├── search-service/     # Python 在线检索
-└── index-builder/      # Python 离线索引构建
+
+数据空间业务闭环和格式处理详见 [平台说明](mdsPlatform/README.md)。
+
+## 联调验证
+
+`scripts/check-integration.cjs` 验证账号登录、索引范围校验、真实模型文本问答、CLIP 检索、来源下载和图片双路 RAG。使用环境变量 `QA_TEST_USERNAME`、`QA_TEST_PASSWORD`，或本地被 Git 忽略的 `.env.qa-test` 提供测试凭据：
+
+```powershell
+node scripts/check-integration.cjs
 ```
+
+`scripts/check-qa-ui.cjs` 使用 Playwright 与本机 Edge 验证页面登录、数据集选择、真实 RAG、来源下载和退出登录。需要在本机安装 Playwright 或通过 `NODE_PATH` 指向已有依赖，并准备 `.env.qa-test`。
+
+2026-09-08 本地验证：后端 26 项测试（25 通过、1 项因缺少可选 COCO 样本跳过）；问答 17 项测试通过；真实接口脚本返回 `INTEGRATION_OK`，浏览器流程返回 `UI_OK`。业务数据保持原有外置挂载，已替换的旧服务容器已清理，历史任务容器保留。

@@ -51,6 +51,7 @@ services:
 
   redis:
     image: redis:latest
+    restart: unless-stopped
     ports:
       - "6379:6379"
     networks:
@@ -60,6 +61,7 @@ services:
     build:
       context: ../search-service
     image: sirius-mm-search-service:latest
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "18080"]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18080/healthz', timeout=3)"]
@@ -91,6 +93,7 @@ services:
 
   sirius:
     build: .
+    image: sirius-backend:latest
     restart: unless-stopped
     depends_on:
       db:
@@ -135,6 +138,7 @@ services:
       MINIO_BUCKET: siriusdb-files
 
       MM_SEARCH_BASE_URL: http://search-service:18080
+      QA_SERVICE_BASE_URL: http://qa-service:18081
       MM_INDEX_BUILDER_CMD: "MODEL_PATH=/app/clip_model_chinese python /app/build_index.py"
 
       # 任务容器回连后端的地址：job 容器运行在默认网桥，用网关 IP 而非 host.docker.internal
@@ -152,4 +156,4 @@ volumes:
 
 networks:
   shared-net:
-    external: true
+    driver: bridge

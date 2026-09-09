@@ -53,10 +53,14 @@ public class MmIndexController {
                 req.textIndexPath(),
                 req.imageMetadataPath(),
                 req.textMetadataPath(),
+                req.unifiedIndexPath(),
+                req.unifiedMetadataPath(),
+                req.representationManifestPath(),
                 req.manifestPath(),
                 req.embeddingDim(),
                 req.imageCount(),
-                req.textCount());
+                req.textCount(),
+                req.unifiedCount());
     }
 
     @PostMapping("/internal/datasets/{datasetId}/versions/{versionId}/indexes/{indexVersionId}/failed")

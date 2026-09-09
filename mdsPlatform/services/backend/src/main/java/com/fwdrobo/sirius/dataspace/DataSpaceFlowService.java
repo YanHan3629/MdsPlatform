@@ -3,6 +3,7 @@ package com.fwdrobo.sirius.dataspace;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fwdrobo.sirius.service.MinioService;
+import com.fwdrobo.sirius.util.DataFileFormatClassifier;
 import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -282,7 +283,10 @@ public class DataSpaceFlowService {
                 try {
                     String fileName = normalizeObjectPath(file.getOriginalFilename());
                     String contentType = resolveContentType(fileName, file.getContentType());
-                    String objectKey = "data-space/sources/" + sourceId + "/raw/" + fileName;
+                    DataFileFormatClassifier.Classification classification =
+                            DataFileFormatClassifier.classify(fileName, contentType);
+                    String objectKey = "data-space/sources/" + sourceId + "/"
+                            + classification.storageCategory() + "/" + fileName;
                     long size = file.getSize();
                     if (isJsonFile(fileName, contentType)) {
                         byte[] bytes = file.getBytes();
@@ -299,7 +303,9 @@ public class DataSpaceFlowService {
                             "objectKey", objectKey,
                             "bucket", minioService.getBucket(),
                             "contentType", contentType,
-                            "mediaType", mediaType(fileName, contentType),
+                            "fileFormat", classification.format(),
+                            "storageCategory", classification.storageCategory(),
+                            "mediaType", classification.mediaType(),
                             "size", size,
                             "uploadedAt", nowText()));
                 } catch (IOException ex) {
@@ -318,16 +324,19 @@ public class DataSpaceFlowService {
             addSourceFilesLocked(liveSource, fileItems.size(), uploadBytes);
             liveSource.put("sampleCount", samples.size());
             liveSource.put("imageCount", records.stream().filter(item -> "IMAGE".equals(item.get("mediaType"))).count());
+            liveSource.put("textFileCount", records.stream().filter(item -> "TEXT".equals(item.get("mediaType"))).count());
+            liveSource.put("formatCounts", formatCounts(records));
             liveSource.put("captionCount", samples.stream().filter(item -> item.get("caption") != null).count());
             liveSource.put("minioBucket", minioService.getBucket());
-            liveSource.put("storagePrefix", "data-space/sources/" + sourceId + "/raw/");
+            liveSource.put("storagePrefix", "data-space/sources/" + sourceId + "/");
+            liveSource.put("storagePrefixes", storagePrefixes(sourceId, records));
             liveSource.put("lastUploadAt", nowText());
             addEventLocked("文件上传", liveSource.get("sourceName") + " 已上传 " + fileItems.size() + " 个对象到 MinIO", "UPLOADED");
             return mapOf(
                     "source", cloneMap(liveSource),
                     "files", fileItems,
                     "sampleCount", samples.size(),
-                    "message", "数据资源已上传并持久化到 MinIO，资源清单和可搜索样本索引已更新");
+                    "message", "数据资源已按文件格式分类存储到 MinIO，资源清单和可搜索样本索引已更新");
         }
     }
 
@@ -1092,6 +1101,8 @@ public class DataSpaceFlowService {
                         "imageFileName", fileName,
                         "objectKey", item.get("objectKey"),
                         "contentType", item.get("contentType"),
+                        "fileFormat", item.get("fileFormat"),
+                        "storageCategory", item.get("storageCategory"),
                         "caption", str(item, "fileName", ""),
                         "modalityType", "IMAGE"));
             } else if ("TEXT".equals(mediaType)) {
@@ -1100,10 +1111,40 @@ public class DataSpaceFlowService {
                         "fileName", fileName,
                         "objectKey", item.get("objectKey"),
                         "contentType", item.get("contentType"),
+                        "fileFormat", item.get("fileFormat"),
+                        "storageCategory", item.get("storageCategory"),
                         "caption", str(item, "fileName", ""),
                         "modalityType", "TEXT"));
+            } else {
+                samples.add(mapOf(
+                        "sampleId", id("sample"),
+                        "fileName", fileName,
+                        "objectKey", item.get("objectKey"),
+                        "contentType", item.get("contentType"),
+                        "fileFormat", item.get("fileFormat"),
+                        "storageCategory", item.get("storageCategory"),
+                        "caption", fileName,
+                        "modalityType", mediaType));
             }
         }
+    }
+
+    private Map<String, Long> formatCounts(List<Map<String, Object>> records) {
+        Map<String, Long> counts = new LinkedHashMap<>();
+        for (Map<String, Object> record : records) {
+            String format = str(record, "fileFormat", "BINARY");
+            counts.put(format, counts.getOrDefault(format, 0L) + 1L);
+        }
+        return counts;
+    }
+
+    private Map<String, String> storagePrefixes(String sourceId, List<Map<String, Object>> records) {
+        Map<String, String> prefixes = new LinkedHashMap<>();
+        for (Map<String, Object> record : records) {
+            String category = str(record, "storageCategory", "binary");
+            prefixes.putIfAbsent(category, "data-space/sources/" + sourceId + "/" + category + "/");
+        }
+        return prefixes;
     }
 
     private void appendJsonSamples(String sourceId, List<Map<String, Object>> samples, String jsonFileName, byte[] bytes) {
@@ -1477,41 +1518,7 @@ public class DataSpaceFlowService {
     }
 
     private String resolveContentType(String fileName, String contentType) {
-        if (contentType != null && !contentType.isBlank()) {
-            return contentType;
-        }
-        String lower = fileName.toLowerCase(Locale.ROOT);
-        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) {
-            return "image/jpeg";
-        }
-        if (lower.endsWith(".png")) {
-            return "image/png";
-        }
-        if (lower.endsWith(".json")) {
-            return "application/json";
-        }
-        if (lower.endsWith(".txt") || lower.endsWith(".csv") || lower.endsWith(".md")) {
-            return "text/plain";
-        }
-        return "application/octet-stream";
-    }
-
-    private String mediaType(String fileName, String contentType) {
-        String lower = fileName.toLowerCase(Locale.ROOT);
-        String type = contentType == null ? "" : contentType.toLowerCase(Locale.ROOT);
-        if (type.startsWith("image/") || isImageFile(Path.of(lower))) {
-            return "IMAGE";
-        }
-        if (isJsonFile(fileName, contentType) || type.startsWith("text/") || lower.endsWith(".csv") || lower.endsWith(".md")) {
-            return "TEXT";
-        }
-        if (type.startsWith("audio/")) {
-            return "AUDIO";
-        }
-        if (type.startsWith("video/")) {
-            return "VIDEO";
-        }
-        return "BINARY";
+        return DataFileFormatClassifier.resolveContentType(fileName, contentType);
     }
 
     private boolean isJsonFile(String fileName, String contentType) {

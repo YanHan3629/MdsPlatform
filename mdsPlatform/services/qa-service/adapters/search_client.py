@@ -9,11 +9,12 @@ class SearchServiceClient:
     2) text_to_image - 调用平级 search-service 内部文搜图接口（仅文本，接口格式一致）。
     """
 
-    def __init__(self):
+    def __init__(self, bearer_token=None):
         self.backend_base_url = settings.backend_base_url.rstrip("/")
         self.backend_headers = {}
-        if settings.backend_bearer_token:
-            self.backend_headers["Authorization"] = f"Bearer {settings.backend_bearer_token}"
+        token = settings.backend_bearer_token if bearer_token is None else bearer_token
+        if token:
+            self.backend_headers["Authorization"] = f"Bearer {token}"
         self.base_url = settings.search_service_base_url.rstrip("/")
         self.timeout = settings.request_timeout_seconds
 
@@ -22,10 +23,11 @@ class SearchServiceClient:
 
         需配置 BACKEND_BEARER_TOKEN；返回条目结构与 MmTextToImageResp 一致。
         """
-        url = f"{self.backend_base_url}/api/mm/search/text-to-image"
+        url = f"{self.backend_base_url}{settings.backend_search_path}"
         payload = {
             "datasetId": str(dataset_id),
             "versionId": str(version_id),
+            "indexVersionId": str(index_version_id),
             "query": query,
             "topK": top_k,
         }

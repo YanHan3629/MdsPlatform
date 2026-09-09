@@ -15,6 +15,8 @@ class LoadedIndex:
     text_index: object
     image_metadata: object
     text_metadata: object
+    unified_index: object = None
+    unified_metadata: object = None
 
 
 class IndexRegistry:
@@ -44,6 +46,8 @@ class IndexRegistry:
             text_index=loaded["text_index"],
             image_metadata=loaded["image_metadata"],
             text_metadata=loaded["text_metadata"],
+            unified_index=loaded.get("unified_index"),
+            unified_metadata=loaded.get("unified_metadata"),
         )
         self._cache[key] = wrapped
         return wrapped

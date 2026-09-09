@@ -148,6 +148,13 @@
                     <include>**/*.xml</include>
                 </includes>
             </resource>
+            <resource>
+                <directory>../frontend</directory>
+                <targetPath>static/data-space</targetPath>
+                <includes>
+                    <include>**/*</include>
+                </includes>
+            </resource>
         </resources>
         
         <plugins>

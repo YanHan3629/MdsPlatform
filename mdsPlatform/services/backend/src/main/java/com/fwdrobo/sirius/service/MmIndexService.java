@@ -81,7 +81,7 @@ public class MmIndexService {
         }
 
         MmMetadataImportService.ImportSummary summary = mmMetadataImportService.importFromDatasetVersion(dataset, version);
-        version.setSampleCount((long) summary.imageCount());
+        version.setSampleCount((long) summary.assetCount());
         version.setImageCount((long) summary.imageCount());
         version.setTextCount((long) summary.textCount());
         mmDatasetVersionMapper.update(version);
@@ -99,7 +99,12 @@ public class MmIndexService {
         indexVersion.setModelName(req.modelName());
         indexVersion.setImageCount((long) summary.imageCount());
         indexVersion.setTextCount((long) summary.textCount());
-        indexVersion.setMeta(JsonbTypeHandler.toJsonNode(Map.of("annotationsPath", summary.annotationsPath())));
+        Map<String, Object> initialIndexMeta = new HashMap<>();
+        if (summary.annotationsPath() != null) {
+            initialIndexMeta.put("annotationsPath", summary.annotationsPath());
+        }
+        initialIndexMeta.put("assetCount", summary.assetCount());
+        indexVersion.setMeta(JsonbTypeHandler.toJsonNode(initialIndexMeta));
         mmIndexVersionMapper.insert(indexVersion);
 
         Map<String, Object> jobParams = new HashMap<>();
@@ -140,6 +145,7 @@ public class MmIndexService {
                 "buildJobId", jobId,
                 "buildRunId", run.getRunId(),
                 "indexStatus", indexVersion.getIndexStatus(),
+                "importedAssetCount", summary.assetCount(),
                 "importedImageCount", summary.imageCount(),
                 "importedTextCount", summary.textCount()
         );
@@ -164,10 +170,14 @@ public class MmIndexService {
                                         String textIndexPath,
                                         String imageMetadataPath,
                                         String textMetadataPath,
+                                        String unifiedIndexPath,
+                                        String unifiedMetadataPath,
+                                        String representationManifestPath,
                                         String manifestPath,
                                         Integer embeddingDim,
                                         Long imageCount,
-                                        Long textCount) {
+                                        Long textCount,
+                                        Long unifiedCount) {
         MmDatasetVersion version = mmDatasetVersionService.getVersionOrNotFound(versionId);
         if (!datasetId.equals(version.getDatasetId())) {
             throw ExceptionUtils.badRequest("dataset 与 version 不匹配");
@@ -177,6 +187,18 @@ public class MmIndexService {
         Map<String, Object> meta = new HashMap<>();
         meta.put("imageMetadataPath", imageMetadataPath);
         meta.put("textMetadataPath", textMetadataPath == null ? imageMetadataPath : textMetadataPath);
+        if (unifiedIndexPath != null) {
+            meta.put("unifiedIndexPath", unifiedIndexPath);
+        }
+        if (unifiedMetadataPath != null) {
+            meta.put("unifiedMetadataPath", unifiedMetadataPath);
+        }
+        if (representationManifestPath != null) {
+            meta.put("representationManifestPath", representationManifestPath);
+        }
+        if (unifiedCount != null) {
+            meta.put("unifiedCount", unifiedCount);
+        }
         indexVersion.setMeta(JsonbTypeHandler.toJsonNode(meta));
         mmIndexVersionMapper.update(indexVersion);
         version.setActiveIndexVersionId(indexVersionId);
@@ -212,6 +234,9 @@ public class MmIndexService {
         }
         String imageMetadataPath = indexVersion.getMetadataPath();
         String textMetadataPath = imageMetadataPath;
+        String unifiedIndexPath = null;
+        String unifiedMetadataPath = null;
+        String representationManifestPath = null;
         if (indexVersion.getMeta() != null) {
             if (indexVersion.getMeta().hasNonNull("imageMetadataPath")) {
                 imageMetadataPath = indexVersion.getMeta().get("imageMetadataPath").asText();
@@ -219,8 +244,23 @@ public class MmIndexService {
             if (indexVersion.getMeta().hasNonNull("textMetadataPath")) {
                 textMetadataPath = indexVersion.getMeta().get("textMetadataPath").asText();
             }
+            if (indexVersion.getMeta().hasNonNull("unifiedIndexPath")) {
+                unifiedIndexPath = indexVersion.getMeta().get("unifiedIndexPath").asText();
+            }
+            if (indexVersion.getMeta().hasNonNull("unifiedMetadataPath")) {
+                unifiedMetadataPath = indexVersion.getMeta().get("unifiedMetadataPath").asText();
+            }
+            if (indexVersion.getMeta().hasNonNull("representationManifestPath")) {
+                representationManifestPath = indexVersion.getMeta().get("representationManifestPath").asText();
+            }
         }
         Duration expire = Duration.ofSeconds(previewExpireSeconds);
+        String unifiedIndexUrl = unifiedIndexPath == null ? null
+                : fileService.downloadUrl(dataset.getIndexRepoId(), indexVersion.getIndexCommitId(), unifiedIndexPath, expire).getUrl();
+        String unifiedMetadataUrl = unifiedMetadataPath == null ? null
+                : fileService.downloadUrl(dataset.getIndexRepoId(), indexVersion.getIndexCommitId(), unifiedMetadataPath, expire).getUrl();
+        String representationManifestUrl = representationManifestPath == null ? null
+                : fileService.downloadUrl(dataset.getIndexRepoId(), indexVersion.getIndexCommitId(), representationManifestPath, expire).getUrl();
         return new MmResolvedIndexBundleResp(
                 datasetId,
                 versionId,
@@ -232,11 +272,17 @@ public class MmIndexService {
                 indexVersion.getTextIndexPath(),
                 imageMetadataPath,
                 textMetadataPath,
+                unifiedIndexPath,
+                unifiedMetadataPath,
+                representationManifestPath,
                 fileService.downloadUrl(dataset.getIndexRepoId(), indexVersion.getIndexCommitId(), indexVersion.getManifestPath(), expire).getUrl(),
                 fileService.downloadUrl(dataset.getIndexRepoId(), indexVersion.getIndexCommitId(), indexVersion.getImageIndexPath(), expire).getUrl(),
                 fileService.downloadUrl(dataset.getIndexRepoId(), indexVersion.getIndexCommitId(), indexVersion.getTextIndexPath(), expire).getUrl(),
                 fileService.downloadUrl(dataset.getIndexRepoId(), indexVersion.getIndexCommitId(), imageMetadataPath, expire).getUrl(),
                 fileService.downloadUrl(dataset.getIndexRepoId(), indexVersion.getIndexCommitId(), textMetadataPath, expire).getUrl(),
+                unifiedIndexUrl,
+                unifiedMetadataUrl,
+                representationManifestUrl,
                 indexVersion.getModelName(),
                 indexVersion.getIndexType()
         );

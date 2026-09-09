@@ -13,11 +13,17 @@ public record MmResolvedIndexBundleResp(
         String textIndexPath,
         String imageMetadataPath,
         String textMetadataPath,
+        String unifiedIndexPath,
+        String unifiedMetadataPath,
+        String representationManifestPath,
         String manifestUrl,
         String imageIndexUrl,
         String textIndexUrl,
         String imageMetadataUrl,
         String textMetadataUrl,
+        String unifiedIndexUrl,
+        String unifiedMetadataUrl,
+        String representationManifestUrl,
         String modelName,
         String indexType
 ) {

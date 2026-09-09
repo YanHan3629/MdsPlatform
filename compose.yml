@@ -1,5 +1,12 @@
+name: multimodal-dataspace
+
+# Canonical project entry for data space, search, QA and model inference.
+include:
+  - mdsPlatform/services/backend/docker-compose.yml
+
 services:
   vllm:
+    restart: unless-stopped
     # 支持 Qwen3.5 的 vLLM 官方镜像；如需其他 tag 可用环境变量 VLLM_IMAGE 覆盖
     image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.17.0}
     command:
@@ -20,7 +27,7 @@ services:
       - --enforce-eager
       - --skip-mm-profiling
     volumes:
-      - ./Qwen3.5-0.8B:/models/Qwen3.5-0.8B:ro
+      - ./mdsPlatform/services/qa-service/Qwen3.5-0.8B:/models/Qwen3.5-0.8B:ro
     ports:
       - "8000:8000"
     ipc: host
@@ -40,20 +47,29 @@ services:
       start_period: 120s
 
   qa-service:
-    build: .
+    build: ./mdsPlatform/services/qa-service
     image: sirius-mm-qa-service:latest
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "18081"]
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
       VLLM_BASE_URL: http://vllm:8000
       MODEL_NAME: Qwen/Qwen3.5-0.8B
       LLM_BACKEND: vllm
       DEFAULT_MAX_TOKENS: "512"
-      BACKEND_BASE_URL: http://host.docker.internal:8888
-      SEARCH_SERVICE_BASE_URL: http://host.docker.internal:18080
+      BACKEND_BASE_URL: http://sirius:8888
+      SEARCH_SERVICE_BASE_URL: http://search-service:18080
+      BACKEND_SEARCH_PATH: /api/data-space/qa/search
     ports:
       - "18081:18081"
     depends_on:
+      sirius:
+        condition: service_started
+      search-service:
+        condition: service_healthy
       vllm:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18081/healthz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

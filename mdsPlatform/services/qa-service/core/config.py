@@ -50,6 +50,7 @@ class Settings:
     # 检索回图片时，最多下载/入提示的图片数量
     max_retrieved_images: int = _env_int("MAX_RETRIEVED_IMAGES", 3)
     max_prompt_images: int = _env_int("MAX_PROMPT_IMAGES", 2)
+    max_image_pixels: int = _env_int("MAX_IMAGE_PIXELS", 262144)
 
     # LLM 后端：vllm（默认）| mock（降级，用于无 vLLM 时的连通性测试）
     llm_backend: str = os.environ.get("LLM_BACKEND", "vllm")
@@ -57,6 +58,7 @@ class Settings:
     # 数据空间后端（索引 bundle 来源，格式与 search-service 一致）
     backend_base_url: str = os.environ.get("BACKEND_BASE_URL", "http://localhost:8888")
     backend_bearer_token: str = os.environ.get("BACKEND_BEARER_TOKEN", "")
+    backend_search_path: str = os.environ.get("BACKEND_SEARCH_PATH", "/api/mm/search/text-to-image")
     search_service_base_url: str = os.environ.get("SEARCH_SERVICE_BASE_URL", "http://localhost:18080")
     local_cache_dir: str = os.environ.get("LOCAL_CACHE_DIR", "/tmp/qa-cache")
 

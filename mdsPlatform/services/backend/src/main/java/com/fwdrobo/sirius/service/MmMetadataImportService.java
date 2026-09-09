@@ -9,9 +9,9 @@ import com.fwdrobo.sirius.entity.mm.MmAssetText;
 import com.fwdrobo.sirius.entity.mm.MmDataset;
 import com.fwdrobo.sirius.entity.mm.MmDatasetVersion;
 import com.fwdrobo.sirius.handler.JsonbTypeHandler;
-import com.fwdrobo.sirius.mapper.ArtifactFileMapper;
 import com.fwdrobo.sirius.mapper.MmAssetMapper;
 import com.fwdrobo.sirius.mapper.MmAssetTextMapper;
+import com.fwdrobo.sirius.util.DataFileFormatClassifier;
 import com.fwdrobo.sirius.util.ExceptionUtils;
 import com.fwdrobo.sirius.util.MmDeterministicIdUtils;
 import com.fwdrobo.sirius.util.PathUtils;
@@ -25,6 +25,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 @Service
@@ -34,18 +35,17 @@ public class MmMetadataImportService {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int ASSET_UPSERT_BATCH_SIZE = 1000;
     private static final int ASSET_TEXT_INSERT_BATCH_SIZE = 1000;
+    private static final Set<String> BUSINESS_FORMATS = Set.of(
+            "JPG", "JPEG", "PNG", "SVG", "TXT", "CSV", "JSON", "JSONL", "XLSX", "PDF", "OBJ", "STEP");
 
     private final FileService fileService;
-    private final ArtifactFileMapper artifactFileMapper;
     private final MmAssetMapper mmAssetMapper;
     private final MmAssetTextMapper mmAssetTextMapper;
 
     public MmMetadataImportService(FileService fileService,
-                                   ArtifactFileMapper artifactFileMapper,
                                    MmAssetMapper mmAssetMapper,
                                    MmAssetTextMapper mmAssetTextMapper) {
         this.fileService = fileService;
-        this.artifactFileMapper = artifactFileMapper;
         this.mmAssetMapper = mmAssetMapper;
         this.mmAssetTextMapper = mmAssetTextMapper;
     }
@@ -63,94 +63,62 @@ public class MmMetadataImportService {
             throw ExceptionUtils.badRequest("当前版本没有可导入的文件");
         }
 
-        Map<String, FileResp> filesByPath = new HashMap<>();
-        Map<String, String> basenameToPath = new HashMap<>();
-        String annotationsPath = null;
-        for (FileResp file : files) {
-            filesByPath.put(file.getLogicalPath(), file);
-            String logicalPath = file.getLogicalPath();
-            String baseName = baseName(logicalPath);
-            basenameToPath.putIfAbsent(baseName, logicalPath);
-            String lower = logicalPath.toLowerCase();
-            if (annotationsPath == null && lower.endsWith(".json") && lower.contains("caption")) {
-                annotationsPath = logicalPath;
-            }
-        }
-
-        if (annotationsPath == null) {
-            throw ExceptionUtils.badRequest("未找到 captions json，请确认已上传 captions_val2017.json");
-        }
-
-        JsonNode root;
-        try (var stream = fileService.downloadContent(dataset.getRawRepoId(), version.getRawCommitId(), annotationsPath)) {
-            root = MAPPER.readTree(stream.inputStream());
-        }
-
-        JsonNode images = root.get("images");
-        JsonNode annotations = root.get("annotations");
-        if (images == null || !images.isArray() || annotations == null || !annotations.isArray()) {
-            throw ExceptionUtils.badRequest("captions json 不是标准 COCO 格式");
-        }
-
-        Map<Long, JsonNode> imageMap = new LinkedHashMap<>();
-        for (JsonNode image : images) {
-            if (image.get("id") != null) {
-                imageMap.put(image.get("id").asLong(), image);
-            }
-        }
-
-        Map<Long, List<String>> imageIdToCaptions = new LinkedHashMap<>();
-        for (JsonNode ann : annotations) {
-            if (ann.get("image_id") == null) continue;
-            long imageId = ann.get("image_id").asLong();
-            String caption = ann.hasNonNull("caption") ? ann.get("caption").asText() : null;
-            if (caption == null || caption.isBlank()) continue;
-            imageIdToCaptions.computeIfAbsent(imageId, ignored -> new ArrayList<>()).add(caption.trim());
-        }
-
+        CocoMetadata coco = loadOptionalCocoMetadata(dataset, version, files);
         List<MmAsset> assets = new ArrayList<>();
         List<MmAssetText> texts = new ArrayList<>();
+        int imageCount = 0;
 
-        for (Map.Entry<Long, JsonNode> entry : imageMap.entrySet()) {
-            long imageId = entry.getKey();
-            JsonNode image = entry.getValue();
-            String fileName = image.hasNonNull("file_name") ? image.get("file_name").asText() : null;
-            if (fileName == null || fileName.isBlank()) continue;
-            String resolvedPath = resolveImageLogicalPath(fileName, basenameToPath);
-            if (resolvedPath == null) {
-                log.warn("skip image because logical path not found, fileName={}", fileName);
+        for (FileResp file : files) {
+            String logicalPath = PathUtils.normalizePath(file.getLogicalPath());
+            if (coco.annotationsPath() != null && coco.annotationsPath().equals(logicalPath)) {
                 continue;
             }
-            UUID assetId = MmDeterministicIdUtils.assetId(version.getVersionId(), resolvedPath);
-            FileResp file = artifactFileMapper.selectByCommitIdAndPath(version.getRawCommitId(), PathUtils.normalizePath(resolvedPath));
+            DataFileFormatClassifier.Classification classification =
+                    DataFileFormatClassifier.classify(logicalPath, file.getContentType());
+            if (!BUSINESS_FORMATS.contains(classification.format())) {
+                continue;
+            }
+
+            String fileName = baseName(logicalPath);
+            CocoImage image = coco.imagesByFileName().get(fileName);
+            UUID assetId = MmDeterministicIdUtils.assetId(version.getVersionId(), logicalPath);
             MmAsset asset = new MmAsset();
             asset.setAssetId(assetId);
             asset.setDatasetVersionId(version.getVersionId());
-            asset.setFileId(file == null ? null : file.getFileId());
-            asset.setAssetType("IMAGE");
-            asset.setLogicalPath(PathUtils.normalizePath(resolvedPath));
+            asset.setFileId(file.getFileId());
+            asset.setAssetType(classification.mediaType());
+            asset.setLogicalPath(logicalPath);
             asset.setFileName(fileName);
-            asset.setSourceAssetCode(String.valueOf(imageId));
-            asset.setSizeBytes(file == null ? null : file.getSizeBytes());
-            asset.setContentType(file == null ? null : file.getContentType());
-            asset.setWidth(image.hasNonNull("width") ? image.get("width").asInt() : null);
-            asset.setHeight(image.hasNonNull("height") ? image.get("height").asInt() : null);
+            asset.setSourceAssetCode(image == null ? logicalPath : String.valueOf(image.imageId()));
+            asset.setSizeBytes(file.getSizeBytes());
+            asset.setContentType(file.getContentType());
+            asset.setWidth(image == null ? null : image.width());
+            asset.setHeight(image == null ? null : image.height());
             asset.setStatus("ACTIVE");
-            asset.setMeta(JsonbTypeHandler.toJsonNode(Map.of(
-                    "source", "COCO",
-                    "imageId", imageId,
-                    "annotationsPath", annotationsPath
-            )));
+            Map<String, Object> assetMeta = new LinkedHashMap<>();
+            assetMeta.put("source", image == null ? "DATASET_FILE" : "COCO");
+            assetMeta.put("sourceFormat", classification.format());
+            assetMeta.put("storageCategory", classification.storageCategory());
+            if (coco.annotationsPath() != null) {
+                assetMeta.put("annotationsPath", coco.annotationsPath());
+            }
+            asset.setMeta(JsonbTypeHandler.toJsonNode(assetMeta));
             assets.add(asset);
+            if ("IMAGE".equals(classification.mediaType())) {
+                imageCount++;
+            }
 
-            List<String> captions = imageIdToCaptions.getOrDefault(imageId, List.of());
-            int seq = 1;
+            List<String> captions = image == null
+                    ? List.of()
+                    : coco.captionsByImageId().getOrDefault(image.imageId(), List.of());
+            int sequence = 1;
             for (String caption : captions) {
                 MmAssetText text = new MmAssetText();
-                text.setAssetTextId(UUID.nameUUIDFromBytes((assetId + ":caption:" + seq + ":" + caption).getBytes(StandardCharsets.UTF_8)));
+                text.setAssetTextId(UUID.nameUUIDFromBytes(
+                        (assetId + ":caption:" + sequence + ":" + caption).getBytes(StandardCharsets.UTF_8)));
                 text.setAssetId(assetId);
                 text.setTextRole("CAPTION");
-                text.setSeqNo(seq++);
+                text.setSeqNo(sequence++);
                 text.setLanguageCode(detectLanguage(caption));
                 text.setContent(caption);
                 text.setSourceType("IMPORTED");
@@ -159,38 +127,85 @@ public class MmMetadataImportService {
             }
         }
 
-        mmAssetMapper.deleteByDatasetVersionId(version.getVersionId());
-        if (!assets.isEmpty()) {
-            batchUpsertAssets(assets);
+        if (assets.isEmpty()) {
+            throw ExceptionUtils.badRequest("当前版本不包含可构建统一描述的业务文件");
         }
+
+        mmAssetMapper.deleteByDatasetVersionId(version.getVersionId());
+        batchUpsertAssets(assets);
         if (!texts.isEmpty()) {
             batchInsertAssetTexts(texts);
         }
 
-        version.setImageCount((long) assets.size());
+        version.setImageCount((long) imageCount);
         version.setTextCount((long) texts.size());
         version.setSampleCount((long) assets.size());
         if ("DRAFT".equals(version.getVersionStatus())) {
             version.setVersionStatus("UPLOADING");
         }
 
-        return new ImportSummary(annotationsPath, assets.size(), texts.size());
+        return new ImportSummary(coco.annotationsPath(), assets.size(), imageCount, texts.size());
     }
 
-    private String resolveImageLogicalPath(String fileName, Map<String, String> basenameToPath) {
-        if (fileName.startsWith("/")) {
-            return fileName;
+    private CocoMetadata loadOptionalCocoMetadata(MmDataset dataset,
+                                                  MmDatasetVersion version,
+                                                  List<FileResp> files) throws Exception {
+        for (FileResp file : files) {
+            String logicalPath = PathUtils.normalizePath(file.getLogicalPath());
+            if (!logicalPath.toLowerCase().endsWith(".json")) {
+                continue;
+            }
+            JsonNode root;
+            try (var stream = fileService.downloadContent(
+                    dataset.getRawRepoId(), version.getRawCommitId(), logicalPath)) {
+                root = MAPPER.readTree(stream.inputStream());
+            } catch (Exception exception) {
+                log.debug("skip non-readable JSON while looking for optional COCO metadata: {}", logicalPath);
+                continue;
+            }
+            JsonNode images = root == null ? null : root.get("images");
+            JsonNode annotations = root == null ? null : root.get("annotations");
+            if (images == null || !images.isArray() || annotations == null || !annotations.isArray()) {
+                continue;
+            }
+
+            Map<Long, String> imageIdToName = new HashMap<>();
+            Map<String, CocoImage> imagesByFileName = new HashMap<>();
+            for (JsonNode image : images) {
+                if (!image.hasNonNull("id") || !image.hasNonNull("file_name")) {
+                    continue;
+                }
+                long imageId = image.get("id").asLong();
+                String fileName = baseName(image.get("file_name").asText());
+                imageIdToName.put(imageId, fileName);
+                imagesByFileName.put(fileName, new CocoImage(
+                        imageId,
+                        image.hasNonNull("width") ? image.get("width").asInt() : null,
+                        image.hasNonNull("height") ? image.get("height").asInt() : null));
+            }
+            Map<Long, List<String>> captionsByImageId = new LinkedHashMap<>();
+            for (JsonNode annotation : annotations) {
+                if (!annotation.hasNonNull("image_id") || !annotation.hasNonNull("caption")) {
+                    continue;
+                }
+                long imageId = annotation.get("image_id").asLong();
+                if (!imageIdToName.containsKey(imageId)) {
+                    continue;
+                }
+                String caption = annotation.get("caption").asText().trim();
+                if (!caption.isBlank()) {
+                    captionsByImageId.computeIfAbsent(imageId, ignored -> new ArrayList<>()).add(caption);
+                }
+            }
+            return new CocoMetadata(logicalPath, imagesByFileName, captionsByImageId);
         }
-        String direct = basenameToPath.get(fileName);
-        if (direct != null) return direct;
-        String base = baseName(fileName);
-        return basenameToPath.get(base);
+        return new CocoMetadata(null, Map.of(), Map.of());
     }
 
     private String baseName(String logicalPath) {
         String normalized = PathUtils.normalizePath(logicalPath);
-        int idx = normalized.lastIndexOf('/');
-        return idx >= 0 ? normalized.substring(idx + 1) : normalized;
+        int index = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'));
+        return index >= 0 ? normalized.substring(index + 1) : normalized;
     }
 
     private String detectLanguage(String text) {
@@ -204,23 +219,31 @@ public class MmMetadataImportService {
     }
 
     private void batchUpsertAssets(List<MmAsset> assets) {
-        int total = assets.size();
-        for (int from = 0; from < total; from += ASSET_UPSERT_BATCH_SIZE) {
-            int to = Math.min(from + ASSET_UPSERT_BATCH_SIZE, total);
+        for (int from = 0; from < assets.size(); from += ASSET_UPSERT_BATCH_SIZE) {
+            int to = Math.min(from + ASSET_UPSERT_BATCH_SIZE, assets.size());
             mmAssetMapper.upsertBatch(assets.subList(from, to));
         }
-        log.info("metadata import assets upserted in batches: total={}, batchSize={}", total, ASSET_UPSERT_BATCH_SIZE);
+        log.info("metadata import assets upserted in batches: total={}, batchSize={}",
+                assets.size(), ASSET_UPSERT_BATCH_SIZE);
     }
 
     private void batchInsertAssetTexts(List<MmAssetText> texts) {
-        int total = texts.size();
-        for (int from = 0; from < total; from += ASSET_TEXT_INSERT_BATCH_SIZE) {
-            int to = Math.min(from + ASSET_TEXT_INSERT_BATCH_SIZE, total);
+        for (int from = 0; from < texts.size(); from += ASSET_TEXT_INSERT_BATCH_SIZE) {
+            int to = Math.min(from + ASSET_TEXT_INSERT_BATCH_SIZE, texts.size());
             mmAssetTextMapper.insertBatch(texts.subList(from, to));
         }
-        log.info("metadata import asset texts inserted in batches: total={}, batchSize={}", total, ASSET_TEXT_INSERT_BATCH_SIZE);
+        log.info("metadata import asset texts inserted in batches: total={}, batchSize={}",
+                texts.size(), ASSET_TEXT_INSERT_BATCH_SIZE);
     }
 
-    public record ImportSummary(String annotationsPath, int imageCount, int textCount) {
+    private record CocoMetadata(String annotationsPath,
+                                Map<String, CocoImage> imagesByFileName,
+                                Map<Long, List<String>> captionsByImageId) {
+    }
+
+    private record CocoImage(long imageId, Integer width, Integer height) {
+    }
+
+    public record ImportSummary(String annotationsPath, int assetCount, int imageCount, int textCount) {
     }
 }

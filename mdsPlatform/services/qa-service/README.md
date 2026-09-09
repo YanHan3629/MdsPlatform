@@ -35,10 +35,9 @@
 qa-service/Qwen3.5-0.8B/
 ```
 
-启动 vLLM 和问答服务：
+问答已接入数据空间前端和后端，与所有服务同属 `multimodal-dataspace` Docker 项目。在仓库根目录启动完整项目：
 
 ```powershell
-cd mdsPlatform/services/qa-service
 .\start-all.ps1
 ```
 
@@ -49,6 +48,8 @@ cd mdsPlatform/services/qa-service
 ```
 
 默认地址：
+
+统一问答页面：`http://localhost:8888/data-space/index.html#qa`。使用数据空间账号登录后选择真实数据集，页面自动传递版本和索引；调用入口为 `POST /api/data-space/qa`。后端校验访问范围并转发当前请求的凭据，不需要为每个用户配置全局 `BACKEND_BEARER_TOKEN`。来源文件通过后端同源下载。服务目录不再提供独立 Compose 或启停脚本，统一使用仓库根目录的编排与脚本。
 
 | 服务 | 地址 |
 |---|---|
@@ -197,11 +198,12 @@ curl.exe -X POST http://localhost:18081/api/v1/qa `
 
 - vLLM 上下文长度为 2048 token；
 - 单次最多输入 2 张图片，超过时返回 HTTP 400；
+- 每张图片在 vLLM 处理时最多使用 262144 像素，避免原始大图耗尽 2048 token 上下文；CLIP 查询和原文件保持原始分辨率；
 - 每条文本依据和上下文最多取前 500 个字符；
 - 默认生成上限为 512 token；
 - vLLM 同时处理的请求数为 2。
 
-这些限制可以通过环境变量或 `docker-compose.yml` 调整，但提高图片数量、上下文长度或并发数可能导致显存不足。
+这些限制可以通过环境变量或仓库根目录 `compose.yml` 调整，但提高图片数量、上下文长度或并发数可能导致显存不足。
 
 ## 环境变量
 
@@ -214,14 +216,18 @@ curl.exe -X POST http://localhost:18081/api/v1/qa `
 | `DEFAULT_MAX_TOKENS` | `2048` | 非 Compose 启动时的生成上限 |
 | `MAX_UPLOAD_IMAGES` | `2` | 接口允许上传的图片数 |
 | `MAX_PROMPT_IMAGES` | `2` | 实际送入模型的图片数 |
+| `MAX_IMAGE_PIXELS` | `262144` | vLLM 每张图的像素上限，控制视觉 token 占用 |
 | `MAX_TEXT_CHARS` | `500` | 每条文本依据的字符上限 |
 | `SEARCH_SERVICE_BASE_URL` | `http://localhost:18080` | 多模态检索服务地址 |
 | `BACKEND_BASE_URL` | `http://localhost:8888` | 数据空间后端地址 |
 | `BACKEND_BEARER_TOKEN` | 空 | 调用带预览图的后端检索接口时使用 |
+| `BACKEND_SEARCH_PATH` | `/api/mm/search/text-to-image` | 统一项目配置为 `/api/data-space/qa/search`，保留指定索引的统一描述 |
 
 Compose 会将 `DEFAULT_MAX_TOKENS` 覆盖为 `512`，以适配本地 4GB 显存。
 
 ## 测试
+
+`requirements.txt` 仅包含问答服务的运行依赖；vLLM 由根目录编排的模型容器提供，不需要在问答服务中安装。
 
 安装测试依赖：
 
@@ -261,7 +267,8 @@ qa-service/
 │   └── retrieval_planner.py  # 快路径规则与检索计划
 ├── scripts/manual_qa.py      # 手动测试脚本
 ├── tests/                    # 独立回归测试
-├── docker-compose.yml        # vLLM 与 FastAPI 编排
-├── start-all.ps1             # 启动脚本
-└── stop-all.ps1              # 停止脚本
+├── Dockerfile               # 与 search-service 一致的服务镜像入口
+├── requirements.txt         # 问答服务运行依赖
+├── requirements-test.txt    # 回归测试依赖
+└── .dockerignore            # 排除模型权重及本地缓存
 ```
