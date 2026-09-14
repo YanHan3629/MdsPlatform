@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -14,6 +14,21 @@ class SourceItem(BaseModel):
     content_preview: str = ""
     asset_id: Optional[UUID] = None
     logical_path: Optional[str] = None
+    data_version: Optional[str] = None
+    index_version: Optional[str] = None
+    evidence_id: Optional[str] = None
+    semantic_space: Optional[str] = None
+    locator: Dict[str, Any] = Field(default_factory=dict)
+    entity_id: Optional[str] = None
+    time_range: Optional[Dict[str, Any]] = None
+    raw_score: Optional[float] = None
+    score_type: Optional[str] = None
+    facts: Dict[str, Any] = Field(default_factory=dict)
+    units: Dict[str, Any] = Field(default_factory=dict)
+    calculation_policy: Dict[str, Any] = Field(default_factory=dict)
+    provenance: Dict[str, Any] = Field(default_factory=dict)
+    quality_flags: List[str] = Field(default_factory=list)
+    evidence_type: Optional[str] = None
 
 
 class QAMeta(BaseModel):
@@ -33,6 +48,13 @@ class QAMeta(BaseModel):
     intent_analysis_used: bool = False
     intent_confidence: float = 1.0
     intent_reason: str = ""
+    retrieval_support: float = 0.0
+    data_quality: float = 0.0
+    fact_confidence_source: str = "evidence_programmatic"
+    planning_ms: float = 0.0
+    retrieval_ms: float = 0.0
+    generation_ms: float = 0.0
+    professional_timings_ms: Dict[str, float] = Field(default_factory=dict)
 
 
 class RetrievedItem(BaseModel):

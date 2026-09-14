@@ -111,11 +111,12 @@ curl.exe -X POST http://localhost:18081/api/v1/qa `
 
 - `user_data_only`、`retrievalMode=none` 或 `retrievalType=none`；
 - 显式指定 `retrievalType`；
-- `question_only` 或没有上传图片，此时直接使用文搜图；
+- 显式提供完整 `queryPlan`；
+- 能由文字中的时序、几何、结构化或文本规则唯一确定专业计划；
 - 问题明确包含“图搜文”“文搜图”“结合图片和文字检索”或“不检索”等表达；
 - 使用 `bundle`，或请求缺少数据集和索引标识。
 
-只有携带图片的 `hybrid` 请求在 `retrievalType=auto` 且规则无法判断时，才会由 Qwen3.5-0.8B 进行一次最多 128 token 的结构化意图分析。意图分析失败时回退到原有文搜图流程。
+其余歧义请求才由 Qwen3.5-0.8B 进行一次最多 384 token 的结构化意图分析。纯文字不再一律路由到文搜图：模型只能输出受 schema、操作白名单、时间/单位口径和资源预算约束的 QueryPlan，不能执行意 SQL、Python 或文件操作。非法计划在 search-service 执行边界再次拒绝。
 
 | `retrievalType` | 行为 |
 |---|---|
@@ -124,8 +125,13 @@ curl.exe -X POST http://localhost:18081/api/v1/qa `
 | `text_to_image` | 使用问题文字检索相关图片及描述 |
 | `image_to_text` | 使用上传图片检索相关文本 |
 | `dual` | 同时执行文搜图和图搜文，使用 RRF 融合并按资产 ID 去重 |
+| `professional` | 执行文本、视觉、结构化、时序、几何或有显式实体依赖的多检索器 QueryPlan |
 
-检索完成后的来源组装、RAG 提示词、vLLM 回答和内容 ID 回传流程保持一致。
+v1.12 仅对完整可确定的规则计划跳过意图模型。例如“筛选 difficulty 等于 easy 的记录”会保留等值条件，“体积大于100cm3”会分开解析数值和单位。复杂纯文本同样可调用 Qwen；无法表达的否定/析取、缺少时间/指标/样本等情况要求澄清，不静默降级为无条件 CLIP 查询。
+
+精确计算答案由程序绑定操作、指标、数值、单位、范围和口径后呈现，避免将样本数误写成均值或把 C 改写为 K；该核验不是通用事实真实性保证。专业视觉命中通过授权接口下载原图或当前索引的派生预览，Pillow 转码、最长边限制 512 像素，再遵守最多两张输入图的本地模型限制。预览失败会显式返回 `VISUAL_PREVIEW_UNAVAILABLE`，不会声称模型看到了图片。
+
+专业检索返回证据粒度的 `SourceItem`，保留数据/索引版本、evidence ID、语义空间、locator、实体、时间范围、原始分数类型、事实、单位、计算口径、来源和质量标记。提示词区分已计算事实、近似匹配和解释性推断；程序会剔除不存在的引用，并在精确结论含证据未支持数值、否认已命中硬条件或否认已命中形态候选时，改为带来源的可核验事实或近似候选列表。
 
 ## 任务类型
 
@@ -151,7 +157,8 @@ curl.exe -X POST http://localhost:18081/api/v1/qa `
 | `indexVersionId` | 空 | READY 索引版本 UUID；数据空间检索时必填 |
 | `useSearchService` | `true` | `auto` 模式是否优先使用在线检索服务 |
 | `retrievalMode` | `auto` | 检索提供方：`auto/search_service/bundle/none` |
-| `retrievalType` | `auto` | 检索类型：`auto/none/text_to_image/image_to_text/dual` |
+| `retrievalType` | `auto` | 检索类型：`auto/none/text_to_image/image_to_text/dual/professional` |
+| `queryPlan` | 空 | 严格类型的专业计划；明确提供时意图模型调用次数为 0 |
 | `topK` | `8` | 检索数量，范围 1～50 |
 | `maxTokens` | 服务默认值 | 生成长度，范围 1～32768 |
 | `temperature` | 服务默认值 | 采样温度，范围 0～2 |
@@ -178,7 +185,11 @@ curl.exe -X POST http://localhost:18081/api/v1/qa `
     "retrieval_type": "image_to_text",
     "intent_analysis_used": false,
     "intent_confidence": 1.0,
-    "intent_reason": "请求明确指定检索类型"
+    "intent_reason": "请求明确指定检索类型",
+    "planning_ms": 0.13,
+    "retrieval_ms": 12.4,
+    "generation_ms": 8187.0,
+    "professional_timings_ms": {}
   },
   "task_type": "general_qa",
   "retrieval_mode": "none",
@@ -188,9 +199,13 @@ curl.exe -X POST http://localhost:18081/api/v1/qa `
 }
 ```
 
-置信度优先根据生成 token 的平均概率计算；vLLM 未返回 logprobs 时，使用来源相关度进行保守估计。该值用于辅助展示，不等同于经过校准的事实正确率。
+置信度优先根据生成 token 的平均概率计算；vLLM 未返回 logprobs 时，使用来源相关度进行保守估计。该值用于辅助展示，不等同于经过校准的事实正确率。`retrieval_support`、`data_quality` 与 `fact_confidence_source` 分开表示检索支持、数据质量和事实核验来源。
 
 当请求没有任何参考依据时，服务不会返回虚构的 `[来源n]` 标记。
+
+专业问答会把裸 `[2]` 等标记规范为有效的 `[来源2]`，并剔除越界引用；无精确来源支撑的尺寸或单位数值不会作为已核验事实输出。`NEEDS_TIMEZONE_MAPPING`、`NEEDS_UNIT_MAPPING`、`TARGET_ENTITY_REQUIRED`、`NO_DATA` 等精确计算状态会转成明确的受限回答。真实关系缺失时，只能报告上游几何候选，不生成关联设备的趋势结论；证据冲突也会明确披露。
+
+显式或模型生成的专业查询计划在提交检索前再次校验：未知字段、无来源时区或倒置的时间边界返回 `NEEDS_CLARIFICATION`，不交给检索器猜测口径。
 
 ## 本地设备约束
 
@@ -213,7 +228,7 @@ curl.exe -X POST http://localhost:18081/api/v1/qa `
 | `MODEL_NAME` | `Qwen/Qwen3.5-0.8B` | 模型服务名称 |
 | `LLM_BACKEND` | `vllm` | `vllm` 或 `mock` |
 | `REQUEST_TIMEOUT_SECONDS` | `300` | 推理请求超时 |
-| `DEFAULT_MAX_TOKENS` | `2048` | 非 Compose 启动时的生成上限 |
+| `DEFAULT_MAX_TOKENS` | `512` | 默认生成上限 |
 | `MAX_UPLOAD_IMAGES` | `2` | 接口允许上传的图片数 |
 | `MAX_PROMPT_IMAGES` | `2` | 实际送入模型的图片数 |
 | `MAX_IMAGE_PIXELS` | `262144` | vLLM 每张图的像素上限，控制视觉 token 占用 |
@@ -223,35 +238,7 @@ curl.exe -X POST http://localhost:18081/api/v1/qa `
 | `BACKEND_BEARER_TOKEN` | 空 | 调用带预览图的后端检索接口时使用 |
 | `BACKEND_SEARCH_PATH` | `/api/mm/search/text-to-image` | 统一项目配置为 `/api/data-space/qa/search`，保留指定索引的统一描述 |
 
-Compose 会将 `DEFAULT_MAX_TOKENS` 覆盖为 `512`，以适配本地 4GB 显存。
-
-## 测试
-
-`requirements.txt` 仅包含问答服务的运行依赖；vLLM 由根目录编排的模型容器提供，不需要在问答服务中安装。
-
-安装测试依赖：
-
-```powershell
-python -m pip install -r requirements-test.txt
-```
-
-运行独立回归测试：
-
-```powershell
-python -m unittest discover -s tests -v
-```
-
-运行真实模型测试：
-
-```powershell
-python scripts/manual_qa.py `
-  --question "请用一句话说明冰箱压缩机的作用" `
-  --json-only
-
-python scripts/manual_qa.py `
-  --question "请描述这张图片" `
-  --image C:/data/example.jpg
-```
+Compose 同样显式固定 `DEFAULT_MAX_TOKENS=512`，以适配本地 4GB 显存。
 
 ## 项目结构
 
@@ -265,10 +252,7 @@ qa-service/
 ├── services/                 # 提示词、问答编排和可选检索
 │   ├── intent_analyzer.py    # Qwen 检索意图分析
 │   └── retrieval_planner.py  # 快路径规则与检索计划
-├── scripts/manual_qa.py      # 手动测试脚本
-├── tests/                    # 独立回归测试
 ├── Dockerfile               # 与 search-service 一致的服务镜像入口
 ├── requirements.txt         # 问答服务运行依赖
-├── requirements-test.txt    # 回归测试依赖
 └── .dockerignore            # 排除模型权重及本地缓存
 ```

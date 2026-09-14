@@ -43,6 +43,10 @@ dataset/
 # Local multimodal QA model weights (too large for regular Git storage)
 mdsPlatform/services/qa-service/Qwen3.5-0.8B/*.safetensors
 
+# Downloaded CPU Chinese text embedding weights; Docker builds fetch a pinned revision.
+mdsPlatform/services/index-builder/bge-small-zh-v1.5/
+mdsPlatform/services/search-service/bge-small-zh-v1.5/
+
 # Temporary upload/debug artifacts
 upload_failed_*.json
 upload_summary_*.json

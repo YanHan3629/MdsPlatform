@@ -1,6 +1,5 @@
 package com.fwdrobo.sirius.util;
 
-import java.nio.file.Path;
 import java.util.regex.Pattern;
 
 public class PathUtils {
@@ -9,7 +8,6 @@ public class PathUtils {
 
     // 路径白名单（校验到时前导 / 已被截去）：a/b/c
     private static final Pattern PATH_ALLOWED_PATTERN = Pattern.compile("^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$");
-    private static final Path SANDBOX_ROOT = Path.of("/sandbox_root");
 
     // 校验路径
     public static String normalizePath(String p) {
@@ -35,17 +33,10 @@ public class PathUtils {
             }
         }
 
-        // 把 "/a/b" 变成 "a/b", resolve 后变成 "/sandbox_root/a/b"
-        Path resolved = SANDBOX_ROOT.resolve(pathBody).normalize();
-
-        // 越界检查：如果 normalize 之后跑到了 sandbox 之外，说明有 ../ 攻击
-        if (!resolved.startsWith(SANDBOX_ROOT)) {
-            throw ExceptionUtils.badRequest("illegal path");
-        }
-
-        // 还原路径
-        String result = resolved.toString().substring(SANDBOX_ROOT.toString().length());
-        return result.isEmpty() ? "/" : result;
+        // Logical artifact paths are platform independent.  The whitelist and
+        // explicit dot-segment checks above make filesystem resolution
+        // unnecessary and avoid Windows converting '/' to '\\'.
+        return "/" + pathBody;
     }
 
     // 校验相对路径：a/b/c.jpg
@@ -78,12 +69,7 @@ public class PathUtils {
             }
         }
 
-        Path resolved = SANDBOX_ROOT.resolve(candidate).normalize();
-        if (!resolved.startsWith(SANDBOX_ROOT)) {
-            throw ExceptionUtils.badRequest("illegal relative path");
-        }
-
-        return resolved.toString().substring(SANDBOX_ROOT.toString().length() + 1);
+        return candidate;
     }
 
     // 组合目录基路径和相对路径，得到最终逻辑路径

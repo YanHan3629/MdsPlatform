@@ -27,7 +27,7 @@ SUPPORTED_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".svg", ".txt", ".csv", ".json",
     ".jsonl", ".xlsx", ".pdf", ".obj", ".step",
 }
-INTERNAL_NAMES = {"faiss.index", "id_map.parquet", "manifest.json"}
+INTERNAL_NAMES = {"faiss.index", "id_map.parquet", "manifest.json", "files.json", "files.tsv"}
 TIME_NAME_RE = re.compile(
     r"(^|[_\-\s])(time|timestamp|datetime|date|created|updated|recorded|采集时间|时间|日期|时刻)($|[_\-\s])",
     re.IGNORECASE,
@@ -126,8 +126,13 @@ def _parse_datetime(series: pd.Series, name: str) -> pd.Series:
     if pd.api.types.is_numeric_dtype(non_null) and TIME_NAME_RE.search(str(name)):
         numeric = pd.to_numeric(series, errors="coerce")
         median = numeric.dropna().abs().median()
-        unit = "ms" if median > 10_000_000_000 else "s"
-        return pd.to_datetime(numeric, unit=unit, errors="coerce", utc=True)
+        if 20_000 <= median <= 80_000:
+            return pd.to_datetime(numeric, unit="D", origin="1899-12-30", errors="coerce", utc=True)
+        if median >= 100_000_000_000:
+            return pd.to_datetime(numeric, unit="ms", errors="coerce", utc=True)
+        if median >= 1_000_000_000:
+            return pd.to_datetime(numeric, unit="s", errors="coerce", utc=True)
+        return pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns, UTC]")
     return pd.to_datetime(series, errors="coerce", utc=True, format="mixed")
 
 
@@ -625,9 +630,14 @@ def load_coco_captions(input_dir: Path) -> tuple[dict[str, list[str]], set[Path]
     return captions, metadata_files
 
 
-def build_representations(input_dir: Path, output_dir: Path, dataset_version_id: str) -> RepresentationBundle:
+def build_representations(input_dir: Path, output_dir: Path, dataset_version_id: str,
+                          *, retain_full_manifests: bool = True) -> RepresentationBundle:
     captions, metadata_files = load_coco_captions(input_dir)
     manifests: list[dict[str, Any]] = []
+    text_units: list[dict[str, Any]] = []
+    visual_units: list[dict[str, Any]] = []
+    manifest_dir = output_dir / "representations" / "manifests"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
     for path in sorted(input_dir.rglob("*")):
         if not path.is_file() or path.resolve() in metadata_files:
             continue
@@ -636,13 +646,7 @@ def build_representations(input_dir: Path, output_dir: Path, dataset_version_id:
             continue
         if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
             continue
-        manifests.append(build_asset_representation(path, input_dir, output_dir, dataset_version_id, captions))
-
-    text_units: list[dict[str, Any]] = []
-    visual_units: list[dict[str, Any]] = []
-    manifest_dir = output_dir / "representations" / "manifests"
-    manifest_dir.mkdir(parents=True, exist_ok=True)
-    for manifest in manifests:
+        manifest = build_asset_representation(path, input_dir, output_dir, dataset_version_id, captions)
         manifest_path = manifest_dir / f"{manifest['assetId']}.json"
         manifest_path.write_text(json.dumps(_json_safe(manifest), ensure_ascii=False, indent=2), encoding="utf-8")
         for unit in manifest["textUnits"]:
@@ -672,4 +676,12 @@ def build_representations(input_dir: Path, output_dir: Path, dataset_version_id:
                 "actual_path": Path(unit["path"]),
                 "preview_path": unit["outputPath"] or manifest["sourcePath"],
             })
+        # Runtime indexing needs only catalog identity after the detailed
+        # manifest has been durably written.  Tests and callers that inspect
+        # conversion details retain the historical full-manifest default.
+        manifests.append(manifest if retain_full_manifests else {
+            "assetId": manifest["assetId"],
+            "sourcePath": manifest["sourcePath"],
+            "sourceFormat": manifest["sourceFormat"],
+        })
     return RepresentationBundle(manifests, text_units, visual_units)

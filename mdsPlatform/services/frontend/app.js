@@ -282,7 +282,7 @@ function bindForms() {
   };
   $('#catalogForm').onsubmit = async e => { e.preventDefault(); const v = formData(e.currentTarget); const sourceId = v.sourceId; delete v.sourceId; await json(`/sources/${sourceId}/catalogs`, v); toast('资源目录已创建'); load(); };
   $('#governForm').onsubmit = async e => { e.preventDefault(); const v = formData(e.currentTarget); const sourceId = v.sourceId; delete v.sourceId; await json(`/sources/${sourceId}/govern`, v); toast('治理完成，已形成数据集'); load(); };
-  $('#indexForm').onsubmit = async e => { e.preventDefault(); const v = formData(e.currentTarget); const datasetId = v.datasetId; delete v.datasetId; await json(`/datasets/${datasetId}/build-index`, v); toast('索引构建完成，状态已 READY'); load(); };
+  $('#indexForm').onsubmit = async e => { e.preventDefault(); const v = formData(e.currentTarget); const datasetId = v.datasetId; delete v.datasetId; await json(`/datasets/${datasetId}/build-index`, v); toast('演示驾驶舱索引已更新；真实专业索引请在多模态问答页操作'); load(); };
   $('#publishForm').onsubmit = async e => { e.preventDefault(); const v = formData(e.currentTarget); const datasetId = v.datasetId; delete v.datasetId; await json(`/datasets/${datasetId}/publish`, v); toast('数据产品已发布并注册到产业链数据空间'); load(); };
   $('#searchBtn').onclick = () => searchProducts(true);
   $('#productKeyword').onkeydown = e => { if (e.key === 'Enter') searchProducts(true); };

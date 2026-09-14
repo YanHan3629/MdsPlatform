@@ -89,6 +89,8 @@ springdoc:
     operations-sorter: method
 
 mm:
+  internal:
+    token: ${MM_INTERNAL_TOKEN:}
   search:
     base-url: ${MM_SEARCH_BASE_URL:http://localhost:18080}
     preview-expire-seconds: ${MM_PREVIEW_EXPIRE_SECONDS:600}

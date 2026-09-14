@@ -18,34 +18,37 @@
         <result property="fileKey"     column="file_key"/>
         <result property="sizeBytes"   column="size_bytes" jdbcType="BIGINT"/>
         <result property="contentType" column="content_type"/>
+        <result property="sha256"      column="sha256"/>
+        <result property="uploadState" column="upload_state"/>
         <result property="createdAt"   column="created_at"/>
         <result property="updatedAt"   column="updated_at"/>
     </resultMap>
 
     <select id="addOrReplaceFile" resultMap="AddOrReplaceFileResultMap">
         INSERT INTO public.artifact_file (
-            commit_id, logical_path, bucket_name, file_key, content_type, device_id
+            commit_id, logical_path, bucket_name, file_key, content_type, device_id, upload_state
         )
         VALUES (
-            #{commitId}, #{logicalPath}, #{bucketName}, #{fileKey}, #{contentType}, #{deviceId}
+            #{commitId}, #{logicalPath}, #{bucketName}, #{fileKey}, #{contentType}, #{deviceId}, 'PREPARED'
         )
         ON CONFLICT (commit_id, logical_path)
         DO UPDATE SET
             bucket_name = EXCLUDED.bucket_name,
             file_key = EXCLUDED.file_key,
             content_type = EXCLUDED.content_type,
-            device_id = EXCLUDED.device_id
+            device_id = EXCLUDED.device_id,
+            upload_state = 'PREPARED'
         RETURNING file_id, (created_at = updated_at) AS inserted
     </select>
 
     <select id="addOrReplaceFileFull" resultMap="AddOrReplaceFileResultMap">
         INSERT INTO public.artifact_file (
         commit_id, logical_path, bucket_name, file_key,
-        minio_version_id, etag, size_bytes, content_type, device_id
+        minio_version_id, etag, size_bytes, content_type, device_id, sha256, upload_state
         )
         VALUES (
         #{commitId}, #{logicalPath}, #{bucketName}, #{fileKey},
-        #{versionId}, #{etag}, #{size}, #{contentType}, #{deviceId}
+        #{versionId}, #{etag}, #{size}, #{contentType}, #{deviceId}, #{sha256}, 'READY'
         )
         ON CONFLICT (commit_id, logical_path)
         DO UPDATE SET
@@ -55,7 +58,9 @@
         etag = EXCLUDED.etag,
         size_bytes = EXCLUDED.size_bytes,
         content_type = EXCLUDED.content_type,
-        device_id = EXCLUDED.device_id
+        device_id = EXCLUDED.device_id,
+        sha256 = EXCLUDED.sha256,
+        upload_state = 'READY'
         RETURNING file_id, (created_at = updated_at) AS inserted
     </select>
 
@@ -68,6 +73,8 @@
         af.file_key,
         af.size_bytes,
         af.content_type,
+        af.sha256,
+        af.upload_state,
         af.created_at,
         af.updated_at
         FROM public.artifact_file af
@@ -98,6 +105,8 @@
             af.file_key,
             af.size_bytes,
             af.content_type,
+            af.sha256,
+            af.upload_state,
             af.created_at,
             af.updated_at
         FROM public.artifact_file af

@@ -68,7 +68,13 @@ public class MmMetadataImportService {
         List<MmAssetText> texts = new ArrayList<>();
         int imageCount = 0;
 
-        for (FileResp file : files) {
+        for (FileResp listedFile : files) {
+            FileResp file = listedFile;
+            if (file.getSha256() == null || file.getSha256().isBlank()
+                    || !"READY".equals(file.getUploadState())) {
+                file = fileService.ensureContentIdentity(
+                        dataset.getRawRepoId(), version.getRawCommitId(), file.getLogicalPath());
+            }
             String logicalPath = PathUtils.normalizePath(file.getLogicalPath());
             if (coco.annotationsPath() != null && coco.annotationsPath().equals(logicalPath)) {
                 continue;
@@ -90,6 +96,7 @@ public class MmMetadataImportService {
             asset.setLogicalPath(logicalPath);
             asset.setFileName(fileName);
             asset.setSourceAssetCode(image == null ? logicalPath : String.valueOf(image.imageId()));
+            asset.setSha256(file.getSha256());
             asset.setSizeBytes(file.getSizeBytes());
             asset.setContentType(file.getContentType());
             asset.setWidth(image == null ? null : image.width());
@@ -203,8 +210,12 @@ public class MmMetadataImportService {
     }
 
     private String baseName(String logicalPath) {
-        String normalized = PathUtils.normalizePath(logicalPath);
-        int index = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'));
+        // COCO file_name is commonly a bare name or a relative path, whereas
+        // PathUtils intentionally accepts only repository logical paths.  A
+        // basename comparison must not turn valid COCO metadata into an
+        // illegal repository path.
+        String normalized = logicalPath == null ? "" : logicalPath.trim().replace('\\', '/');
+        int index = normalized.lastIndexOf('/');
         return index >= 0 ? normalized.substring(index + 1) : normalized;
     }
 

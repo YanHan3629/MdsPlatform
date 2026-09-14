@@ -1,11 +1,15 @@
-FROM eclipse-temurin:17-jre
+ARG BACKEND_BASE_IMAGE=eclipse-temurin:17-jre
+FROM ${BACKEND_BASE_IMAGE}
 
 WORKDIR /app
 
 ARG DEBIAN_FRONTEND=noninteractive
-RUN apt-get update -o Acquire::Retries=5 -o Acquire::http::Timeout="30" \
- && apt-get install -y --no-install-recommends ca-certificates docker.io \
- && rm -rf /var/lib/apt/lists/*
+ARG INSTALL_SYSTEM_PACKAGES=1
+RUN if [ "$INSTALL_SYSTEM_PACKAGES" = "1" ]; then \
+      apt-get update -o Acquire::Retries=5 -o Acquire::http::Timeout="30" \
+      && apt-get install -y --no-install-recommends ca-certificates docker.io \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 # 把本地打好的 jar 拷进去
 COPY target/sirius-backend-1.0-SNAPSHOT.jar sirius-backend.jar

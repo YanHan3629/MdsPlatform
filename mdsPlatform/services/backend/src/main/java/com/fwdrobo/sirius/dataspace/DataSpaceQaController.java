@@ -47,7 +47,7 @@ public class DataSpaceQaController {
     public List<Map<String, Object>> datasets() {
         UUID org = SecurityUtils.getUserOrgId();
         if (org == null) throw new ResponseStatusException(HttpStatus.FORBIDDEN, "账号未绑定组织");
-        return jdbc.query("""
+        List<Map<String, Object>> result = jdbc.query("""
                 SELECT d.dataset_id, d.dataset_name, d.modality_type, v.version_id, v.version_name,
                        i.index_version_id, i.index_status, v.sample_count
                 FROM mm_dataset d JOIN mm_dataset_version v ON v.dataset_id = d.dataset_id
@@ -67,18 +67,74 @@ public class DataSpaceQaController {
             item.put("sampleCount", rs.getLong("sample_count"));
             return item;
         }, org);
+        result.forEach(item -> item.put("capabilities", jdbc.queryForList("""
+                SELECT semantic_space AS "semanticSpace",index_type AS "indexType",
+                       registration_status AS status,coverage
+                FROM mm_index_registration WHERE index_version_id=? ORDER BY semantic_space
+                """, UUID.fromString(item.get("indexVersionId").toString()))));
+        return result;
     }
 
-    // Reject stale, mismatched or foreign scopes before any retrieval or model call.
+    /** Real durable ingestion progress for the signed-in organisation. */
+    @GetMapping("/indexing")
+    public List<Map<String, Object>> indexing() {
+        UUID org = SecurityUtils.getUserOrgId();
+        if (org == null) throw new ResponseStatusException(HttpStatus.FORBIDDEN, "账号未绑定组织");
+        return jdbc.queryForList("""
+                SELECT t.task_id AS "taskId",d.dataset_name AS "datasetName",v.version_name AS "versionName",
+                       t.task_status AS status,t.stage,t.attempt_count AS "attemptCount",
+                       t.max_attempts AS "maxAttempts",t.error_message AS error,t.updated_at AS "updatedAt"
+                FROM mm_ingest_task t JOIN mm_dataset d ON d.dataset_id=t.dataset_id
+                JOIN mm_dataset_version v ON v.version_id=t.dataset_version_id
+                WHERE t.org_id=? ORDER BY t.updated_at DESC LIMIT 50
+                """, org);
+    }
+
+    @GetMapping("/query-assets/{datasetId}/{versionId}")
+    public List<Map<String,Object>> queryAssets(@PathVariable UUID datasetId, @PathVariable UUID versionId) {
+        UUID org = SecurityUtils.getUserOrgId();
+        if (org == null) throw new ResponseStatusException(HttpStatus.FORBIDDEN,"账号未绑定组织");
+        return jdbc.queryForList("""
+                SELECT a.asset_id AS "assetId",a.logical_path AS "logicalPath"
+                FROM mm_asset a JOIN mm_dataset_version v ON v.version_id=a.dataset_version_id
+                JOIN mm_dataset d ON d.dataset_id=v.dataset_id
+                WHERE d.org_id=? AND d.dataset_id=? AND v.version_id=? AND d.status='ACTIVE'
+                  AND (lower(a.logical_path) LIKE '%.obj' OR lower(a.logical_path) LIKE '%.step' OR lower(a.logical_path) LIKE '%.stp')
+                ORDER BY a.logical_path LIMIT 500
+                """,org,datasetId,versionId);
+    }
+
+    // Reject incomplete, mismatched, unpublished or foreign scopes before any
+    // retrieval/model call. The selector lists ACTIVE only, while an explicit
+    // historical READY snapshot remains queryable for reproducibility.
     void validateScope(Map<String, ?> body) {
         String dataset = field(body, "datasetId", "dataset_id");
         String version = field(body, "versionId", "version_id");
         String index = field(body, "indexVersionId", "index_version_id");
         if (dataset.isBlank() && version.isBlank() && index.isBlank()) return;
-        boolean allowed = datasets().stream().anyMatch(d -> dataset.equals(d.get("datasetId"))
+        if (dataset.isBlank() || version.isBlank() || index.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "datasetId、versionId 与 indexVersionId 必须同时提供");
+        }
+        boolean active = datasets().stream().anyMatch(d -> dataset.equals(d.get("datasetId"))
                 && version.equals(d.get("versionId")) && index.equals(d.get("indexVersionId")));
-        if (!allowed) throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                "数据集、版本或索引不可用，请刷新并选择当前账号可访问的 READY 数据集");
+        if (active) return;
+        try {
+            Integer readable = jdbc.queryForObject("""
+                    SELECT count(*) FROM mm_dataset d
+                    JOIN mm_dataset_version v ON v.dataset_id=d.dataset_id
+                    JOIN mm_index_version i ON i.dataset_id=d.dataset_id AND i.dataset_version_id=v.version_id
+                    JOIN artifact_commit c ON c.repo_id=i.index_repo_id AND c.commit_id=i.index_commit_id
+                    WHERE d.org_id=? AND d.status='ACTIVE' AND d.dataset_id=? AND v.version_id=?
+                      AND i.index_version_id=? AND i.index_status='READY' AND c.commit_status='PUBLISHED'
+                    """, Integer.class, SecurityUtils.getUserOrgId(), UUID.fromString(dataset),
+                    UUID.fromString(version), UUID.fromString(index));
+            if (readable != null && readable > 0) return;
+        } catch (IllegalArgumentException ignored) {
+            // Malformed identifiers are reported as an unavailable scope below.
+        }
+        throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                "数据集、版本或索引不可用，或不属于当前账号可访问的 PUBLISHED/READY 快照");
     }
 
     private static String field(Map<String, ?> body, String camel, String snake) {

@@ -1,4 +1,5 @@
 import base64
+import json
 import logging
 import math
 import re
@@ -9,6 +10,7 @@ from uuid import UUID
 
 from adapters.vllm_client import VllmClient, VllmClientError, client as vllm_default_client
 from core.config import settings
+from schemas.qa_req import ProfessionalQueryPlan
 from schemas.qa_resp import QAMeta, QAResponse, RetrievedItem, SourceItem
 from services.intent_analyzer import IntentAnalyzer
 from services.prompt_builder import build_system_prompt
@@ -17,6 +19,13 @@ from services.retrieval_planner import RetrievalPlanner
 logger = logging.getLogger(__name__)
 
 TASK_TYPES = {"general_qa", "chain_risk_analysis", "demand_evaluation", "data_summary"}
+NUMBER_PATTERN = re.compile(r"(?<![A-Za-z_])[-+]?\d+(?:\.\d+)?")
+SOURCE_PATTERN = re.compile(r"\[来源\s*(\d+)\]")
+BARE_CITATION_PATTERN = re.compile(r"\[(\d{1,2})\]")
+MEASUREMENT_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_.])(-?\d+(?:\.\d+)?)\s*(mm3|cm3|m3|mm2|cm2|m2|mm|cm|m|毫米|厘米|米|℃|°C|C|K|摄氏度|kWh)(?![A-Za-z])",
+    re.IGNORECASE,
+)
 
 
 def _image_to_data_url(filename: str, content: bytes) -> str:
@@ -60,6 +69,139 @@ def _compute_confidence(choices: list) -> Tuple[float, str]:
     return 1.0, "unavailable"
 
 
+def _verified_answer(answer: str, question: str, sources: List[SourceItem]) -> str:
+    """Reject claims that contradict exact or ranked professional evidence."""
+    answer = BARE_CITATION_PATTERN.sub(
+        lambda match: f"[来源{match.group(1)}]" if 1 <= int(match.group(1)) <= len(sources) else "",
+        answer or "",
+    )
+    answer = SOURCE_PATTERN.sub(
+        lambda match: match.group(0) if 1 <= int(match.group(1)) <= len(sources) else "",
+        answer or "",
+    ).strip()
+    exact_sources = [source for source in sources if source.evidence_type in {"calculation", "constraint"}]
+    shape_sources = [source for source in sources if source.evidence_type == "retrieval" and
+                     source.semantic_space in {"timeseries.shape", "geometry.shape"}]
+    contradicts_shape_hits = bool(shape_sources) and bool(re.search(
+        r"(?:(?:无法(?:直接)?确定|不能确定|无法判断).{0,80}(?:相似|接近|匹配)|未找到.{0,80}(?:相似|接近)|"
+        r"不存在.{0,80}(?:相似|接近)|没有(?:找到|检索到|匹配到).{0,80}(?:相似|接近))",
+        answer,
+    ))
+    if contradicts_shape_hits:
+        verified = []
+        for source in shape_sources:
+            index = sources.index(source) + 1
+            fact = json.dumps({"facts": source.facts, "units": source.units,
+                               "timeRange": source.time_range, "scoreType": source.score_type,
+                               "rawScore": source.raw_score}, ensure_ascii=False, default=str)
+            verified.append(f"- [来源{index}] {_truncate(fact, 700)}")
+        return ("程序核验后保留以下近似检索结果（按检索排名）：\n" + "\n".join(verified) +
+                "\n\n模型草稿否认了已命中的形态候选，已用索引证据替换。"
+                "这些结果只表示近似形态匹配，不构成尺寸、拓扑、工程可替换性或因果结论。")
+    if shape_sources and "近似" not in answer:
+        answer += ("\n\n说明：上述候选来自专业索引的近似形态检索；它不构成尺寸、拓扑、"
+                   "工程可替换性或因果结论。")
+    if not exact_sources:
+        source_measurements = {
+            (float(value), unit.lower())
+            for source in sources for value, unit in MEASUREMENT_PATTERN.findall(source.content_preview or "")
+        }
+        unsupported_measurements = [
+            (value, unit) for value, unit in MEASUREMENT_PATTERN.findall(answer)
+            if (float(value), unit.lower()) not in source_measurements
+        ]
+        if unsupported_measurements:
+            cited = [f"- [来源{index}] {_truncate(source.content_preview, 180)}"
+                     for index, source in enumerate(sources, 1)
+                     if source.source_type not in {"limitation"}]
+            return ("已检索到相关资料，但模型草稿包含未获文字或结构化证据核验的具体测量值，"
+                    "已省略这些数值。\n" + "\n".join(cited[:5]) +
+                    "\n视觉相似或图像推断不能单独证明精确尺寸、单位或工程可替换性。")
+        return answer
+    guarded_statuses = {
+        "NEEDS_TIMEZONE_MAPPING": "来源时区尚未映射",
+        "NEEDS_UNIT_MAPPING": "来源单位尚未映射或不可可靠换算",
+        "TARGET_ENTITY_REQUIRED": "目标实体尚未明确",
+        "NO_DATA": "指定范围内没有可计算的原始事实",
+    }
+    guarded = [source for source in exact_sources
+               if source.facts.get("value") is None and source.facts.get("status") in guarded_statuses]
+    if guarded and not any(source.facts.get("value") is not None for source in exact_sources):
+        explanations = []
+        for source in guarded:
+            index = sources.index(source) + 1
+            facts = source.facts
+            explanations.append(
+                f"- [来源{index}] 资产 {source.asset_id or '未指定'}；"
+                f"指标/字段 {facts.get('metric') or facts.get('field') or '未指定'}；"
+                f"状态 {facts['status']}：{guarded_statuses[facts['status']]}；"
+                f"样本数 {facts.get('sampleCount', facts.get('matchedRowCount', '未知'))}。"
+            )
+        return ("程序核验后，当前不能给出精确数值；原因如下：\n" + "\n".join(explanations) +
+                "\n请补全相应映射或查询条件后重新计算，不能把相似检索结果当作精确统计。")
+    calculations = [source for source in exact_sources if source.evidence_type == "calculation" and "operation" in source.facts]
+    if calculations:
+        # Free prose cannot be reliably checked by membership in a bag of numbers.
+        # Bind every numeric result to its operation, field, unit, scope and citation.
+        labels = {"average": "样本平均值", "sum": "总和", "count": "计数", "min": "最小值", "max": "最大值",
+                  "time_weighted_average": "时间加权平均值", "duration_above": "超过阈值估计时长",
+                  "trend_start_end": "起止变化量", "trend_regression": "每秒回归斜率", "trend_monotonic": "逐点非递减",
+                  "compare_periods": "两时段比较"}
+        lines = []
+        for source in calculations:
+            facts = source.facts
+            operation = facts.get("operation")
+            value = facts.get("value")
+            unit = facts.get("unit") or source.units.get("value") or ""
+            if operation == "count": unit = "条"
+            if operation == "trend_regression" and unit: unit += "/s"
+            if operation == "trend_monotonic": unit = ""
+            display = json.dumps(value, ensure_ascii=False) if value is not None else "不可计算"
+            if operation == "compare_periods" and "difference" in facts:
+                display = json.dumps({key: facts.get(key) for key in ("firstPeriodAverage", "secondPeriodAverage", "difference")}, ensure_ascii=False)
+            lines.append(f"- [来源{sources.index(source) + 1}] {facts.get('metric') or facts.get('field') or '记录'}的{labels.get(operation, operation)}：{display} {unit}。")
+            scope = {"entity": source.entity_id, "timeRange": source.time_range, "status": facts.get("status"),
+                     "sampleCount": facts.get("sampleCount", facts.get("matchedRowCount")),
+                     "policy": source.calculation_policy, "qualityFlags": source.quality_flags}
+            lines.append("  范围与口径：" + json.dumps(scope, ensure_ascii=False, default=str))
+        return "程序核验后仅保留以下已计算事实（数值、单位及范围逐项绑定）：\n" + "\n".join(lines)
+    evidence_text = json.dumps([{
+        "facts": source.facts,
+        "units": source.units,
+        "timeRange": source.time_range,
+        "policy": source.calculation_policy,
+    } for source in exact_sources], ensure_ascii=False, default=str)
+    allowed = [float(value) for source in exact_sources for key, value in source.facts.items()
+               if isinstance(value, (int, float)) and not isinstance(value, bool)
+               and key not in {"sampleCount", "matchedRowCount", "sourceSeriesCount"}]
+    answer_without_citations = SOURCE_PATTERN.sub("", answer)
+    claimed = [float(value) for value in NUMBER_PATTERN.findall(answer_without_citations)]
+    unsupported = [value for value in claimed if not any(
+        abs(value - permitted) <= 1e-6 * max(1.0, abs(value), abs(permitted)) for permitted in allowed
+    )]
+    contradicts_constraint_hits = any(source.evidence_type == "constraint" for source in exact_sources) and bool(
+        re.search(r"(?:不存在|未找到|没有(?:找到|检索到|匹配到)|无匹配).{0,80}(?:记录|结果|数据|证据)", answer)
+    )
+    unit_alias = {"°c": "c", "℃": "c", "摄氏度": "c"}
+    measurements = {(float(value), unit_alias.get(str(source.units.get("value", "")).lower(), str(source.units.get("value", "")).lower()))
+                    for source in exact_sources for value in source.facts.values()
+                    if isinstance(value, (int, float)) and not isinstance(value, bool)}
+    unsupported_units = any((float(value), unit_alias.get(unit.lower(), unit.lower())) not in measurements
+                            for value, unit in MEASUREMENT_PATTERN.findall(answer_without_citations))
+    if not unsupported and not unsupported_units and not contradicts_constraint_hits:
+        return answer
+    verified = []
+    for source in exact_sources:
+        index = sources.index(source) + 1
+        fact = json.dumps({"facts": source.facts, "units": source.units,
+                           "timeRange": source.time_range, "policy": source.calculation_policy},
+                          ensure_ascii=False, default=str)
+        verified.append(f"- [来源{index}] {_truncate(fact, 700)}")
+    reason = ("模型草稿与已命中的硬条件记录矛盾，已用程序验证事实替换。"
+              if contradicts_constraint_hits else "模型草稿含未获证据支持的数值，已从结论中省略。")
+    return "程序核验后仅保留以下已计算或已验证事实：\n" + "\n".join(verified) + "\n\n" + reason
+
+
 class QaService:
     """多模态问答核心：收集依据 -> 可选检索 -> 组装消息 -> 调用 vLLM -> 统一响应。"""
 
@@ -98,6 +240,7 @@ class QaService:
     def _retrieve(
         self, question, dataset_id, version_id, index_version_id, mode: str,
         retrieval_type: str, query_images: List[Tuple[str, bytes]], top_k: int,
+        professional_plan: dict | None = None,
     ):
         """按检索计划执行文搜图、图搜文、双路检索或 bundle 回退。"""
         sources: List[SourceItem] = []
@@ -108,6 +251,93 @@ class QaService:
             client = self._get_search_client()
             ranked_records = []
             downloaded_by_key = {}
+
+            if retrieval_type == "professional":
+                if not professional_plan:
+                    raise ValueError("professional retrieval requires QueryPlan")
+                try:
+                    professional_plan = ProfessionalQueryPlan.model_validate(professional_plan).model_dump(
+                        by_alias=True, exclude_none=True)
+                except ValueError as exc:
+                    error = str(exc)
+                    reason = ("起止时间需明确时区" if "explicit timezone" in error else
+                              "结束时间必须晚于开始时间" if "later than start" in error else
+                              "查询计划包含不支持的字段" if "extra_forbidden" in error else
+                              "硬条件缺少可验证的作用范围" if "scoped structured or geometry validator" in error else
+                              "视觉检索不能核验精确实体约束" if "cannot verify targetEntity" in error else
+                              "依赖步骤顺序错误" if "must precede" in error else
+                              "查询计划缺少必需字段或不满足执行约束")
+                    raise ValueError("NEEDS_CLARIFICATION: " + reason) from exc
+                operation = (professional_plan.get("retrieverOperations") or professional_plan.get("retriever_operations") or {}).get(
+                    "timeseries", professional_plan.get("operation", "search"))
+                time_range = professional_plan.get("timeRange") or professional_plan.get("time_range")
+                if "timeseries" in professional_plan.get("retrievers", []) and operation not in {"search", "similar_shape"} and not time_range:
+                    raise ValueError("NEEDS_CLARIFICATION: 精确时序计算需要明确 timeRange")
+                pack = client.professional_search(dataset_id, version_id, index_version_id, professional_plan)
+                if pack.get("limitations") and not pack.get("evidence"):
+                    codes = pack["limitations"]
+                    if any("FIELD_NOT_FOUND" in code or "FIELD_REQUIRED" in code for code in codes):
+                        raise ValueError("NEEDS_CLARIFICATION: " + ", ".join(codes))
+                    if any("RELATION_NOT_FOUND" in code for code in codes):
+                        raise ValueError("RELATION_NOT_FOUND: 当前数据版本没有可追溯的实体关系")
+                    raise ValueError("INDEX_NOT_READY: " + ", ".join(codes))
+                for item in pack.get("evidence", []):
+                    facts = item.get("facts", {})
+                    preview = item.get("preview") or {}
+                    score = item.get("rawScore")
+                    relevance = 1.0 if item.get("evidenceType") in {"calculation", "constraint"} else float(score or 0.0)
+                    if str(item.get("scoreType", "")).endswith("lower_is_better"):
+                        relevance = 1.0 / (1.0 + max(0.0, relevance))
+                    path = preview.get("logicalPath")
+                    sources.append(SourceItem(
+                        source_id=item.get("evidenceId", f"evidence_{len(sources)}"),
+                        source_type=item.get("evidenceType", "retrieval"),
+                        relevance_score=max(0.0, min(1.0, relevance)),
+                        content_preview=json.dumps({
+                            "assetId": item.get("assetId"), "entityId": item.get("entityId"),
+                            "status": facts.get("status"), "timeRange": item.get("timeRange"),
+                            "facts": facts, "units": item.get("units", {}), "locator": item.get("locator", {}),
+                            "qualityFlags": item.get("qualityFlags", []),
+                            "calculationPolicy": item.get("calculationPolicy", {}),
+                        }, ensure_ascii=False),
+                        asset_id=self._as_uuid(item.get("assetId")), logical_path=path,
+                        data_version=item.get("dataVersion"), index_version=item.get("indexVersion"),
+                        evidence_id=item.get("evidenceId"), semantic_space=item.get("semanticSpace"),
+                        locator=item.get("locator", {}), entity_id=item.get("entityId"),
+                        time_range=item.get("timeRange"), raw_score=score,
+                        score_type=item.get("scoreType"), facts=facts, units=item.get("units", {}),
+                        calculation_policy=item.get("calculationPolicy", {}),
+                        provenance=item.get("provenance", {}), quality_flags=item.get("qualityFlags", []),
+                        evidence_type=item.get("evidenceType", "retrieval"),
+                    ))
+                    retrieved_meta.append({
+                        "asset_id": item.get("assetId"), "logical_path": path,
+                        "score": relevance, "preview_url": preview.get("url"),
+                        "source_type": item.get("semanticSpace", "professional"),
+                    })
+                    if (item.get("semanticSpace") == "visual.clip-cn-v1" and item.get("assetId")
+                            and len(retrieved_images) < settings.max_retrieved_images and self.bearer_token):
+                        try:
+                            image_data = client.download_asset_image(dataset_id, version_id, item["assetId"], preview)
+                            if image_data:
+                                retrieved_images.append((f"retrieved_{item['assetId']}.png", image_data, relevance))
+                        except Exception as exc:
+                            logger.warning("professional image unavailable: %s", type(exc).__name__)
+                            sources[-1].quality_flags.append("VISUAL_PREVIEW_UNAVAILABLE")
+                            pack.setdefault("limitations", []).append("VISUAL_PREVIEW_UNAVAILABLE: 图片未送入模型，仅可依据已返回的文字描述回答")
+                for limitation in pack.get("limitations", []):
+                    sources.append(SourceItem(source_id=f"limit_{len(sources)}", source_type="limitation",
+                                              relevance_score=1.0, content_preview=limitation))
+                for conflict in pack.get("conflicts", []):
+                    sources.append(SourceItem(source_id=f"conflict_{len(sources)}", source_type="limitation",
+                                              relevance_score=1.0,
+                                              content_preview="证据冲突：" + json.dumps(conflict, ensure_ascii=False)))
+                return sources, "search_service", retrieved_images, retrieved_meta, {
+                    "professionalTimingsMs": pack.get("timingsMs", {}),
+                    "coverage": pack.get("coverage", {}),
+                    "limitations": pack.get("limitations", []),
+                    "conflicts": pack.get("conflicts", []),
+                }
 
             def append_record(item, channel: str, rank: int, preview: str):
                 aid, path = item.get("assetId"), item.get("logicalPath")
@@ -214,7 +444,7 @@ class QaService:
                 if item["key"] in downloaded_by_key:
                     retrieved_images.append(downloaded_by_key[item["key"]])
             if sources or retrieved_images:
-                return sources, "search_service", retrieved_images, retrieved_meta
+                return sources, "search_service", retrieved_images, retrieved_meta, {}
 
         if mode == "bundle" and dataset_id and version_id and index_version_id:
             try:
@@ -241,11 +471,11 @@ class QaService:
                         )
                     )
                 if sources:
-                    return sources, "bundle", [], retrieved_meta
+                    return sources, "bundle", [], retrieved_meta, {}
             except Exception as exc:
                 logger.warning("bundle retrieval failed: %s", exc)
 
-        return sources, "none", retrieved_images, retrieved_meta
+        return sources, "none", retrieved_images, retrieved_meta, {}
 
     # ------------------------------------------------------------- generation
 
@@ -288,6 +518,7 @@ class QaService:
         use_search_service: bool = True,
         retrieval_mode: str = "auto",
         retrieval_type: str = "auto",
+        query_plan: Optional[dict] = None,
         top_k: int = 8,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
@@ -319,7 +550,7 @@ class QaService:
         if retrieval_mode not in ("auto", "search_service", "bundle", "none"):
             retrieval_mode = "auto"
         retrieval_type = (retrieval_type or "auto").lower()
-        if retrieval_type not in ("auto", "none", "text_to_image", "image_to_text", "dual"):
+        if retrieval_type not in ("auto", "none", "text_to_image", "image_to_text", "dual", "professional"):
             retrieval_type = "auto"
 
         start = time.time()
@@ -352,6 +583,7 @@ class QaService:
                 )
             )
 
+        planning_started = time.perf_counter()
         plan = self._retrieval_planner.plan(
             question=question,
             input_mode=input_mode,
@@ -363,10 +595,14 @@ class QaService:
             text_count=len(texts),
             has_context=bool(context and context.strip()),
             allow_model_analysis=settings.llm_backend.lower() != "mock",
+            query_plan=query_plan,
+            top_k=top_k,
         )
+        planning_ms = round((time.perf_counter() - planning_started) * 1000, 3)
         mode = plan.provider_mode
         query_images = images if plan.use_uploaded_images else []
-        retrieved, resolved, retrieved_images, retrieved_meta = self._retrieve(
+        retrieval_started = time.perf_counter()
+        retrieved, resolved, retrieved_images, retrieved_meta, retrieval_details = self._retrieve(
             plan.text_query,
             dataset_id,
             version_id,
@@ -375,7 +611,9 @@ class QaService:
             plan.retrieval_type,
             query_images,
             top_k,
+            plan.professional_plan,
         )
+        retrieval_ms = round((time.perf_counter() - retrieval_started) * 1000, 3)
         sources.extend(retrieved)
         if resolved != "none" and (retrieved or retrieved_images):
             mode = resolved
@@ -397,6 +635,10 @@ class QaService:
                     "数据空间检索未匹配到相关内容；"
                     "本次回答基于用户输入与模型自身知识生成。"
                 )
+            elif retrieval_details.get("conflicts"):
+                notice = "检索证据存在互相冲突的精确数值；请核对来源，不能给出唯一确定值。"
+            elif any(code.startswith("RELATION_NOT_FOUND") for code in retrieval_details.get("limitations", [])):
+                notice = "当前数据快照没有可追溯的实体关系；只能报告上游候选，不能计算关联设备趋势。"
         # 检索命中的内容 ID（RAG：附带返回给用户查看）
         retrieved_items: List[RetrievedItem] = []
         seen = set()
@@ -455,6 +697,7 @@ class QaService:
         ]
 
         backend = settings.llm_backend.lower()
+        generation_started = time.perf_counter()
         if backend == "mock":
             answer = self._mock_answer(question, sources)
             confidence = self._confidence_heuristic(answer, sources)
@@ -486,10 +729,24 @@ class QaService:
             request_id = result.get("id")
             model_name = result.get("model") or settings.model_name
             backend_name = "vllm"
+        generation_ms = round((time.perf_counter() - generation_started) * 1000, 3)
 
         # 小参数模型偶尔会在没有依据时虚构“来源”标记；响应层保证引用与 sources 一致。
         if not sources:
             answer = re.sub(r"\s*\[来源\s*\d+\]", "", answer).strip()
+        else:
+            answer = _verified_answer(answer, question, sources)
+        if any(code.startswith("RELATION_NOT_FOUND") for code in retrieval_details.get("limitations", [])):
+            upstream = [f"- [来源{index}] 资产 {source.asset_id or '未指定'}，"
+                        f"近似证据 {json.dumps(source.facts, ensure_ascii=False, default=str)[:300]}"
+                        for index, source in enumerate(sources, 1)
+                        if source.semantic_space in {"geometry.shape", "geometry.properties"}]
+            answer = ("当前数据快照没有可追溯的零件—设备关系，不能把形状候选映射到设备，"
+                      "也不能计算该零件关联设备的时序趋势。\n"
+                      + "\n".join(upstream[:5])
+                      + "\n形状相似不证明尺寸、接口或工程可替换性；不会凭文件名臆造关系。")
+        if retrieval_details.get("conflicts") and "证据冲突" not in answer:
+            answer += "\n\n注意：检索证据存在冲突，不能把其中任一数值视为唯一确定结论。"
 
         # 回答附带检索内容 ID（RAG：用户可据此自行查看检索内容）
         if retrieved_items:
@@ -517,6 +774,12 @@ class QaService:
                 intent_analysis_used=plan.intent_analysis_used,
                 intent_confidence=plan.confidence,
                 intent_reason=plan.reason,
+                retrieval_support=round(sum(source.relevance_score for source in retrieved) / max(1, len(retrieved)), 4),
+                data_quality=round(sum(1.0 for source in retrieved if not source.quality_flags) / max(1, len(retrieved)), 4),
+                planning_ms=planning_ms,
+                retrieval_ms=retrieval_ms,
+                generation_ms=generation_ms,
+                professional_timings_ms=retrieval_details.get("professionalTimingsMs", {}),
             ),
             task_type=task_type,
             retrieval_mode=mode,

@@ -23,10 +23,13 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.io.InputStream;
+import java.security.DigestInputStream;
+import java.security.MessageDigest;
 import java.nio.file.PathMatcher;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
 
@@ -126,7 +129,12 @@ public class FileService {
         boolean quotaSettled = false;
         try {
             // 先上传对象，失败则直接抛错
-            String etag = minioService.putObject(objectKey, inputStream, size, contentType);
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            String etag;
+            try (DigestInputStream digestInput = new DigestInputStream(inputStream, digest)) {
+                etag = minioService.putObject(objectKey, digestInput, size, contentType);
+            }
+            String sha256 = HexFormat.of().formatHex(digest.digest());
 
             // 上传完毕后从MinIO取元信息
             StatObjectResponse meta = minioService.statObject(objectKey);
@@ -150,7 +158,8 @@ public class FileService {
                             etag,
                             size,
                             contentType,
-                            deviceId
+                            deviceId,
+                            sha256
                     );
                     fileId = fileResult.getFileId();
                     if (fileResult.isInserted()) {
@@ -448,6 +457,54 @@ public class FileService {
         }
         String category = DataFileFormatClassifier.classify(p, contentType).storageCategory();
         return "workspace/" + artifactId + "/" + commitId + "/" + category + "/" + p;
+    }
+
+    /**
+     * Confirm a direct-to-MinIO upload.  The object is stat'ed and read once to
+     * calculate a real SHA-256; a multipart ETag is deliberately not used as
+     * content identity.
+     */
+    public FileResp confirmPresignedUpload(UUID artifactId, UUID commitId, String path) throws Exception {
+        ensureCommitStatusIs(artifactId, commitId, CommitStatus.DRAFT);
+        return calculateAndPersistContentIdentity(artifactId, commitId, path);
+    }
+
+    /**
+     * Recover the reliable content identity for a legacy file that predates
+     * SHA-256 persistence.  Unlike upload confirmation this is intentionally
+     * allowed for immutable published commits, so a recoverable index backfill
+     * can migrate existing data without rewriting its object or snapshot.
+     */
+    public FileResp ensureContentIdentity(UUID artifactId, UUID commitId, String path) throws Exception {
+        ensureCommitExists(artifactId, commitId);
+        String logicalPath = PathUtils.normalizePath(path);
+        FileResp existing = artifactFileMapper.selectByCommitIdAndPath(commitId, logicalPath);
+        if (existing != null && existing.getSha256() != null && !existing.getSha256().isBlank()
+                && "READY".equals(existing.getUploadState())) {
+            return existing;
+        }
+        return calculateAndPersistContentIdentity(artifactId, commitId, logicalPath);
+    }
+
+    private FileResp calculateAndPersistContentIdentity(UUID artifactId, UUID commitId, String path) throws Exception {
+        ensureCommitExists(artifactId, commitId);
+        String logicalPath = PathUtils.normalizePath(path);
+        FileResp file = artifactFileMapper.selectByCommitIdAndPath(commitId, logicalPath);
+        if (file == null) {
+            throw ExceptionUtils.notFound("上传元数据不存在: " + logicalPath);
+        }
+        StatObjectResponse meta = minioService.statObject(file.getFileKey());
+        long size = requireUploadedSize(meta.size(), logicalPath);
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        try (InputStream raw = minioService.getObject(file.getFileKey());
+             DigestInputStream stream = new DigestInputStream(raw, digest)) {
+            stream.transferTo(java.io.OutputStream.nullOutputStream());
+        }
+        String sha256 = HexFormat.of().formatHex(digest.digest());
+        artifactFileMapper.addOrReplaceFileFull(
+                commitId, logicalPath, minioService.getBucket(), file.getFileKey(), meta.versionId(),
+                meta.etag(), size, meta.contentType(), file.getDeviceId(), sha256);
+        return artifactFileMapper.selectByCommitIdAndPath(commitId, logicalPath);
     }
 
 

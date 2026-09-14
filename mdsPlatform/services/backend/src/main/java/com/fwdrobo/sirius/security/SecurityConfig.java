@@ -32,6 +32,7 @@ public class SecurityConfig {
     SecurityFilterChain filterChain(
             HttpSecurity http,
             JwtAuthFilter jwtAuthFilter,
+            InternalTokenFilter internalTokenFilter,
             RestAuthenticationEntryPoint restAuthenticationEntryPoint,
             RestAccessDeniedHandler restAccessDeniedHandler) throws Exception {
         return http
@@ -63,7 +64,8 @@ public class SecurityConfig {
                         // 鍏跺畠 API 鍏ㄩ儴闇€瑕佺櫥褰?
                         .requestMatchers("/api/**").authenticated()
                 )
-                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterBefore(internalTokenFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterAfter(jwtAuthFilter, InternalTokenFilter.class)
                 .build();
     }
 

@@ -59,7 +59,9 @@
 
     <!-- ===== 单独包级别配置 ===== -->
     <logger name="org.springframework" level="INFO"/>
-    <logger name="org.mybatis" level="DEBUG"/>
+    <!-- SQL DEBUG prints bound values; job parameters contain scoped credentials. -->
+    <logger name="org.mybatis" level="INFO"/>
+    <logger name="com.fwdrobo.sirius.mapper" level="INFO"/>
     <logger name="com.fwdrobo.sirius" level="DEBUG"/>
 
     <root level="INFO">

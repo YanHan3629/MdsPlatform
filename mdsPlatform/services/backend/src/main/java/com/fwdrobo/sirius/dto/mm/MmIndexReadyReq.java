@@ -1,5 +1,7 @@
 package com.fwdrobo.sirius.dto.mm;
 
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 public record MmIndexReadyReq(
@@ -15,6 +17,8 @@ public record MmIndexReadyReq(
         Integer embeddingDim,
         Long imageCount,
         Long textCount,
-        Long unifiedCount
+        Long unifiedCount,
+        List<Map<String, Object>> indexes,
+        String professionalManifestPath
 ) {
 }

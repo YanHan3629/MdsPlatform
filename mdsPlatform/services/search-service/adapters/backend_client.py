@@ -11,6 +11,8 @@ class BackendClient:
         self.backend_headers = {}
         if settings.backend_bearer_token:
             self.backend_headers["Authorization"] = f"Bearer {settings.backend_bearer_token}"
+        if settings.mm_internal_token:
+            self.backend_headers["X-MM-Internal-Token"] = settings.mm_internal_token
         self.timeout = settings.request_timeout_seconds
 
     def resolve_index_bundle(self, dataset_id: str, version_id: str, index_version_id: str) -> dict:

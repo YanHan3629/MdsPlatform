@@ -24,6 +24,8 @@ public class FileResp {
     private String fileKey;
     private Long sizeBytes;
     private String contentType;
+    private String sha256;
+    private String uploadState;
     private OffsetDateTime createdAt;
     private OffsetDateTime updatedAt;
 

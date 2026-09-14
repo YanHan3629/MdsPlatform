@@ -23,9 +23,11 @@ cd ..
 
 ## 数据存储
 
+专业索引 v1.12 支持入库时配置来源时区、时间字段、实体字段及单位，并按文件覆盖；配置冻结到任务，回填后发布新索引。前端专业查询可选择几何样本或输入查询曲线。明确且完整的查询走规则，歧义计划由 Qwen 分析或请求澄清。OBJ/STEP 特征空间隔离，精确统计在缺少必要时区或单位映射时拒绝给出确定数值。
+
 完整项目由仓库根目录 `compose.yml` 统一管理，Docker 项目名为 `multimodal-dataspace`。数据空间、检索、问答和 vLLM 通过服务名互通；已构建镜像可运行 `./start-all.ps1 -NoBuild`，停止使用 `./stop-all.ps1`。
 
-前端新增“多模态问答”入口：登录数据空间账号后选择真实 READY 索引的数据集，提交问题或图片，查看回答与可下载的来源。页面自动传递数据集、版本和索引 UUID，后端按组织校验访问范围。演示目录的 `ds-…` ID 不作为真实检索索引。完整部署和 API 说明见 [仓库 README](../README.md)。
+前端新增“多模态问答”入口：登录数据空间账号后可在“上传与自动索引”区创建真实数据集/版本、上传文件或文件夹并发布，后台自动解析建索引；随后选择 READY 索引提问、核对并下载来源。页面自动传递数据集、版本和索引 UUID，后端按组织校验访问范围。驾驶舱演示上传与 `ds-…` ID 不作为真实检索索引。完整部署和 API 说明见 [仓库 README](../README.md)。
 
 运行数据与代码仓库分开保存。默认存储根目录为与 `MdsPlatform` 同级的：
 
@@ -46,7 +48,7 @@ Multimodal Data Space Platform/
 
 | 当前数据格式 | 存储目录 | 分类标识 |
 |---|---|---|
-| JPG / PNG / SVG | `image/` | `IMAGE` |
+| JPG / JPEG / PNG / SVG | `image/` | `IMAGE` |
 | TXT | `text/` | `TEXT` |
 | CSV | `csv/` | `CSV` |
 | JSON | `json/` | `JSON` |
@@ -70,6 +72,12 @@ Multimodal Data Space Platform/
 - `/indexes/unified/id_map.parquet`：向量到原始文件、格式和命中位置的映射。
 
 CSV、JSON/JSONL 和 XLSX 表格会优先识别时间列和设备/传感器分组列。描述清单保存时间范围、时区、原始排序、采样间隔、重复时间戳、异常采样以及按时间排序后的趋势、极值与变化量。时序分块均携带精确的 `timeStart`、`timeEnd`、`seriesKey` 和 `sortedByTime` 定位信息。
+
+### 专业索引与可靠入库
+
+真实快照发布通过事务 outbox 创建幂等入库任务，已有快照可用 `POST /api/mm/datasets/{datasetId}/versions/{versionId}/ingest-tasks/backfill` 回填。任务按 Parser 注册表、标准语义单元、专业索引、文件校验、预热、原子切换执行；失败重试或服务重启不会损坏旧 ACTIVE 索引。候选索引文件全部上传后，commit 先封存为 `PUBLISHED` 才能预热和发布，晚到或配置版本过期的任务不能覆盖新版本。
+
+当前在线检索器覆盖中文文本（BM25 与独立向量融合）、CLIP 视觉、类型化结构过滤/聚合、完整时序事实与曲线相似度，以及 OBJ/STEP 几何属性与形状候选核验。查询使用严格 `QueryPlan`，输出可追踪到原文件、locator、实体、时间范围、单位、计算口径与质量标记的 `EvidencePack`。依赖式跨空间查询只沿显式实体关系执行。
 
 访问前端界面：`http://localhost:8888/data-space/index.html`
 

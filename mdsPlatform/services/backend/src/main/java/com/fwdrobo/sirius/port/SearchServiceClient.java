@@ -7,7 +7,6 @@ import com.fwdrobo.sirius.dto.mm.InternalTextToImageReq;
 import com.fwdrobo.sirius.dto.mm.InternalTextToImageResp;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.RestClient;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.ByteArrayOutputStream;
@@ -18,19 +17,21 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
+import java.util.Map;
 
 @Component
 public class SearchServiceClient {
 
-    private final RestClient restClient;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
+    private final String internalToken;
     private final HttpClient httpClient;
 
     public SearchServiceClient(@Value("${mm.search.base-url}") String baseUrl,
+                               @Value("${mm.internal.token:}") String internalToken,
                                ObjectMapper objectMapper) {
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
-        this.restClient = RestClient.builder().baseUrl(this.baseUrl).build();
+        this.internalToken = internalToken;
         this.objectMapper = objectMapper;
         this.httpClient = HttpClient.newBuilder()
                 .version(HttpClient.Version.HTTP_1_1)
@@ -50,6 +51,7 @@ public class SearchServiceClient {
                 .version(HttpClient.Version.HTTP_1_1)
                 .header("Content-Type", "application/json")
                 .header("Accept", "application/json")
+                .header("X-MM-Internal-Token", internalToken)
                 .POST(HttpRequest.BodyPublishers.ofString(requestBody, StandardCharsets.UTF_8))
                 .build();
 
@@ -67,6 +69,37 @@ public class SearchServiceClient {
         }
     }
 
+    public void preload(UUID datasetId, UUID versionId, UUID indexVersionId) {
+        String requestBody;
+        try {
+            requestBody = objectMapper.writeValueAsString(
+                    Map.of("datasetId", datasetId.toString(), "versionId", versionId.toString(),
+                            "indexVersionId", indexVersionId.toString()));
+        } catch (JsonProcessingException exception) {
+            throw new RuntimeException("serialize index preload request failed", exception);
+        }
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/internal/v1/indexes/preload"))
+                .version(HttpClient.Version.HTTP_1_1)
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .header("X-MM-Internal-Token", internalToken)
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody, StandardCharsets.UTF_8))
+                .build();
+        try {
+            HttpResponse<String> response = httpClient.send(
+                    request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                throw new RuntimeException(response.statusCode() + " " + response.body());
+            }
+        } catch (IOException exception) {
+            throw new RuntimeException("call index preload request failed", exception);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("call index preload request interrupted", exception);
+        }
+    }
+
     public InternalImageToTextResp imageToText(UUID datasetId, UUID versionId, UUID indexVersionId, Integer topK, MultipartFile file) {
         String boundary = "----SiriusBoundary" + System.currentTimeMillis();
         byte[] requestBody;
@@ -81,6 +114,7 @@ public class SearchServiceClient {
                 .version(HttpClient.Version.HTTP_1_1)
                 .header("Content-Type", "multipart/form-data; boundary=" + boundary)
                 .header("Accept", "application/json")
+                .header("X-MM-Internal-Token", internalToken)
                 .POST(HttpRequest.BodyPublishers.ofByteArray(requestBody))
                 .build();
 

@@ -49,6 +49,21 @@ public final class DataFileFormatClassifier {
         if ("index".equals(extension)) {
             return new Classification("FAISS", "faiss", "FAISS");
         }
+        if (Set.of("csv", "xlsx").contains(extension)) {
+            return new Classification(extension.toUpperCase(Locale.ROOT), extension, "TABLE");
+        }
+        if (Set.of("json", "jsonl").contains(extension)) {
+            return new Classification(extension.toUpperCase(Locale.ROOT), extension, "JSON");
+        }
+        if ("pdf".equals(extension)) {
+            return new Classification("PDF", "pdf", "DOCUMENT");
+        }
+        if ("obj".equals(extension)) {
+            return new Classification("OBJ", "obj", "MESH");
+        }
+        if (Set.of("step", "stp").contains(extension)) {
+            return new Classification("STEP", "step", "CAD");
+        }
         if (!extension.isBlank()) {
             String format = extension.toUpperCase(Locale.ROOT);
             return new Classification(format, extension, format);

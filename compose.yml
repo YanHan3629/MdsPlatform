@@ -58,6 +58,7 @@ services:
       DEFAULT_MAX_TOKENS: "512"
       BACKEND_BASE_URL: http://sirius:8888
       SEARCH_SERVICE_BASE_URL: http://search-service:18080
+      MM_INTERNAL_TOKEN: ${MM_INTERNAL_TOKEN:?MM_INTERNAL_TOKEN must be set in the root .env file}
       BACKEND_SEARCH_PATH: /api/data-space/qa/search
     ports:
       - "18081:18081"

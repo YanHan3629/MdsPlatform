@@ -37,7 +37,7 @@ class Settings:
     request_timeout_seconds: int = _env_int("REQUEST_TIMEOUT_SECONDS", 300)
 
     # 默认采样参数（参考 Qwen3.5 非思考模式 VL 任务推荐值）
-    default_max_tokens: int = _env_int("DEFAULT_MAX_TOKENS", 2048)
+    default_max_tokens: int = _env_int("DEFAULT_MAX_TOKENS", 512)
     default_temperature: float = _env_float("DEFAULT_TEMPERATURE", 0.7)
     default_top_p: float = _env_float("DEFAULT_TOP_P", 0.8)
     default_top_k: int = _env_int("DEFAULT_TOP_K", 20)
@@ -48,7 +48,7 @@ class Settings:
     max_upload_images: int = _env_int("MAX_UPLOAD_IMAGES", 2)
     max_text_chars: int = _env_int("MAX_TEXT_CHARS", 500)
     # 检索回图片时，最多下载/入提示的图片数量
-    max_retrieved_images: int = _env_int("MAX_RETRIEVED_IMAGES", 3)
+    max_retrieved_images: int = _env_int("MAX_RETRIEVED_IMAGES", 2)
     max_prompt_images: int = _env_int("MAX_PROMPT_IMAGES", 2)
     max_image_pixels: int = _env_int("MAX_IMAGE_PIXELS", 262144)
 
@@ -60,6 +60,7 @@ class Settings:
     backend_bearer_token: str = os.environ.get("BACKEND_BEARER_TOKEN", "")
     backend_search_path: str = os.environ.get("BACKEND_SEARCH_PATH", "/api/mm/search/text-to-image")
     search_service_base_url: str = os.environ.get("SEARCH_SERVICE_BASE_URL", "http://localhost:18080")
+    mm_internal_token: str = os.environ.get("MM_INTERNAL_TOKEN", "")
     local_cache_dir: str = os.environ.get("LOCAL_CACHE_DIR", "/tmp/qa-cache")
 
 

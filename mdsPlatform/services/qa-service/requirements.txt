@@ -4,6 +4,7 @@ uvicorn[standard]==0.30.6
 python-multipart==0.0.9
 pydantic==2.9.2
 requests==2.32.3
+pillow==10.4.0
 # 索引 bundle 消费（与 search-service 相同的数据互通格式）
 numpy==1.26.4
 pandas==2.2.2

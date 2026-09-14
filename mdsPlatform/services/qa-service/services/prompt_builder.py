@@ -40,7 +40,10 @@ def build_system_prompt(task_type: str, retrieval_mode: str, has_sources: bool =
     base = TASK_PROMPTS.get(task_type, TASK_PROMPTS["general_qa"])
     hint = RETRIEVAL_HINTS.get(retrieval_mode, "")
     if has_sources:
-        evidence_rule = "存在参考信息时，只能引用实际出现的[来源n]。"
+        evidence_rule = (
+            "存在参考信息时，只能引用实际出现的[来源n]。明确区分程序计算事实、近似匹配与解释性推断；"
+            "保留给定的单位、时间范围、定位和质量限制，不得把相似度写成尺寸、拓扑、因果或可替换性证明。"
+        )
     else:
         evidence_rule = "当前没有参考信息，不得虚构[来源n]或声称引用了未提供的数据。"
     return base + "\n" + hint + "\n" + evidence_rule

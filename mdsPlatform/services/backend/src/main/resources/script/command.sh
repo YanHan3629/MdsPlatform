@@ -143,6 +143,54 @@ done <"$LIST_TSV"
 
 log "[download] done -> $INPUT_DIR"
 
+# Reuse immutable per-asset professional shards from the preceding published
+# index. Failure to fetch this optimization is safe: the builder reparses the
+# current raw snapshot and never uses a partial cache as authoritative input.
+if [ -n "${PREVIOUS_INDEX_COMMIT_ID:-}" ] && [ -n "${OUTPUT_ID:-}" ]; then
+  PREVIOUS_ASSET_DIR="${PREVIOUS_ASSET_DIR:-/tmp/previous/professional/assets}"
+  mkdir -p "$PREVIOUS_ASSET_DIR"
+  python3 - "$HOST" "$OUTPUT_ID" "$PREVIOUS_INDEX_COMMIT_ID" "$AUTHHEADER" "$PREVIOUS_ASSET_DIR" <<'PY' || \
+    log "[incremental] previous shard fetch unavailable; full professional parse will be used"
+import json
+import pathlib
+import sys
+import urllib.parse
+import urllib.request
+
+host, repo_id, commit_id, auth_header, output_dir = sys.argv[1:6]
+base = f"{host}/api/artifacts/{repo_id}/commits/{commit_id}/files"
+headers = {}
+if auth_header:
+    name, value = auth_header.split(":", 1)
+    headers[name.strip()] = value.strip()
+assets = []
+page = 1
+while True:
+    url = base + "?" + urllib.parse.urlencode({"pageIdx": page, "pageSize": 1000})
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=120) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    files = payload.get("fileRespList") or []
+    assets.extend(item for item in files if str(item.get("logicalPath") or "").startswith(("/professional/assets/", "/professional/derived/")))
+    if not files or page * 1000 >= int(payload.get("total") or 0):
+        break
+    page += 1
+target = pathlib.Path(output_dir)
+for item in assets:
+    logical_path = str(item["logicalPath"])
+    url = base + "/content?" + urllib.parse.urlencode({"path": logical_path})
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=120) as response:
+        content = response.read()
+        if item.get("sha256"):
+            import hashlib
+            if hashlib.sha256(content).hexdigest().lower() != str(item["sha256"]).lower():
+                raise ValueError("previous derived artifact checksum mismatch")
+        directory = target.parent / "derived" if logical_path.startswith("/professional/derived/") else target
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / pathlib.Path(logical_path).name).write_bytes(content)
+print(f"[incremental] downloaded previous asset shards={len(assets)}", file=sys.stderr)
+PY
+fi
+
 
 log "[3/5]  开始下载训练脚本==================================="
 
@@ -172,12 +220,16 @@ log "[3/5] 完成下载训练脚本==================================="
 chmod +x "$CMD_PATH"
 
 log "[4/5] 开始训练文件===================================="
-( source "$CMD_PATH" )
+if ! ( source "$CMD_PATH" ); then
+  die "job command failed; generated files will not be uploaded"
+fi
 
 log "[4/5]  结束训练文件==================================="
 
 UPLOAD_URL="${UPLOAD_URL:-$HOST/api/artifacts/$OUTPUT_ID/commits/$OUTPUT_COMMIT_ID/files}"
 OUTPUT_DIR="/tmp/out"
+UPLOAD_RESP_DIR="/tmp/upload-responses"
+mkdir -p "$UPLOAD_RESP_DIR"
 log "UPLOAD URL =================> $UPLOAD_URL"
 
 # URL encode（避免文件名带空格/中文/特殊字符导致 query 失败）
@@ -200,9 +252,9 @@ get_mime() {
 resp_path_for() {
   local fp="$1"
   local rel="${fp#${OUTPUT_DIR%/}/}"     # 相对路径
-  local out="${OUTPUT_DIR%/}/${rel}"
+  local out="${UPLOAD_RESP_DIR%/}/${rel}"
   mkdir -p "$(dirname "$out")"
-  echo "${out}.upload_resp.json"
+  echo "${out}.json"
 }
 
 echo "Uploading files under: ${OUTPUT_DIR}"
@@ -211,7 +263,7 @@ echo "OUTPUT_DIR: ${OUTPUT_DIR}"
 
 log "[5/5]  上传文件下所有的文件"
 # -print0 安全处理空格/换行等
-find "${OUTPUT_DIR}" -type f -print0 | while IFS= read -r -d '' FILE_PATH; do
+if ! find "${OUTPUT_DIR}" -type f ! -name '*.upload_resp.json' -print0 | while IFS= read -r -d '' FILE_PATH; do
   FILE_NAME="$(basename "$FILE_PATH")"
   CONTENT_TYPE="$(get_mime "$FILE_PATH")"
   RESP_FILE="$(resp_path_for "$FILE_PATH")"
@@ -248,9 +300,18 @@ log "UPLOAD_PATH==========>$UPLOAD_PATH"
     echo "!! Upload failed (http ${HTTP_CODE}): ${FILE_PATH}" >&2
     exit 1
   fi
-done
+done; then
+  die "one or more generated files failed to upload"
+fi
 
 echo "Done."
 
 log "[upload] done"
 
+# Index publication is a two-phase operation.  Generated files are uploaded
+# first; only then does the index-specific callback verify, preload and switch
+# the active snapshot.  Other generic jobs do not carry this callback helper.
+if [ -n "${BACKEND_CALLBACK_READY:-${backendCallbackReady:-}}" ]; then
+  [ -f /app/index_callback.py ] || die "index publication callback helper is missing"
+  python3 /app/index_callback.py || die "index publication callback failed"
+fi

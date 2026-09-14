@@ -132,8 +132,14 @@ public class MmFolderUploadSessionService {
                     throw ExceptionUtils.badRequest("文件未在会话中预签名: " + relativePath);
                 }
                 if (result.success()) {
-                    fileState.status = FileUploadStatus.UPLOADED;
-                    fileState.errorMessage = null;
+                    try {
+                        fileService.confirmPresignedUpload(state.repoId, state.commitId, finalPath);
+                        fileState.status = FileUploadStatus.UPLOADED;
+                        fileState.errorMessage = null;
+                    } catch (Exception exception) {
+                        fileState.status = FileUploadStatus.FAILED;
+                        fileState.errorMessage = "对象未就绪或校验失败: " + exception.getMessage();
+                    }
                 } else {
                     fileState.status = FileUploadStatus.FAILED;
                     fileState.errorMessage = result.errorMessage();

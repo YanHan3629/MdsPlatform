@@ -1,5 +1,7 @@
 package com.fwdrobo.sirius.dto.mm;
 
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 public record MmResolvedIndexBundleResp(
@@ -25,6 +27,7 @@ public record MmResolvedIndexBundleResp(
         String unifiedMetadataUrl,
         String representationManifestUrl,
         String modelName,
-        String indexType
+        String indexType,
+        List<Map<String, Object>> indexFiles
 ) {
 }

@@ -16,6 +16,7 @@ class SearchServiceClient:
         if token:
             self.backend_headers["Authorization"] = f"Bearer {token}"
         self.base_url = settings.search_service_base_url.rstrip("/")
+        self.search_headers = {"X-MM-Internal-Token": settings.mm_internal_token}
         self.timeout = settings.request_timeout_seconds
 
     def backend_multimodal_search(self, dataset_id, version_id, index_version_id, query: str, top_k: int = 8) -> list:
@@ -40,6 +41,33 @@ class SearchServiceClient:
         resp.raise_for_status()
         return resp.content
 
+    def download_asset_image(self, dataset_id, version_id, asset_id, preview=None) -> bytes | None:
+        """Use the scoped authenticated gateway, never arbitrary evidence URLs."""
+        from io import BytesIO
+        from PIL import Image
+        from uuid import UUID
+        url = f"{self.backend_base_url}/api/data-space/qa/assets/{dataset_id}/{version_id}/{asset_id}"
+        params = None
+        if preview and preview.get("artifactPath"):
+            path = preview["artifactPath"]
+            if not isinstance(path, str) or not path.startswith("/representations/") or "\\" in path or any(p in {".", ".."} for p in path.split("/")):
+                raise ValueError("invalid derivative preview path")
+            repo, commit = UUID(str(preview["indexRepoId"])), UUID(str(preview["indexCommitId"]))
+            url = f"{self.backend_base_url}/api/artifacts/{repo}/commits/{commit}/files/content"
+            params = {"path": path}
+        with requests.get(url, params=params, headers=self.backend_headers, timeout=30, stream=True) as response:
+            response.raise_for_status()
+            content = bytearray()
+            for block in response.iter_content(65536):
+                content.extend(block)
+                if len(content) > 10 * 1024 * 1024:
+                    raise ValueError("preview exceeds 10 MiB")
+        with Image.open(BytesIO(content)) as image:
+            image.thumbnail((512, 512))
+            output = BytesIO()
+            image.convert("RGB").save(output, format="PNG")
+            return output.getvalue()
+
     def text_to_image(self, dataset_id, version_id, index_version_id, query: str, top_k: int = 8) -> list:
         url = f"{self.base_url}/internal/v1/search/text-to-image"
         payload = {
@@ -49,7 +77,7 @@ class SearchServiceClient:
             "query": query,
             "topK": top_k,
         }
-        resp = requests.post(url, json=payload, timeout=self.timeout)
+        resp = requests.post(url, json=payload, headers=self.search_headers, timeout=self.timeout)
         resp.raise_for_status()
         return resp.json().get("items", []) or []
 
@@ -62,6 +90,18 @@ class SearchServiceClient:
             "indexVersionId": str(index_version_id),
             "topK": top_k,
         }
-        resp = requests.post(url, data=data, files=files, timeout=self.timeout)
+        resp = requests.post(url, data=data, files=files, headers=self.search_headers, timeout=self.timeout)
         resp.raise_for_status()
         return resp.json().get("items", []) or []
+
+    def professional_search(self, dataset_id, version_id, index_version_id, plan: dict) -> dict:
+        url = f"{self.base_url}/internal/v1/search/execute"
+        payload = {
+            "datasetId": str(dataset_id),
+            "versionId": str(version_id),
+            "indexVersionId": str(index_version_id),
+            "plan": plan,
+        }
+        resp = requests.post(url, json=payload, headers=self.search_headers, timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()

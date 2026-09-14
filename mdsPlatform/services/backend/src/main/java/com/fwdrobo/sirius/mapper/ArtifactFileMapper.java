@@ -30,7 +30,8 @@ public interface ArtifactFileMapper {
             @Param("etag") String etag,
             @Param("size") long size,
             @Param("contentType") String contentType,
-            @Param("deviceId") UUID deviceId
+            @Param("deviceId") UUID deviceId,
+            @Param("sha256") String sha256
     );
 
     // 通过 ID 集合分页查询对应信息,请保证集合里有元素

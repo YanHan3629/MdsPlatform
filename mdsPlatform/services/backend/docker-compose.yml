@@ -68,11 +68,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    ports:
-      - "${MM_SEARCH_HOST_PORT:-18080}:18080"
     environment:
       BACKEND_BASE_URL: http://sirius:8888
       BACKEND_BEARER_TOKEN: ${BACKEND_BEARER_TOKEN:-}
+      MM_INTERNAL_TOKEN: ${MM_INTERNAL_TOKEN:?MM_INTERNAL_TOKEN must be set in the root .env file}
       MODEL_PATH: ${MM_SEARCH_MODEL_PATH:-/app/app/clip_model_chinese}
       LOCAL_CACHE_DIR: /tmp/mm-search-cache
     networks:
@@ -138,6 +137,7 @@ services:
       MINIO_BUCKET: siriusdb-files
 
       MM_SEARCH_BASE_URL: http://search-service:18080
+      MM_INTERNAL_TOKEN: ${MM_INTERNAL_TOKEN:?MM_INTERNAL_TOKEN must be set in the root .env file}
       QA_SERVICE_BASE_URL: http://qa-service:18081
       MM_INDEX_BUILDER_CMD: "MODEL_PATH=/app/clip_model_chinese python /app/build_index.py"
 

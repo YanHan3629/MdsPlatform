@@ -60,7 +60,9 @@ public class MmIndexController {
                 req.embeddingDim(),
                 req.imageCount(),
                 req.textCount(),
-                req.unifiedCount());
+                req.unifiedCount(),
+                req.indexes(),
+                req.professionalManifestPath());
     }
 
     @PostMapping("/internal/datasets/{datasetId}/versions/{versionId}/indexes/{indexVersionId}/failed")

@@ -96,11 +96,6 @@
             <scope>runtime</scope>
         </dependency>
 
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-test</artifactId>
-            <scope>test</scope>
-        </dependency>
 
         <!-- 包含 OpenSSHKeyPairResourceWriter（写 OpenSSH 新格式私钥 / OpenSSH 公钥行） -->
         <dependency>

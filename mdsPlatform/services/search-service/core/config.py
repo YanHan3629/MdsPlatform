@@ -9,7 +9,9 @@ class Settings(BaseSettings):
     local_cache_dir: str = "/tmp/mm-search-cache"
     backend_base_url: str = "http://localhost:8888"
     backend_bearer_token: str = ""
+    mm_internal_token: str = ""
     request_timeout_seconds: int = 120
+    max_loaded_indexes: int = 2
 
 
 settings = Settings()

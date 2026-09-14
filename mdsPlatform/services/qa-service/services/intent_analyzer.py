@@ -6,7 +6,7 @@ from typing import Literal
 from adapters.vllm_client import VllmClient
 
 
-RetrievalType = Literal["none", "text_to_image", "image_to_text", "dual"]
+RetrievalType = Literal["none", "text_to_image", "image_to_text", "dual", "professional"]
 
 
 @dataclass(frozen=True)
@@ -16,16 +16,22 @@ class RetrievalIntent:
     use_uploaded_images: bool
     reason: str
     confidence: float
+    query_plan: dict | None = None
 
 
 class IntentAnalyzer:
     """使用与问答相同的 vLLM 模型处理无法由规则确定的检索意图。"""
 
     _SYSTEM_PROMPT = """你是多模态检索路由器，只判断路由，不回答问题。
-retrieval_type 只能是 none、text_to_image、image_to_text、dual。
+retrieval_type 只能是 none、text_to_image、image_to_text、dual、professional。
 输入中的 image_count 是可信事实，大于 0 表示已上传图片。
-只输出单行 JSON，且仅含 retrieval_type、text_query、confidence 三个字段；
-text_query 最多 40 字，confidence 为 0 到 1。"""
+只输出单行 JSON，字段为 retrieval_type、text_query、confidence，可选 query_plan。
+text_query 最多 40 字，confidence 为 0 到 1。若 retrieval_type=professional，必须给 query_plan：
+taskIntent、retrievers（text/visual/structured/timeseries/geometry）、queryText、operation，按需给
+targetEntity、hardConditions、timeRange、compareTimeRange、metric、unit、aggregateField、sortField、sortDescending、threshold、querySeries、retrieverOperations、
+queryAssetId、scaleInvariant、rotationInvariant、tolerance、topK、dependsOn。operation 只能是 search/filter/sort/count/sum/
+min/max/average/time_weighted_average/duration_above/compare_periods/trend_start_end/
+trend_regression/trend_monotonic/similar_shape。不要输出 SQL、代码、文件操作或额外字段。"""
 
     def __init__(self, client: VllmClient):
         self.client = client
@@ -73,14 +79,14 @@ text_query 最多 40 字，confidence 为 0 到 1。"""
             "image_count": image_count,
             "text_count": text_count,
             "has_context": has_context,
-            "available_retrieval_types": ["none", "text_to_image", "image_to_text", "dual"],
+            "available_retrieval_types": ["none", "text_to_image", "image_to_text", "dual", "professional"],
         }
         result = self.client.chat_completions(
             messages=[
                 {"role": "system", "content": self._SYSTEM_PROMPT},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
-            max_tokens=128,
+            max_tokens=384,
             temperature=0.0,
             top_p=1.0,
             top_k=1,
@@ -92,7 +98,7 @@ text_query 最多 40 字，confidence 为 0 到 1。"""
         content = choices[0].get("message", {}).get("content", "") if choices else ""
         data = self._parse_json(content)
         retrieval_type = str(data.get("retrieval_type") or "").strip().lower()
-        if retrieval_type not in {"none", "text_to_image", "image_to_text", "dual"}:
+        if retrieval_type not in {"none", "text_to_image", "image_to_text", "dual", "professional"}:
             raise ValueError(f"未知检索类型: {retrieval_type}")
         try:
             confidence = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
@@ -106,4 +112,5 @@ text_query 最多 40 字，confidence 为 0 到 1。"""
             ),
             reason="模型意图分析",
             confidence=confidence,
+            query_plan=data.get("query_plan") if isinstance(data.get("query_plan"), dict) else None,
         )

@@ -1,4 +1,6 @@
 import json
+import hashlib
+import gc
 import os
 from pathlib import Path
 
@@ -12,6 +14,8 @@ from PIL import Image
 from transformers import AutoModel, AutoProcessor, CLIPModel, CLIPProcessor
 
 from representations import build_representations
+from professional import build_professional_indexes
+from professional.contracts import content_sha256
 
 
 INPUT_DIR = Path(os.environ.get("INPUT_DIR", "/tmp/in"))
@@ -22,12 +26,25 @@ VERSION_ID = os.environ.get("VERSION_ID") or os.environ.get("versionId")
 INDEX_VERSION_ID = os.environ.get("INDEX_VERSION_ID") or os.environ.get("indexVersionId")
 BACKEND_BASE_URL = os.environ.get("BACKEND_BASE_URL", "")
 BACKEND_BEARER_TOKEN = os.environ.get("BACKEND_BEARER_TOKEN", "")
+MM_INTERNAL_TOKEN = os.environ.get("MM_INTERNAL_TOKEN", "")
 READY_PATH = os.environ.get("BACKEND_CALLBACK_READY") or os.environ.get("backendCallbackReady")
 FAILED_PATH = os.environ.get("BACKEND_CALLBACK_FAILED") or os.environ.get("backendCallbackFailed")
 OUTPUT_COMMIT_ID = os.environ.get("OUTPUT_COMMIT_ID")
+PREVIOUS_ASSET_DIR = Path(os.environ.get("PREVIOUS_ASSET_DIR", "/tmp/previous/professional/assets"))
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 IMAGE_BATCH_SIZE = int(os.environ.get("IMAGE_BATCH_SIZE", "16"))
 TEXT_BATCH_SIZE = int(os.environ.get("TEXT_BATCH_SIZE", "32"))
+
+
+def release_process_memory() -> None:
+    """Return phase-local Python/PyTorch allocations before the next builder."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    try:
+        __import__("ctypes").CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
 
 
 def load_model():
@@ -94,7 +111,8 @@ def metadata_frame(rows: list[dict]) -> pd.DataFrame:
 
 def write_outputs(image_vectors: np.ndarray, text_vectors: np.ndarray,
                   image_rows: list[dict], text_rows: list[dict],
-                  manifests: list[dict], embedding_dim: int):
+                  manifests: list[dict], embedding_dim: int,
+                  professional: dict | None = None):
     image_dir = OUTPUT_DIR / "indexes" / "image"
     text_dir = OUTPUT_DIR / "indexes" / "text"
     unified_dir = OUTPUT_DIR / "indexes" / "unified"
@@ -139,8 +157,39 @@ def write_outputs(image_vectors: np.ndarray, text_vectors: np.ndarray,
         json.dumps(representation_catalog, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
+    def artifact(path: Path):
+        return {
+            "path": "/" + path.relative_to(OUTPUT_DIR).as_posix(),
+            "sha256": content_sha256(path),
+            "sizeBytes": path.stat().st_size,
+        }
+
+    legacy_registrations = [
+        {
+            "semanticSpace": "visual.clip-cn-v1", "indexType": "FAISS_FLAT_IP",
+            "algorithmVersion": Path(MODEL_PATH).name, "modelVersion": Path(MODEL_PATH).name,
+            "dimension": embedding_dim, "normalization": "l2", "distance": "inner_product",
+            "buildParameters": {"batchSize": IMAGE_BATCH_SIZE},
+            "files": [artifact(image_dir / "faiss.index"), artifact(image_dir / "id_map.parquet")],
+            "coverage": {"unitCount": len(image_rows), "representationTypes": ["VisualUnit"]}, "status": "READY",
+        },
+        {
+            # Compatibility-only CLIP text projection.  Professional text
+            # retrieval uses the independent text.lexical/text.semantic spaces.
+            "semanticSpace": "visual.clip-cn-text-compat-v1", "indexType": "FAISS_FLAT_IP",
+            "algorithmVersion": Path(MODEL_PATH).name, "modelVersion": Path(MODEL_PATH).name,
+            "dimension": embedding_dim, "normalization": "l2", "distance": "inner_product",
+            "buildParameters": {"batchSize": TEXT_BATCH_SIZE, "compatibilityOnly": True},
+            "files": [artifact(text_dir / "faiss.index"), artifact(text_dir / "id_map.parquet")],
+            "coverage": {"unitCount": len(text_rows), "representationTypes": ["TextUnit"]}, "status": "READY",
+        },
+    ]
+    for registration in legacy_registrations:
+        registration["contentChecksum"] = hashlib.sha256(
+            "".join(item["sha256"] for item in registration["files"]).encode("utf-8")
+        ).hexdigest()
     manifest = {
-        "schemaVersion": "2.0",
+        "schemaVersion": "3.0",
         "datasetId": DATASET_ID,
         "datasetVersionId": VERSION_ID,
         "indexVersionId": INDEX_VERSION_ID,
@@ -157,6 +206,8 @@ def write_outputs(image_vectors: np.ndarray, text_vectors: np.ndarray,
         "textCount": len(text_rows),
         "unifiedCount": len(unified_meta),
         "assetCount": len(manifests),
+        "indexes": legacy_registrations + list((professional or {}).get("indexes", [])),
+        "professionalManifestPath": (professional or {}).get("professionalManifestPath"),
     }
     (OUTPUT_DIR / "indexes" / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -171,6 +222,8 @@ def callback_ready(manifest: dict):
     headers = {"Content-Type": "application/json"}
     if BACKEND_BEARER_TOKEN:
         headers["Authorization"] = f"Bearer {BACKEND_BEARER_TOKEN}"
+    if MM_INTERNAL_TOKEN:
+        headers["X-MM-Internal-Token"] = MM_INTERNAL_TOKEN
     body = {
         "indexCommitId": OUTPUT_COMMIT_ID,
         "imageIndexPath": manifest["imageIndexPath"],
@@ -185,6 +238,8 @@ def callback_ready(manifest: dict):
         "imageCount": manifest["imageCount"],
         "textCount": manifest["textCount"],
         "unifiedCount": manifest["unifiedCount"],
+        "indexes": manifest.get("indexes", []),
+        "professionalManifestPath": manifest.get("professionalManifestPath"),
     }
     response = requests.post(url, headers=headers, json=body, timeout=60)
     response.raise_for_status()
@@ -197,6 +252,8 @@ def callback_failed(message: str):
     headers = {"Content-Type": "application/json"}
     if BACKEND_BEARER_TOKEN:
         headers["Authorization"] = f"Bearer {BACKEND_BEARER_TOKEN}"
+    if MM_INTERNAL_TOKEN:
+        headers["X-MM-Internal-Token"] = MM_INTERNAL_TOKEN
     response = requests.post(url, headers=headers, json={"errorMessage": message}, timeout=60)
     response.raise_for_status()
 
@@ -205,12 +262,14 @@ def main():
     try:
         if not VERSION_ID:
             raise RuntimeError("VERSION_ID/versionId is required")
-        bundle = build_representations(INPUT_DIR, OUTPUT_DIR, VERSION_ID)
+        print("[index-builder] phase=representations start", flush=True)
+        bundle = build_representations(INPUT_DIR, OUTPUT_DIR, VERSION_ID, retain_full_manifests=False)
         if not bundle.manifests:
             raise RuntimeError("no supported business files found")
         if not bundle.text_units:
             raise RuntimeError("no text representations generated")
 
+        print("[index-builder] phase=clip start", flush=True)
         model, processor = load_model()
         text_vectors = encode_texts(model, processor, [row["text"] for row in bundle.text_units])
         image_vectors = encode_images(model, processor, [row["actual_path"] for row in bundle.visual_units])
@@ -219,12 +278,32 @@ def main():
             raise RuntimeError("CLIP text and image embeddings are not in the same vector space")
         if not image_vectors.size:
             image_vectors = np.empty((0, embedding_dim), dtype="float32")
+        del model, processor
+        release_process_memory()
 
+        print("[index-builder] phase=professional start", flush=True)
+        processing = json.loads(os.environ.get("INDEX_PROCESSING_CONFIG_JSON", "{}"))
+        professional = build_professional_indexes(
+            INPUT_DIR,
+            OUTPUT_DIR,
+            VERSION_ID,
+            timezone_name=processing.get("timezone") or os.environ.get("SOURCE_TIMEZONE") or None,
+            unit_mapping=processing.get("unitMapping", json.loads(os.environ.get("UNIT_MAPPING_JSON", "{}"))),
+            time_column=processing.get("timeColumn") or os.environ.get("TIME_COLUMN") or None,
+            entity_columns=processing.get("entityColumns", [value.strip() for value in os.environ.get("ENTITY_COLUMNS", "").split(",") if value.strip()]),
+            asset_mappings=processing.get("assetMappings", {}),
+            previous_asset_dir=PREVIOUS_ASSET_DIR,
+        )
+        release_process_memory()
+
+        print("[index-builder] phase=publish start", flush=True)
         manifest = write_outputs(
             image_vectors, text_vectors, bundle.visual_units, bundle.text_units,
-            bundle.manifests, embedding_dim,
+            bundle.manifests, embedding_dim, professional,
         )
-        callback_ready(manifest)
+        # Publication is intentionally deferred to index_callback.py.  The
+        # generic job bootstrap invokes it only after every output artifact
+        # has uploaded successfully, so a published commit is immutable.
     except Exception as exc:
         try:
             callback_failed(str(exc))

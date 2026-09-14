@@ -3,6 +3,7 @@ package com.fwdrobo.sirius.service;
 import com.fwdrobo.sirius.dto.PageRes;
 import com.fwdrobo.sirius.dto.artifact.ArtifactCommitResponse;
 import com.fwdrobo.sirius.dto.artifact.CreateCommitReq;
+import com.fwdrobo.sirius.dto.file.FileResp;
 import com.fwdrobo.sirius.dto.mm.MmDatasetVersionReq;
 import com.fwdrobo.sirius.dto.mm.MmDatasetVersionResp;
 import com.fwdrobo.sirius.entity.mm.MmDataset;
@@ -11,6 +12,7 @@ import com.fwdrobo.sirius.handler.JsonbTypeHandler;
 import com.fwdrobo.sirius.mapper.MmDatasetVersionMapper;
 import com.fwdrobo.sirius.util.ExceptionUtils;
 import com.fwdrobo.sirius.util.SecurityUtils;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -25,13 +27,22 @@ public class MmDatasetVersionService {
     private final MmDatasetService mmDatasetService;
     private final MmDatasetVersionMapper mmDatasetVersionMapper;
     private final ArtifactCommitService artifactCommitService;
+    private final MmIndexOutboxService indexOutboxService;
+    private final JdbcTemplate jdbc;
+    private final FileService fileService;
 
     public MmDatasetVersionService(MmDatasetService mmDatasetService,
                                    MmDatasetVersionMapper mmDatasetVersionMapper,
-                                   ArtifactCommitService artifactCommitService) {
+                                   ArtifactCommitService artifactCommitService,
+                                   MmIndexOutboxService indexOutboxService,
+                                   JdbcTemplate jdbc,
+                                   FileService fileService) {
         this.mmDatasetService = mmDatasetService;
         this.mmDatasetVersionMapper = mmDatasetVersionMapper;
         this.artifactCommitService = artifactCommitService;
+        this.indexOutboxService = indexOutboxService;
+        this.jdbc = jdbc;
+        this.fileService = fileService;
     }
 
     @Transactional
@@ -71,12 +82,56 @@ public class MmDatasetVersionService {
             throw ExceptionUtils.badRequest("dataset 与 version 不匹配");
         }
 
-        artifactCommitService.publishCommit(dataset.getRawRepoId(), version.getRawCommitId(), version.getComment());
+        String publishComment = version.getComment() == null || version.getComment().isBlank()
+                ? "发布数据版本 " + version.getVersionName() : version.getComment();
+        verifyRawSnapshotReady(dataset.getRawRepoId(), version.getRawCommitId());
+        artifactCommitService.publishCommit(dataset.getRawRepoId(), version.getRawCommitId(), publishComment);
         version.setVersionStatus("RAW_READY");
         version.setPublishedAt(OffsetDateTime.now());
         version.setPublishedBy(SecurityUtils.getUserId());
         mmDatasetVersionMapper.update(version);
+        indexOutboxService.enqueueSnapshot(dataset.getOrgId(), datasetId, versionId,
+                version.getRawCommitId(), SecurityUtils.getUserId());
         return toResp(version);
+    }
+
+    /** Do not enqueue a build for an empty, in-flight or unverified upload. */
+    void verifyRawSnapshotReady(UUID repoId, UUID commitId) {
+        // Pair this commit-row lock with the artifact_file trigger's FOR SHARE:
+        // no concurrent upload can slip in between verification and publish.
+        String commitStatus = jdbc.queryForObject("""
+                SELECT commit_status FROM public.artifact_commit
+                WHERE repo_id=? AND commit_id=? FOR UPDATE
+                """, String.class, repoId, commitId);
+        if (!"DRAFT".equals(commitStatus)) {
+            throw ExceptionUtils.conflict("仅 DRAFT 数据版本可完成上传并发布");
+        }
+        List<Map<String, Object>> files = jdbc.queryForList("""
+                SELECT logical_path,upload_state,sha256 FROM public.artifact_file
+                WHERE commit_id=? ORDER BY logical_path FOR UPDATE
+                """, commitId);
+        if (files.isEmpty()) {
+            throw ExceptionUtils.conflict("数据版本尚无已上传文件，不能发布或创建入库任务");
+        }
+        for (Map<String, Object> file : files) {
+            String path = String.valueOf(file.get("logical_path"));
+            if (!"READY".equals(file.get("upload_state"))) {
+                throw ExceptionUtils.conflict("文件尚未完成上传与校验: " + path);
+            }
+            String sha256 = file.get("sha256") == null ? "" : String.valueOf(file.get("sha256")).trim();
+            if (!sha256.matches("[a-fA-F0-9]{64}")) {
+                try {
+                    FileResp verified = fileService.ensureContentIdentity(repoId, commitId, path);
+                    String verifiedSha = verified == null ? "" : verified.getSha256();
+                    if (verified == null || !"READY".equals(verified.getUploadState())
+                            || verifiedSha == null || !verifiedSha.matches("[a-fA-F0-9]{64}")) {
+                        throw ExceptionUtils.conflict("文件内容校验未完成: " + path);
+                    }
+                } catch (Exception exception) {
+                    throw ExceptionUtils.conflict("文件内容尚未就绪，不能创建入库任务: " + path);
+                }
+            }
+        }
     }
 
     public MmDatasetVersion getVersionOrNotFound(UUID versionId) {

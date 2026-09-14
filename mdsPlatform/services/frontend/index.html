@@ -205,15 +205,62 @@
           </form>
           <div class="filters mini-gap"><span id="qaAccount">尚未登录</span><button id="qaLogout" class="btn link" type="button" hidden>退出登录</button><button id="qaRefresh" class="btn link" type="button">刷新数据集与模型状态</button></div>
         </div>
+        <div class="card mini-gap">
+          <div class="card-head"><div><p class="eyebrow">真实数据版本</p><h2>上传与自动索引</h2></div></div>
+          <p>这里操作真实持久化数据版本（与驾驶舱演示上传区不同）。选择已有空间、数据集和草稿版本，或填写新名称创建。上传完成后发布版本，系统才会自动解析、构建并预热索引；已发布版本可直接回填。</p>
+          <form id="qaIngestForm" class="form-grid">
+            <label>空间<select id="qaIngestSpace"><option value="">登录后加载</option></select></label>
+            <label>新建空间名称<input id="qaNewSpace" maxlength="128" placeholder="留空则使用所选空间" /></label>
+            <label>数据集<select id="qaIngestDataset"><option value="">先选择空间</option></select></label>
+            <label>新建数据集名称<input id="qaNewDataset" maxlength="128" placeholder="留空则使用所选数据集" /></label>
+            <label>版本<select id="qaIngestVersion"><option value="">先选择数据集</option></select></label>
+            <label>新建版本名称<input id="qaNewVersion" maxlength="64" placeholder="留空则使用所选版本" /></label>
+            <label class="full">上传文件<input id="qaIngestFiles" type="file" multiple /></label>
+            <label class="full">或选择文件夹（保留相对路径）<input id="qaIngestFolder" type="file" webkitdirectory multiple /></label>
+            <label>来源时区<input id="qaSourceTimezone" placeholder="例如 Asia/Shanghai；未知请留空" /></label>
+            <label>时间字段<input id="qaSourceTimeColumn" placeholder="例如 timestamp" /></label>
+            <label>实体分组字段<input id="qaSourceEntities" placeholder="例如 device_id,sensor_id" /></label>
+            <label>单位映射（JSON）<input id="qaSourceUnits" placeholder='例如 {"temperature":"C","length":"mm"}' /></label>
+            <label class="full">按文件覆盖映射（JSON，可选）<textarea id="qaAssetMappings" placeholder='例如 {"/measurements.csv":{"timezone":"Asia/Shanghai","timeColumn":"timestamp"}}'></textarea></label>
+            <button id="qaSaveMapping" type="button" class="btn">保存映射（下次构建生效）</button>
+            <div class="full filters"><button id="qaIngestSubmit" class="btn primary" type="submit">上传并发布，自动建立索引</button><button id="qaBackfill" class="btn" type="button">对已发布版本回填</button></div>
+          </form>
+          <p id="qaIngestProgress" role="status">登录后可操作真实数据版本。</p>
+        </div>
         <div class="grid two mini-gap">
           <div class="card form-card">
             <form id="qaForm" class="form-grid">
               <label class="full">检索数据集<select id="qaDataset"><option value="">不使用数据空间检索</option></select></label>
               <p id="qaDatasetInfo" class="full">登录后加载当前组织真实的 READY 索引；演示目录不作为检索依据。</p>
+              <div id="qaIndexing" class="full compact-list"></div>
               <label>输入模式<select name="inputMode" id="qaInputMode"><option value="hybrid">用户资料 + 数据空间</option><option value="question_only">仅问题 + 数据空间</option><option value="user_data_only">仅使用用户资料</option></select></label>
               <label>任务<select name="taskType"><option value="general_qa">通用问答</option><option value="chain_risk_analysis">产业链风险分析</option><option value="demand_evaluation">需求评判</option><option value="data_summary">数据摘要</option></select></label>
-              <label>检索类型<select name="retrievalType" id="qaRetrievalType"><option value="auto">自动判断</option><option value="text_to_image">文字检索</option><option value="image_to_text">图片检索</option><option value="dual">文字与图片双路检索</option><option value="none">不检索</option></select></label>
+              <label>检索类型<select name="retrievalType" id="qaRetrievalType"><option value="auto">自动判断</option><option value="professional">专业检索（明确计划）</option><option value="text_to_image">兼容文搜图</option><option value="image_to_text">兼容图搜文</option><option value="dual">兼容图文双路</option><option value="none">不检索</option></select></label>
               <label>检索数量<input name="topK" type="number" value="3" min="1" max="50" required /></label>
+              <fieldset id="qaProfessional" class="full professional-options" hidden>
+                <legend>专业查询计划</legend>
+                <label>检索器<select id="qaRetriever"><option value="text">文本</option><option value="structured">结构化</option><option value="timeseries">时序</option><option value="geometry">三维几何</option><option value="visual">视觉</option></select></label>
+                <label>操作<select id="qaOperation"><option value="search">检索</option><option value="filter">条件筛选</option><option value="sort">排序</option><option value="count">计数</option><option value="sum">求和</option><option value="min">最小值</option><option value="max">最大值</option><option value="average">样本平均</option><option value="time_weighted_average">时间加权平均</option><option value="duration_above">超过阈值时长</option><option value="compare_periods">比较时间段</option><option value="trend_start_end">起止趋势</option><option value="trend_regression">回归趋势</option><option value="trend_monotonic">持续单调趋势</option></select></label>
+                <label>结构化计算字段<input id="qaAggregateField" placeholder="例如 amount" /></label>
+                <label>排序字段<input id="qaSortField" placeholder="例如 amount" /></label>
+                <label class="checkbox"><input id="qaSortDescending" type="checkbox" />降序排列</label>
+                <label>指标字段<input id="qaMetric" placeholder="例如 temperature" /></label>
+                <label>目标单位<input id="qaUnit" placeholder="例如 °C、mm" /></label>
+                <label>开始时间<input id="qaTimeStart" type="datetime-local" /></label>
+                <label>结束时间<input id="qaTimeEnd" type="datetime-local" /></label>
+                <label>比较段开始<input id="qaCompareStart" type="datetime-local" /></label>
+                <label>比较段结束<input id="qaCompareEnd" type="datetime-local" /></label>
+                <label>阈值<input id="qaThreshold" type="number" step="any" /></label>
+                <label>实体标识<input id="qaEntity" placeholder="例如 device-01" /></label>
+                <label>几何查询样本<select id="qaQueryAsset"><option value="">选择当前数据版本中的三维文件</option></select></label>
+                <label>查询曲线（JSON 数组）<input id="qaQuerySeries" placeholder="例如 [0,1,2,3,4,5,6,7]" /></label>
+                <label class="checkbox"><input id="qaRotationInvariant" type="checkbox" />要求旋转不变</label>
+                <label class="checkbox"><input id="qaScaleInvariant" type="checkbox" />忽略绝对尺寸</label>
+                <label>硬条件字段<input id="qaConditionField" placeholder="例如 width" /></label>
+                <label>比较符<select id="qaConditionOp"><option value="eq">等于</option><option value="gte">大于等于</option><option value="lte">小于等于</option><option value="gt">大于</option><option value="lt">小于</option></select></label>
+                <label>硬条件值<input id="qaConditionValue" placeholder="数值或文本" /></label>
+                <p class="full">精确时序计算必须填写指标及起止时间；缺少关键口径时系统会明确要求补充，不会静默退回视觉相似。</p>
+              </fieldset>
               <label class="full">问题<textarea name="question" maxlength="8000" placeholder="例如：这些质检记录反映了哪些问题？请注明来源。" required></textarea></label>
               <label class="full">补充资料<textarea name="context" id="qaContext" placeholder="可粘贴文本依据（每条最多使用前 500 字符）"></textarea></label>
               <label class="full">图片（最多 2 张，每张不超过 10 MB）<input name="images" id="qaImages" type="file" accept="image/jpeg,image/png,image/webp" multiple /></label>

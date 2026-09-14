@@ -193,7 +193,6 @@ public class DockerArgs {
         String timeoutLimit = this.timeoutSeconds + "s";
 
         String CMD = " set -eu"
-                + " && set -x"  // 调试信息
                 + " && echo '[boot] downloading script...'"
                 + " && out=/root/command.sh"
                 + " && url=\"$TEMPLATE_URL\""
@@ -213,7 +212,10 @@ public class DockerArgs {
                 + " fi";
 
         runArgs.addAll(List.of("sh", "-lc", CMD));
-        log.debug("Docker run args: {}", String.join(" ", runArgs));
+        // Do not print argv: it contains the short-lived scoped bearer token
+        // and the service credential passed to the isolated worker.
+        log.debug("Docker run prepared: jobId={}, runId={}, image={}, timeoutSeconds={}",
+                jobId, runId, image, timeoutSeconds);
         return runArgs;
     }
 
