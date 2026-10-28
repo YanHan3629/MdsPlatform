@@ -13,13 +13,14 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @Service
 public class JwtService {
 
     public enum TokenType {
-        ACCESS, REFRESH
+        ACCESS, REFRESH, JOB_IO
     }
 
     // 声明 token 相关键
@@ -59,6 +60,18 @@ public class JwtService {
         log.debug("生成刷新令牌: username={}, role={}, tokenVersion={}, expirationSeconds={}",
                 username, roles, tokenVersion, refreshExpirationSeconds);
         return generateToken(username, roles, tokenVersion, TokenType.REFRESH, refreshExpirationSeconds);
+    }
+
+    /** A worker credential never becomes an interactive access/refresh token. */
+    public String generateJobIoToken(String username, Integer tokenVersion,
+                                     Map<String, String> frozenScope, int runtimeSeconds) {
+        if (runtimeSeconds <= 0) throw new IllegalArgumentException("Job runtime must be positive");
+        Instant now = Instant.now();
+        return Jwts.builder().subject(username).issuedAt(Date.from(now))
+                .expiration(Date.from(now.plusSeconds((long) runtimeSeconds + 300)))
+                .claim(TOKEN_TYPE_CLAIM, TokenType.JOB_IO.name())
+                .claim(TOKEN_VERSION_CLAIM, tokenVersion == null ? 0 : tokenVersion)
+                .claim("job_io_scope", Map.copyOf(frozenScope)).signWith(key).compact();
     }
 
     /**

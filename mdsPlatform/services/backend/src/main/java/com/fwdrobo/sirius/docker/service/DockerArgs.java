@@ -181,6 +181,12 @@ public class DockerArgs {
             }
         }
         runArgs.addAll(List.of("-e", "TEMPLATE_URL=" + host + "/api/jobs/internal/script/command"));
+        Object queueMarker=this.envs==null?null:this.envs.get("MDS_EVIDENCE_CPU_QUEUE");
+        String queueVersion=queueMarker instanceof JsonNode node?node.asText():String.valueOf(queueMarker);
+        if("v1".equals(queueVersion)){
+            // Shared lock files only; no datasets, credentials or storage mounts.
+            runArgs.addAll(List.of("--mount","type=volume,source=sirius-evidence-cpu-queue,target=/var/lock/mds-evidence"));
+        }
 
         runArgs.addAll(jobParams);
         if (jobParams.contains("--gpus")) {

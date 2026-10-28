@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from datetime import timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -7,7 +9,8 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from .contracts import ORGANIZER_VERSION, ParsedAsset, SemanticUnit, stable_id
+from .contracts import ORGANIZER_VERSION, ParsedAsset, SemanticUnit, stable_id,organizer_version
+from .json_native import is_record_number,is_encoded_number,number_metadata
 
 
 TIME_NAMES = ("time", "timestamp", "datetime", "date", "日期", "时间", "采集时间", "记录时间")
@@ -16,7 +19,7 @@ METRIC_UNIT_SUFFIXES = (
     ("_kwh", "kWh"), ("_wh", "Wh"), ("_percent", "%"), ("_pct", "%"),
     ("_celsius", "°C"), ("_degc", "°C"), ("_mm", "mm"), ("_cm", "cm"),
     ("_km", "km"), ("_min", "min"), ("_ms", "ms"), ("_hour", "h"),
-    ("_hours", "h"), ("_sec", "s"), ("_seconds", "s"), ("_c", "°C"),
+    ("_hours", "h"), ("_sec", "s"), ("_seconds", "s"), ("_c", "°C"), ("_w", "W"),
 )
 
 
@@ -83,25 +86,54 @@ class SemanticOrganizer:
 
     def organize(self, asset: ParsedAsset, *, timezone_name: str | None = None,
                  time_column: str | None = None, entity_columns: list[str] | None = None,
-                 duplicate_policy: str = "keep-last-by-source-row", interval_boundary: str = "[start,end)") -> list[SemanticUnit]:
+                 duplicate_policy: str = "deduplicate-identical-preserve-conflicts", interval_boundary: str = "[start,end)") -> list[SemanticUnit]:
+        timezone_name = asset.attributes.get("sourceTimezone") or timezone_name
         units: list[SemanticUnit] = []
         for sequence, item in enumerate(asset.items, start=1):
             unit_type = {"text": "TextUnit", "visual": "VisualUnit", "table": "TableUnit", "geometry": "GeometryUnit"}[item.kind]
-            units.append(self._unit(asset, item, unit_type, sequence))
+            base_unit=self._unit(asset, item, unit_type, sequence)
+            units.append(base_unit)
             if item.kind == "table":
                 records = item.payload.get("records", [])
-                summary = type(item)(
-                    "text",
-                    "字段: " + "、".join(str(column.get("name")) for column in item.payload.get("columns", []))
-                    + "；样例: " + str([record.get("values", {}) for record in records[:3]]),
-                    dict(item.locator),
-                    units=item.units,
-                    quality_flags=item.quality_flags,
-                )
-                units.append(self._unit(asset, summary, "TextUnit", sequence))
-                column, parsed, confidence, naive_time_count = _time_column(records, time_column, timezone_name)
+                # Each business row remains independently locatable. A file-wide
+                # sample of its first three rows is not evidence for other rows.
+                measurement = bool(records and "series_id" in records[0]["values"] and "timestamp" in records[0]["values"])
+                if not measurement and not asset.logical_path.startswith("/catalog/"):
+                    for record in records:
+                        row = type(item)("text", json.dumps(record["values"], ensure_ascii=False),
+                            {**item.locator, **record.get("locator", {}), "rawRow": record.get("rawRow")}, units=dict(item.units),
+                            quality_flags=item.quality_flags)
+                        row_unit=self._unit(asset, row, "TextUnit", sequence)
+                        row_unit.metadata['tableId']=base_unit.unit_id
+                        row_unit.metadata['sourceRecord']={key:record[key] for key in
+                            ('sourceValues','numberLexemes','formulas','calculationEligibility','valueTransforms') if key in record}
+                        units.append(row_unit)
+                from .source_timezone import resolve as resolve_timezone
+                time_policy=item.payload.get('sourceTimePolicy',{})
+                item_timezone,time_flags,time_usable=resolve_timezone(time_policy,timezone_name)
+                base_unit.quality_flags=sorted(set([*base_unit.quality_flags,*time_flags]))
+                if time_policy:base_unit.metadata['sourceTimePolicy']=time_policy
+                if time_policy:base_unit.metadata['timeInterpretation']={'status':'POLICY_RESOLVED' if item_timezone else 'NOT_DECLARED',
+                    'sourceTimezone':item_timezone,'qualityFlags':time_flags,'rawRecordsPreserved':True}
+                if not time_usable:
+                    base_unit.metadata['timeInterpretation']={'status':'UNAVAILABLE','qualityFlags':time_flags,'rawRecordsPreserved':True}
+                column, parsed, confidence, naive_time_count = _time_column(records,time_column,item_timezone) if time_usable else (None,None,0.0,0)
+                if time_usable and time_policy and column is None and records and any(
+                        str(key).lower() in TIME_NAMES or key==time_column for key in records[0]['values']):
+                    base_unit.quality_flags=sorted(set([*base_unit.quality_flags,'TIME_COLUMN_INTERPRETATION_UNAVAILABLE']))
+                    base_unit.metadata['timeInterpretation']={'status':'UNAVAILABLE','qualityFlags':['TIME_COLUMN_INTERPRETATION_UNAVAILABLE'],'rawRecordsPreserved':True}
                 if column and parsed is not None:
-                    entity_keys = _entity_columns(records, entity_columns or [])
+                    invalid_time_count = sum(pd.isna(value) for value in parsed)
+                    blocked=[]
+                    if time_policy and naive_time_count and not item_timezone:blocked.append('SOURCE_TIMEZONE_UNSPECIFIED')
+                    if time_policy and invalid_time_count:blocked.append('INVALID_TIME_PRESERVED_IN_TABLE_UNIT')
+                    if blocked:
+                        base_unit.quality_flags=sorted(set([*base_unit.quality_flags,*blocked]))
+                        base_unit.metadata['timeInterpretation']={'status':'UNAVAILABLE','qualityFlags':blocked,
+                            'naiveTimeCount':naive_time_count,'invalidTimeCount':invalid_time_count,'rawRecordsPreserved':True}
+                        continue
+                    entity_keys = (["series_id"] if records and "series_id" in records[0]["values"]
+                                   else _entity_columns(records, entity_columns or []))
                     facts = []
                     for record, timestamp in zip(records, parsed):
                         if pd.isna(timestamp):
@@ -111,25 +143,38 @@ class SemanticOrganizer:
                         # distinct series by using their immutable asset ID.
                         entity = "|".join(str(values.get(key, "")) for key in entity_keys) or asset.asset_id
                         for metric, value in values.items():
-                            if metric == column or metric in entity_keys or not isinstance(value, (int, float)) or isinstance(value, bool):
+                            numeric=is_record_number(record,metric)
+                            source_eligible=record.get('calculationEligibility',{}).get(metric,True)
+                            if metric == column or metric in entity_keys or (not numeric and source_eligible):
                                 continue
                             fact_unit = _metric_unit(str(metric), item.units)
+                            decoded=None;binary_range_problem=False
+                            if numeric:
+                                try:decoded=None if is_encoded_number(value,number_metadata(record,metric)) else float(value)
+                                except OverflowError:decoded=None
+                                binary_range_problem=decoded is None or not np.isfinite(decoded)
+                                if binary_range_problem:decoded=None
                             facts.append({
-                                "entity": entity, "metric": metric, "value": float(value),
+                                "entity": entity, "metric": metric, "value": decoded,
                                 "unit": fact_unit, "rawTime": str(values.get(column)),
                                 "normalizedTime": timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
                                 "rawRow": record.get("rawRow"),
-                                "qualityFlags": [] if fact_unit else ["UNIT_MAPPING_REQUIRED"],
+                                "locator": {**item.locator, **record.get("locator", {}), "rawRow": record.get("rawRow")},
+                                "calculationEligible": not binary_range_problem and record.get('calculationEligibility',{}).get(metric,True) and record.get('calculationEligibility',{}).get(column,True),
+                                "numberLexemes":record.get('numberLexemes',{}),
+                                "recordValues": values,
+                                "qualityFlags": ([] if fact_unit else ["UNIT_MAPPING_REQUIRED"])+(['SOURCE_NUMBER_OUTSIDE_TIMESERIES_BINARY_RANGE'] if binary_range_problem else []),
                             })
                     flags = list(item.quality_flags)
-                    invalid_time_count = sum(pd.isna(value) for value in parsed)
+                    flags.extend(time_flags)
                     if invalid_time_count:
                         flags.append("INVALID_TIME_PRESERVED_IN_TABLE_UNIT")
-                    if naive_time_count and not timezone_name:
+                    if naive_time_count and not item_timezone:
                         flags.append("SOURCE_TIMEZONE_UNSPECIFIED")
                     temporal = type(item)("timeseries", {
                         "timeColumn": column, "timeDetectionConfidence": confidence,
-                        "sourceTimezone": timezone_name, "facts": facts,
+                        "sourceTimezone": item_timezone, "facts": facts,
+                        "sourceTimePolicy":time_policy,
                         "invalidTimeCount": invalid_time_count,
                         "duplicatePolicy": duplicate_policy, "intervalBoundary": interval_boundary,
                         "missingPolicy": "preserve", "interpolation": "none", "outlierPolicy": "preserve",
@@ -153,6 +198,6 @@ class SemanticOrganizer:
             parser_name=asset.parser_name,
             parser_version=asset.parser_version,
             parser_config_version=asset.parser_config_version,
-            organizer_version=self.version,
+            organizer_version=organizer_version(asset.source_format),
             payload=item.payload,
         )

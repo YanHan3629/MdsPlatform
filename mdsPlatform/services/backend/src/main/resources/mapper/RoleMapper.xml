@@ -44,12 +44,12 @@
     </select>
 
     <select id="insert" resultType="java.util.UUID">
-        INSERT INTO role (role_id, org_id, role_code, role_name, is_builtin)
+        INSERT INTO role (role_id, org_id, role_code, role_name, is_builtin, created_by, updated_by)
         VALUES (COALESCE(#{roleId}, gen_random_uuid()),
                 #{orgId},
                 #{roleCode},
                 #{roleName},
-                COALESCE(#{isBuiltin}, FALSE))
+                COALESCE(#{isBuiltin}, FALSE), #{createdBy}, #{createdBy})
         RETURNING role_id
     </select>
 

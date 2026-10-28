@@ -41,7 +41,7 @@ public class MmAssetService {
     }
 
     public PageRes<MmAssetResp> listAssets(UUID datasetId, UUID versionId, Integer page, Integer size, String keyword, String tag, String category) {
-        MmDataset dataset = mmDatasetService.getDatasetOrNotFound(datasetId);
+        MmDataset dataset = mmDatasetService.getReadableDatasetOrNotFound(datasetId);
         MmDatasetVersion version = mmDatasetVersionService.getVersionOrNotFound(versionId);
         if (!datasetId.equals(version.getDatasetId())) {
             throw ExceptionUtils.badRequest("dataset 与 version 不匹配");
@@ -59,7 +59,7 @@ public class MmAssetService {
     }
 
     public MmAssetResp getAsset(UUID datasetId, UUID versionId, UUID assetId) {
-        MmDataset dataset = mmDatasetService.getDatasetOrNotFound(datasetId);
+        MmDataset dataset = mmDatasetService.getReadableDatasetOrNotFound(datasetId);
         MmDatasetVersion version = mmDatasetVersionService.getVersionOrNotFound(versionId);
         MmAsset asset = getAssetOrNotFound(assetId);
         if (!versionId.equals(asset.getDatasetVersionId()) || !datasetId.equals(version.getDatasetId())) {
@@ -105,6 +105,7 @@ public class MmAssetService {
     }
 
     private MmAsset validateAssetBelongs(UUID datasetId, UUID versionId, UUID assetId) {
+        mmDatasetService.getDatasetOrNotFound(datasetId);
         MmDatasetVersion version = mmDatasetVersionService.getVersionOrNotFound(versionId);
         if (!datasetId.equals(version.getDatasetId())) {
             throw ExceptionUtils.badRequest("dataset 与 version 不匹配");

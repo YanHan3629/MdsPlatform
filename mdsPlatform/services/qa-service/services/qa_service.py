@@ -15,6 +15,8 @@ from schemas.qa_resp import QAMeta, QAResponse, RetrievedItem, SourceItem
 from services.intent_analyzer import IntentAnalyzer
 from services.prompt_builder import build_system_prompt
 from services.retrieval_planner import RetrievalPlanner
+from services.calculation_context import compact_decimal
+from services.timeseries_lineage import scope_details as timeseries_scope_details
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +146,7 @@ def _verified_answer(answer: str, question: str, sources: List[SourceItem]) -> s
         # Free prose cannot be reliably checked by membership in a bag of numbers.
         # Bind every numeric result to its operation, field, unit, scope and citation.
         labels = {"average": "样本平均值", "sum": "总和", "count": "计数", "min": "最小值", "max": "最大值",
-                  "time_weighted_average": "时间加权平均值", "duration_above": "超过阈值估计时长",
+                  "time_weighted_average": "时间加权估计平均值", "duration_above": "严格超过阈值估计时长",
                   "trend_start_end": "起止变化量", "trend_regression": "每秒回归斜率", "trend_monotonic": "逐点非递减",
                   "compare_periods": "两时段比较"}
         lines = []
@@ -153,18 +155,51 @@ def _verified_answer(answer: str, question: str, sources: List[SourceItem]) -> s
             operation = facts.get("operation")
             value = facts.get("value")
             unit = facts.get("unit") or source.units.get("value") or ""
-            if operation == "count": unit = "条"
+            if operation == 'count':unit='点' if facts.get('countPolicy')=='unique-calculable-time-samples' else '条'
+            if operation == 'duration_above' and unit == 's':unit='秒'
             if operation == "trend_regression" and unit: unit += "/s"
             if operation == "trend_monotonic": unit = ""
-            display = json.dumps(value, ensure_ascii=False) if value is not None else "不可计算"
+            if facts.get('exactValue') is not None:
+                display=str(facts['exactValue'])
+                if len(display)>128:
+                    expression=compact_decimal(display)
+                    if expression!=display:display=expression+'（精确表达式）'
+            elif facts.get('exactRatio') and facts.get('decimalRounded'):
+                ratio=facts['exactRatio'];numerator=compact_decimal(ratio['numerator']);denominator=compact_decimal(ratio['denominator'])
+                display=f"({numerator})/({denominator})（精确比值；十进制近似 {facts.get('decimalValue')}）"
+            elif facts.get('decimalValue') is not None and facts.get('decimalRounded') is False:display=str(facts['decimalValue'])
+            else:display = json.dumps(value, ensure_ascii=False) if value is not None else "不可计算"
             if operation == "compare_periods" and "difference" in facts:
                 display = json.dumps({key: facts.get(key) for key in ("firstPeriodAverage", "secondPeriodAverage", "difference")}, ensure_ascii=False)
-            lines.append(f"- [来源{sources.index(source) + 1}] {facts.get('metric') or facts.get('field') or '记录'}的{labels.get(operation, operation)}：{display} {unit}。")
+            label=('物理记录数' if facts.get('countMode')=='records' else '去重后有效数值样本数') if facts.get('countMode') else labels.get(operation,operation)
+            field='记录' if facts.get('countMode')=='records' else facts.get('metric') or facts.get('field') or '记录'
+            result_line=f"- [来源{sources.index(source) + 1}] {field}的{label}：{display}{(' '+unit) if unit else ''}。"
+            lines.append(result_line)
+            if facts.get('arithmetic')=='exact-rational-source-lexemes-v1':
+                details=[]
+                if source.entity_id:details.append('对象 '+source.entity_id)
+                if facts.get('matchedRowCount') is not None:details.append(f"匹配 {facts['matchedRowCount']} 条记录")
+                if facts.get('completeFilteredSet'):details.append('覆盖完整筛选范围')
+                if operation!='count':
+                    details.append(f"数值输入 {facts.get('numericInputCount',0)} 项")
+                    if facts.get('excludedNullOrNonNumericCount'):details.append(f"{facts['excludedNullOrNonNumericCount']} 项空值或非数值未参与计算")
+                if facts.get('legacyDecodedNumberCount'):details.append(f"其中 {facts['legacyDecodedNumberCount']} 项使用了解码数值，原始数字表达式未全量保留")
+                if source.time_range:details.append('时间范围 '+json.dumps(source.time_range,ensure_ascii=False))
+                if (source.calculation_lineage or {}).get('version','').startswith('native-timeseries-calculation-'):
+                    details=timeseries_scope_details(source.calculation_lineage)
+                else:
+                    if source.calculation_policy:details.append('计算口径 '+json.dumps(source.calculation_policy,ensure_ascii=False))
+                    if source.quality_flags:details.append('数据说明 '+ '；'.join(source.quality_flags))
+                scope_line='  '+'；'.join(details)+'。' if details else ''
+                if scope_line:lines.append(scope_line)
+                if source.calculation_lineage:
+                    source.provenance['verifiedCalculationPresentation']={'result':result_line,'scope':scope_line}
+                continue
             scope = {"entity": source.entity_id, "timeRange": source.time_range, "status": facts.get("status"),
                      "sampleCount": facts.get("sampleCount", facts.get("matchedRowCount")),
                      "policy": source.calculation_policy, "qualityFlags": source.quality_flags}
             lines.append("  范围与口径：" + json.dumps(scope, ensure_ascii=False, default=str))
-        return "程序核验后仅保留以下已计算事实（数值、单位及范围逐项绑定）：\n" + "\n".join(lines)
+        return "计算结果：\n" + "\n".join(lines)
     evidence_text = json.dumps([{
         "facts": source.facts,
         "units": source.units,
@@ -207,7 +242,7 @@ class QaService:
 
     def __init__(self, client: Optional[VllmClient] = None, bearer_token=None):
         self.client = client or vllm_default_client
-        self.bearer_token = settings.backend_bearer_token if bearer_token is None else bearer_token
+        self.bearer_token = bearer_token or ""
         self._search_client = None
         self._bundle_retriever = None
         self._retrieval_planner = RetrievalPlanner(IntentAnalyzer(self.client))
@@ -526,267 +561,12 @@ class QaService:
         question = (question or "").strip()
         if not question:
             raise ValueError("question 不能为空")
-
-        images = images or []
-        texts = [t for t in (texts or []) if t and t.strip()]
-        input_mode = (input_mode or "hybrid").lower()
-        if input_mode not in ("question_only", "hybrid", "user_data_only"):
-            input_mode = "hybrid"
-        if input_mode == "question_only":
-            # 只输入问题：禁止用户附带文本/上下文/图片
-            if texts or (context and context.strip()) or images:
-                raise ValueError(
-                    "question_only 模式仅允许输入问题，不能附带 texts/context/images；"
-                    "请使用 hybrid 或 user_data_only 模式输入数据"
-                )
-            texts = []
-            context = None
-            images = []
-        image_limit = min(settings.max_upload_images, settings.max_prompt_images)
-        if len(images) > image_limit:
-            raise ValueError(f"单次最多上传 {image_limit} 张图片")
-        task_type = task_type if task_type in TASK_TYPES else "general_qa"
-        retrieval_mode = (retrieval_mode or "auto").lower()
-        if retrieval_mode not in ("auto", "search_service", "bundle", "none"):
-            retrieval_mode = "auto"
-        retrieval_type = (retrieval_type or "auto").lower()
-        if retrieval_type not in ("auto", "none", "text_to_image", "image_to_text", "dual", "professional"):
-            retrieval_type = "auto"
-
-        start = time.time()
-        sources: List[SourceItem] = []
-        for i, t in enumerate(texts, start=1):
-            sources.append(
-                SourceItem(
-                    source_id=f"txt_{i}",
-                    source_type="text_chunk",
-                    relevance_score=0.9,
-                    content_preview=_truncate(t, settings.max_text_chars),
-                )
-            )
-        if context:
-            sources.append(
-                SourceItem(
-                    source_id="ctx_1",
-                    source_type="context",
-                    relevance_score=0.9,
-                    content_preview=_truncate(context, settings.max_text_chars),
-                )
-            )
-        for i, (name, _) in enumerate(images, start=1):
-            sources.append(
-                SourceItem(
-                    source_id=f"img_{i}",
-                    source_type="image",
-                    relevance_score=0.8,
-                    content_preview=f"[图片] {name}",
-                )
-            )
-
-        planning_started = time.perf_counter()
-        plan = self._retrieval_planner.plan(
-            question=question,
-            input_mode=input_mode,
-            retrieval_mode=retrieval_mode,
-            retrieval_type=retrieval_type,
-            use_search_service=use_search_service,
-            has_scope=bool(dataset_id and version_id and index_version_id),
-            image_count=len(images),
-            text_count=len(texts),
-            has_context=bool(context and context.strip()),
-            allow_model_analysis=settings.llm_backend.lower() != "mock",
-            query_plan=query_plan,
-            top_k=top_k,
-        )
-        planning_ms = round((time.perf_counter() - planning_started) * 1000, 3)
-        mode = plan.provider_mode
-        query_images = images if plan.use_uploaded_images else []
-        retrieval_started = time.perf_counter()
-        retrieved, resolved, retrieved_images, retrieved_meta, retrieval_details = self._retrieve(
-            plan.text_query,
-            dataset_id,
-            version_id,
-            index_version_id,
-            mode,
-            plan.retrieval_type,
-            query_images,
-            top_k,
-            plan.professional_plan,
-        )
-        retrieval_ms = round((time.perf_counter() - retrieval_started) * 1000, 3)
-        sources.extend(retrieved)
-        if resolved != "none" and (retrieved or retrieved_images):
-            mode = resolved
-        else:
-            mode = "none"
-
-        # 检索提示：无匹配 / 未提供数据集标识时给前端可见提示
-        notice: Optional[str] = None
-        if input_mode in ("question_only", "hybrid"):
-            if not (dataset_id and version_id and index_version_id):
-                notice = (
-                    "未提供数据集标识（datasetId/versionId/indexVersionId），"
-                    "无法检索数据空间；本次回答未使用数据空间内容。"
-                )
-            elif plan.retrieval_type == "none":
-                notice = "根据输入模式或用户意图，本次未执行数据空间检索。"
-            elif not (retrieved or retrieved_images):
-                notice = (
-                    "数据空间检索未匹配到相关内容；"
-                    "本次回答基于用户输入与模型自身知识生成。"
-                )
-            elif retrieval_details.get("conflicts"):
-                notice = "检索证据存在互相冲突的精确数值；请核对来源，不能给出唯一确定值。"
-            elif any(code.startswith("RELATION_NOT_FOUND") for code in retrieval_details.get("limitations", [])):
-                notice = "当前数据快照没有可追溯的实体关系；只能报告上游候选，不能计算关联设备趋势。"
-        # 检索命中的内容 ID（RAG：附带返回给用户查看）
-        retrieved_items: List[RetrievedItem] = []
-        seen = set()
-        for item in retrieved_meta:
-            aid = self._as_uuid(item.get("asset_id"))
-            key = str(aid) if aid else str(item.get("logical_path") or "")
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            retrieved_items.append(
-                RetrievedItem(
-                    asset_id=aid,
-                    logical_path=item.get("logical_path"),
-                    score=float(item.get("score", 0.0)),
-                    preview_url=item.get("preview_url"),
-                    source_type=item.get("source_type", "search_result"),
-                )
-            )
-
-        # 组装送入模型的图片：优先用户图片，空位用检索召回图片（按相关度）补足
-        # 用户图片也必须遵守 vLLM 的多模态上限，避免请求在推理端因显存限制失败。
-        prompt_images: List[Tuple[str, bytes]] = list(images[: settings.max_prompt_images])
-        for name, data, score in sorted(retrieved_images, key=lambda x: x[2], reverse=True):
-            if len(prompt_images) >= settings.max_prompt_images:
-                break
-            prompt_images.append((name, data))
-            sources.append(
-                SourceItem(
-                    source_id=f"retrieved_img_{len(sources)}",
-                    source_type="image",
-                    relevance_score=score,
-                    content_preview=f"[检索图片] {name}",
-                )
-            )
-
-        # 组装消息：系统提示（任务类型）+ 参考依据 + 图片 + 问题
-        user_content: list = []
-        if sources:
-            evidence = "\n".join(
-                f"[来源{i + 1}] ({s.source_type}, 相关度{s.relevance_score:.2f}) "
-                f"{_truncate(s.content_preview, settings.max_text_chars)}"
-                for i, s in enumerate(sources)
-            )
-            user_content.append({"type": "text", "text": f"参考信息：\n{evidence}"})
-        for filename, content in prompt_images:
-            user_content.append(
-                {"type": "image_url", "image_url": {"url": _image_to_data_url(filename, content)}}
-            )
-        user_content.append({"type": "text", "text": question})
-        messages = [
-            {
-                "role": "system",
-                "content": build_system_prompt(task_type, mode, has_sources=bool(sources)),
-            },
-            {"role": "user", "content": user_content},
-        ]
-
-        backend = settings.llm_backend.lower()
-        generation_started = time.perf_counter()
-        if backend == "mock":
-            answer = self._mock_answer(question, sources)
-            confidence = self._confidence_heuristic(answer, sources)
-            elapsed_ms = int((time.time() - start) * 1000)
-            backend_name = "mock"
-            confidence_source = "mock"
-            usage = {}
-            request_id = None
-            model_name = settings.model_name
-        else:
-            try:
-                result = self.client.chat_completions(
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    logprobs=True,
-                )
-            except VllmClientError as exc:
-                logger.error("vLLM generation failed: %s", exc)
-                raise
-
-            elapsed_ms = int((time.time() - start) * 1000)
-            choices = result.get("choices", [])
-            answer = choices[0]["message"]["content"] if choices else ""
-            confidence, confidence_source = _compute_confidence(choices)
-            if confidence_source == "unavailable":
-                confidence = self._confidence_heuristic(answer, sources)
-            usage = result.get("usage", {})
-            request_id = result.get("id")
-            model_name = result.get("model") or settings.model_name
-            backend_name = "vllm"
-        generation_ms = round((time.perf_counter() - generation_started) * 1000, 3)
-
-        # 小参数模型偶尔会在没有依据时虚构“来源”标记；响应层保证引用与 sources 一致。
-        if not sources:
-            answer = re.sub(r"\s*\[来源\s*\d+\]", "", answer).strip()
-        else:
-            answer = _verified_answer(answer, question, sources)
-        if any(code.startswith("RELATION_NOT_FOUND") for code in retrieval_details.get("limitations", [])):
-            upstream = [f"- [来源{index}] 资产 {source.asset_id or '未指定'}，"
-                        f"近似证据 {json.dumps(source.facts, ensure_ascii=False, default=str)[:300]}"
-                        for index, source in enumerate(sources, 1)
-                        if source.semantic_space in {"geometry.shape", "geometry.properties"}]
-            answer = ("当前数据快照没有可追溯的零件—设备关系，不能把形状候选映射到设备，"
-                      "也不能计算该零件关联设备的时序趋势。\n"
-                      + "\n".join(upstream[:5])
-                      + "\n形状相似不证明尺寸、接口或工程可替换性；不会凭文件名臆造关系。")
-        if retrieval_details.get("conflicts") and "证据冲突" not in answer:
-            answer += "\n\n注意：检索证据存在冲突，不能把其中任一数值视为唯一确定结论。"
-
-        # 回答附带检索内容 ID（RAG：用户可据此自行查看检索内容）
-        if retrieved_items:
-            ids = ", ".join(str(r.asset_id) for r in retrieved_items if r.asset_id)
-            if ids:
-                answer = f"{answer}\n\n---\n检索内容ID：{ids}"
-
-        return QAResponse(
-            answer=answer,
-            confidence=confidence,
-            sources=sources,
-            processing_time_ms=elapsed_ms,
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            model=model_name,
-            meta=QAMeta(
-                model_name=model_name,
-                confidence_source=confidence_source,
-                image_count=len(prompt_images),
-                text_count=len(texts),
-                prompt_tokens=usage.get("prompt_tokens", 0),
-                completion_tokens=usage.get("completion_tokens", 0),
-                total_tokens=usage.get("total_tokens", 0),
-                request_id=request_id,
-                retrieval_type=plan.retrieval_type,
-                intent_analysis_used=plan.intent_analysis_used,
-                intent_confidence=plan.confidence,
-                intent_reason=plan.reason,
-                retrieval_support=round(sum(source.relevance_score for source in retrieved) / max(1, len(retrieved)), 4),
-                data_quality=round(sum(1.0 for source in retrieved if not source.quality_flags) / max(1, len(retrieved)), 4),
-                planning_ms=planning_ms,
-                retrieval_ms=retrieval_ms,
-                generation_ms=generation_ms,
-                professional_timings_ms=retrieval_details.get("professionalTimingsMs", {}),
-            ),
-            task_type=task_type,
-            retrieval_mode=mode,
-            backend=backend_name,
-            notice=notice,
-            retrieved=retrieved_items,
-        )
+        from services.curated_qa import answer_curated
+        return answer_curated(self, question=question, input_mode=input_mode, task_type=task_type,
+            dataset_id=dataset_id, version_id=version_id, index_version_id=index_version_id,
+            texts=texts, context=context, images=images, use_search_service=use_search_service,
+            retrieval_mode=retrieval_mode, retrieval_type=retrieval_type, query_plan=query_plan,
+            top_k=top_k, max_tokens=max_tokens, temperature=temperature)
 
 
 service = QaService()

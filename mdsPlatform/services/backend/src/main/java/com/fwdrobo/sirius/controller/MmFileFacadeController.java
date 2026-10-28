@@ -326,7 +326,7 @@ public class MmFileFacadeController {
                                    @RequestParam(required = false) String glob,
                                    @RequestParam(required = false) @Min(1) Integer pageIdx,
                                    @RequestParam(required = false) @Max(1000) Integer pageSize) throws Exception {
-        MmDataset dataset = mmDatasetService.getDatasetOrNotFound(datasetId);
+        MmDataset dataset = mmDatasetService.getReadableDatasetOrNotFound(datasetId);
         MmDatasetVersion version = assertVersionBelongsToDataset(datasetId, versionId);
         ListGetResp resp = fileService.listFiles(ListFilesQuery.builder()
                 .repoId(dataset.getRawRepoId())
@@ -343,7 +343,7 @@ public class MmFileFacadeController {
                                 @PathVariable UUID versionId,
                                 @RequestParam @ValidLogicalPath String path,
                                 HttpServletResponse response) throws Exception {
-        MmDataset dataset = mmDatasetService.getDatasetOrNotFound(datasetId);
+        MmDataset dataset = mmDatasetService.getReadableDatasetOrNotFound(datasetId);
         MmDatasetVersion version = assertVersionBelongsToDataset(datasetId, versionId);
         var stream = fileService.downloadContent(dataset.getRawRepoId(), version.getRawCommitId(), path);
         if (stream.contentType() != null && !stream.contentType().isBlank()) {
@@ -362,7 +362,7 @@ public class MmFileFacadeController {
                                            @PathVariable UUID versionId,
                                            @RequestParam @ValidLogicalPath String path,
                                            @RequestParam(defaultValue = "600") @Min(1) @Max(43200) Integer expireSeconds) throws Exception {
-        MmDataset dataset = mmDatasetService.getDatasetOrNotFound(datasetId);
+        MmDataset dataset = mmDatasetService.getReadableDatasetOrNotFound(datasetId);
         MmDatasetVersion version = assertVersionBelongsToDataset(datasetId, versionId);
         var resp = fileService.downloadUrl(dataset.getRawRepoId(), version.getRawCommitId(), path, Duration.ofSeconds(expireSeconds));
         return Map.of(

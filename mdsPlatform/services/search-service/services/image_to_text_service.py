@@ -9,6 +9,7 @@ class ImageToTextService:
     def __init__(self):
         self.encoder = QueryEncoder()
 
+    @registry.serialized
     def search(self, dataset_id, version_id, index_version_id, top_k, content: bytes):
         loaded = registry.ensure_loaded(str(dataset_id), str(version_id), str(index_version_id))
         vector = self.encoder.encode_image_bytes(content)

@@ -94,6 +94,8 @@ mm:
   search:
     base-url: ${MM_SEARCH_BASE_URL:http://localhost:18080}
     preview-expire-seconds: ${MM_PREVIEW_EXPIRE_SECONDS:600}
+  evidence-worker:
+    base-url: ${MM_EVIDENCE_WORKER_BASE_URL:http://evidence-worker:18083}
 
   index-builder:
     image: ${MM_INDEX_BUILDER_IMAGE:sirius-mm-index-builder:latest}

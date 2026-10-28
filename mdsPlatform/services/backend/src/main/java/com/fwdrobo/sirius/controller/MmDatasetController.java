@@ -17,6 +17,9 @@ import java.util.UUID;
 @RequestMapping("/api/mm")
 @Validated
 public class MmDatasetController {
+    private static final com.fasterxml.jackson.databind.ObjectReader PUBLISH_OPTIONS = new com.fasterxml.jackson.databind.ObjectMapper().reader()
+            .with(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+            .with(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
 
     private final MmDatasetService mmDatasetService;
     private final MmDatasetVersionService mmDatasetVersionService;
@@ -62,7 +65,20 @@ public class MmDatasetController {
     }
 
     @PostMapping("/datasets/{datasetId}/versions/{versionId}/publish")
-    public MmDatasetVersionResp publishVersion(@PathVariable UUID datasetId, @PathVariable UUID versionId) {
-        return mmDatasetVersionService.publishVersion(datasetId, versionId);
+    public MmDatasetVersionResp publishVersion(@PathVariable UUID datasetId, @PathVariable UUID versionId,
+                                               @RequestBody(required=false) String options) {
+        return mmDatasetVersionService.publishVersion(datasetId, versionId,activationPolicy(options));
+    }
+    static boolean activationPolicy(String options) {
+        if(options==null||options.isBlank())return true;
+        try {
+            var value=PUBLISH_OPTIONS.readTree(options);
+            if(value==null||!value.isObject()||value.size()>1||(value.size()==1&&!value.has("activateOnReady"))
+                    ||(value.has("activateOnReady")&&!value.get("activateOnReady").isBoolean()))
+                throw com.fwdrobo.sirius.util.ExceptionUtils.badRequest("发布选项仅支持布尔型 activateOnReady");
+            return value.path("activateOnReady").asBoolean(true);
+        } catch(java.io.IOException invalid) {
+            throw com.fwdrobo.sirius.util.ExceptionUtils.badRequest("发布选项必须是无重复字段、无尾随内容的 JSON 对象");
+        }
     }
 }

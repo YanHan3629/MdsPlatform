@@ -24,13 +24,15 @@ public class MmDatasetService {
     private final MmDatasetMapper mmDatasetMapper;
     private final MmSpaceService mmSpaceService;
     private final ArtifactRepoService artifactRepoService;
+    private final DatasetAccessService access;
 
     public MmDatasetService(MmDatasetMapper mmDatasetMapper,
                             MmSpaceService mmSpaceService,
-                            ArtifactRepoService artifactRepoService) {
+                            ArtifactRepoService artifactRepoService, DatasetAccessService access) {
         this.mmDatasetMapper = mmDatasetMapper;
         this.mmSpaceService = mmSpaceService;
         this.artifactRepoService = artifactRepoService;
+        this.access=access;
     }
 
     @Transactional
@@ -72,7 +74,14 @@ public class MmDatasetService {
     }
 
     public MmDatasetResp getById(UUID datasetId) {
-        return toResp(getDatasetOrNotFound(datasetId));
+        return toResp(getReadableDatasetOrNotFound(datasetId));
+    }
+
+    public MmDataset getReadableDatasetOrNotFound(UUID datasetId) {
+        access.requireDatasetRead(datasetId);
+        MmDataset dataset=mmDatasetMapper.selectAuthorizedRead(datasetId);
+        if (dataset==null) throw ExceptionUtils.notFound("dataset 不存在");
+        return dataset;
     }
 
     public MmDataset getDatasetOrNotFound(UUID datasetId) {

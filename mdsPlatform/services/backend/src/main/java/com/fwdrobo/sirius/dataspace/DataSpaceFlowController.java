@@ -19,10 +19,17 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/data-space")
 public class DataSpaceFlowController {
-    private final DataSpaceFlowService service;
+    private final PersistentDataSpaceService service;
+    private final DataSpaceQualityService quality;
+    private final DataSpaceApplicationService applications;
+    private final DataSpaceContractService contracts;
+    private final DataSpaceDeliveryService deliveries;
 
-    public DataSpaceFlowController(DataSpaceFlowService service) {
+    public DataSpaceFlowController(PersistentDataSpaceService service,DataSpaceQualityService quality,DataSpaceApplicationService applications,DataSpaceContractService contracts,DataSpaceDeliveryService deliveries) {
         this.service = service;
+        this.quality = quality;
+        this.applications = applications;
+        this.contracts=contracts;this.deliveries=deliveries;
     }
 
     @GetMapping("/health")
@@ -94,9 +101,9 @@ public class DataSpaceFlowController {
     }
 
     @PostMapping("/sources/{sourceId}/govern")
-    public Map<String, Object> governSource(@PathVariable String sourceId,
+    public Map<String, Object> governSource(@PathVariable java.util.UUID sourceId,
                                             @RequestBody Map<String, Object> body) {
-        return service.governSource(sourceId, body);
+        return quality.request(sourceId, body);
     }
 
     @PostMapping("/datasets/{datasetId}/build-index")
@@ -138,6 +145,8 @@ public class DataSpaceFlowController {
                                                     @RequestParam(defaultValue = "12") int limit) {
         return service.productSamples(productId, limit);
     }
+    @GetMapping("/products/{productId}/versions/{productVersionId}/scope")
+    public Map<String,Object> productScope(@PathVariable java.util.UUID productId,@PathVariable java.util.UUID productVersionId){return service.productScope(productId,productVersionId);}
 
     @GetMapping("/products/{productId}/content-search")
     public List<Map<String, Object>> searchProductContent(@PathVariable String productId,
@@ -163,6 +172,8 @@ public class DataSpaceFlowController {
         return ResponseEntity.ok()
                 .contentType(MediaType.parseMediaType(file.contentType()))
                 .contentLength(file.size())
+                .header("Cache-Control","no-store")
+                .header("Content-Disposition",org.springframework.http.ContentDisposition.attachment().filename(file.fileName(),java.nio.charset.StandardCharsets.UTF_8).build().toString())
                 .body(new InputStreamResource(file.inputStream()));
     }
 
@@ -179,8 +190,11 @@ public class DataSpaceFlowController {
 
     @PostMapping("/intents")
     public Map<String, Object> createIntent(@RequestBody Map<String, Object> body) {
-        return service.createIntent(body);
+        return applications.create(body);
     }
+
+    @PostMapping("/intents/{intentId}/decision")
+    public Map<String,Object> decideIntent(@PathVariable java.util.UUID intentId,@RequestBody Map<String,Object> body){return applications.decide(intentId,body);}
 
     @GetMapping("/contracts")
     public List<Map<String, Object>> listContracts() {
@@ -189,16 +203,39 @@ public class DataSpaceFlowController {
 
     @PostMapping("/contracts")
     public Map<String, Object> createContract(@RequestBody Map<String, Object> body) {
-        return service.createContract(body);
+        return contracts.create(body);
     }
 
     @PostMapping("/contracts/{contractId}/dispatch")
-    public Map<String, Object> dispatchContract(@PathVariable String contractId) {
-        return service.dispatchContract(contractId);
+    public Map<String, Object> dispatchContract(@PathVariable java.util.UUID contractId) {
+        return contracts.retry(contractId);
     }
 
     @GetMapping("/deliveries")
     public List<Map<String, Object>> listDeliveries() {
         return service.listDeliveries();
+    }
+    @GetMapping("/receiver-endpoints")
+    public List<Map<String,Object>> endpoints(@RequestParam(required=false)java.util.UUID applicationId){return contracts.endpoints(applicationId);}
+    @PostMapping("/receiver-endpoints")
+    public Map<String,Object> endpoint(@RequestBody Map<String,Object> body){return contracts.registerEndpoint(body);}
+    @PostMapping("/contracts/{id}/confirm")
+    public Map<String,Object> confirm(@PathVariable java.util.UUID id,@RequestBody Map<String,Object> body){return contracts.confirm(id,body);}
+    @PostMapping("/contracts/{id}/revoke")
+    public Map<String,Object> revoke(@PathVariable java.util.UUID id,@RequestBody Map<String,Object> body){return contracts.revoke(id,body);}
+    @PostMapping("/contracts/{id}/revise")
+    public Map<String,Object> revise(@PathVariable java.util.UUID id,@RequestBody Map<String,Object> body){return contracts.revise(id,body);}
+    @GetMapping("/contracts/{id}/history")
+    public List<Map<String,Object>> history(@PathVariable java.util.UUID id){return contracts.history(id);}
+    @GetMapping("/deliveries/{id}/attempts")
+    public List<Map<String,Object>> attempts(@PathVariable java.util.UUID id){return deliveries.attempts(id);}
+    @GetMapping("/deliveries/{id}/manifest")
+    public Map<String,Object> manifest(@PathVariable java.util.UUID id){return deliveries.manifestForUser(id);}
+    @GetMapping("/deliveries/{id}/receipt")
+    public Map<String,Object> receipt(@PathVariable java.util.UUID id){return deliveries.receiptForUser(id);}
+    @GetMapping("/deliveries/{id}/package")
+    public ResponseEntity<InputStreamResource> deliveryPackage(@PathVariable java.util.UUID id)throws Exception{
+        var stream=deliveries.openPackage(id);var response=ResponseEntity.ok().contentType(MediaType.parseMediaType("application/zip")).header("Cache-Control","no-store").header("Content-Disposition","attachment; filename=delivery-"+id+".zip");
+        if(stream.size()>=0)response.contentLength(stream.size());return response.body(new InputStreamResource(stream.inputStream()));
     }
 }

@@ -74,6 +74,8 @@ services:
       MM_INTERNAL_TOKEN: ${MM_INTERNAL_TOKEN:?MM_INTERNAL_TOKEN must be set in the root .env file}
       MODEL_PATH: ${MM_SEARCH_MODEL_PATH:-/app/app/clip_model_chinese}
       LOCAL_CACHE_DIR: /tmp/mm-search-cache
+      # Keep one decoded full snapshot on the current 16 GiB test host.
+      MAX_LOADED_INDEXES: "1"
     networks:
       - default
       - shared-net

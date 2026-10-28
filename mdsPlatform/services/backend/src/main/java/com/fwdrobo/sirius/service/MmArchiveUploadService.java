@@ -101,7 +101,7 @@ public class MmArchiveUploadService {
                     continue;
                 }
 
-                if (imagesOnly && !isImage(normalizedRelativePath)) {
+                if (com.fwdrobo.sirius.util.DataSpaceBusinessFilePolicy.isDescription(normalizedRelativePath) || (imagesOnly && !isImage(normalizedRelativePath))) {
                     skippedFiles++;
                     addSkipped(skippedItems, maxDetailItems, normalizedRelativePath);
                     continue;

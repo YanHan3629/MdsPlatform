@@ -15,6 +15,7 @@ import com.fwdrobo.sirius.service.ArtifactCommitService;
 import com.fwdrobo.sirius.service.JobService;
 import com.fwdrobo.sirius.service.MinioService;
 import com.fwdrobo.sirius.service.TrialLimitService;
+import com.fwdrobo.sirius.security.JwtService;
 import com.fwdrobo.sirius.util.ExceptionUtils;
 import com.fwdrobo.sirius.util.SecurityUtils;
 import lombok.extern.slf4j.Slf4j;
@@ -56,6 +57,7 @@ public class ContainerService {
     private final ContainerInspector inspector;
     private final DockerHostResolver resolver;
     private final TrialLimitService trialLimitService;
+    private final JwtService jwtService;
 
     public ContainerService(
             JobRunMapper repo,
@@ -70,7 +72,8 @@ public class ContainerService {
             ContainerLauncher launcher,
             ContainerInspector inspector,
             DockerHostResolver resolver,
-            TrialLimitService trialLimitService
+            TrialLimitService trialLimitService,
+            JwtService jwtService
     ) {
         this.repo = repo;
         this.dockerCli = dockerCli;
@@ -85,6 +88,7 @@ public class ContainerService {
         this.inspector = inspector;
         this.resolver = resolver;
         this.trialLimitService = trialLimitService;
+        this.jwtService = jwtService;
     }
     /**
      * dockerHost: 选择哪台 docker daemon 来 run（GPU_01/CPU_02/LOCAL）
@@ -137,6 +141,28 @@ public class ContainerService {
             parseRepos(job, envMap);
             int timeoutSeconds = trialLimitService.currentRuntimeLimitSeconds();
             boolean formalOrg = isFormalOrgForCurrentUser();
+            String workerToken = token;
+            if (envMap.get("InputRepoId") != null && envMap.get("InputCommitId") != null
+                    && envMap.get("OutputRepoId") != null && envMap.get("OutputCommitId") != null) {
+                Map<String, String> scope = new java.util.HashMap<>();
+                scope.put("jobId", jobId.toString()); scope.put("runId", runId.toString());
+                scope.put("userId", userId.toString()); scope.put("orgId", orgId.toString());
+                for (String scopeName : List.of("InputRepoId", "InputCommitId", "OutputRepoId", "OutputCommitId")) {
+                    scope.put(Character.toLowerCase(scopeName.charAt(0)) + scopeName.substring(1), UUID.fromString(envMap.get(scopeName).toString()).toString());
+                }
+                Object previous = envMap.get("PREVIOUS_INDEX_COMMIT_ID");
+                if (previous != null && !previous.toString().isBlank()) {
+                    UUID previousId = UUID.fromString(previous.toString());
+                    var previousCommit = artifactCommitService.getCommit(UUID.fromString(scope.get("outputRepoId")), previousId);
+                    if (previousCommit.getCommitStatus() != com.fwdrobo.sirius.entity.artifact.CommitStatus.PUBLISHED) {
+                        throw ExceptionUtils.badRequest("任务缓存必须来自已发布索引快照");
+                    }
+                    scope.put("previousIndexCommitId", previousId.toString());
+                }
+                var accessClaims = jwtService.parseClaims(token, JwtService.TokenType.ACCESS);
+                workerToken = jwtService.generateJobIoToken(accessClaims.getSubject(), jwtService.extractTokenVersion(accessClaims), scope, timeoutSeconds);
+                if (envMap.containsKey("BACKEND_BEARER_TOKEN")) envMap.put("BACKEND_BEARER_TOKEN", workerToken);
+            }
             //同步组装 DockerArgs
             DockerArgs Args = DockerArgs.builder(
                             runId.toString(), jobId.toString(), containerProperties)
@@ -144,7 +170,7 @@ public class ContainerService {
                     .envs(envMap)
                     .image(image)
                     .userCmd(cmdNode)
-                    .token(token)
+                    .token(workerToken)
                     .timeoutSeconds(timeoutSeconds)
                     .formalOrg(formalOrg)
                     .build();
@@ -478,6 +504,14 @@ public class ContainerService {
 
     //解析输入输出仓库ID
     private void parseRepos(Job job, Map<String, Object> envMap) {
+        // Persist pins in the job so retries also read the immutable source snapshot.
+        UUID pinnedRepoId = envMap.get("MDS_INPUT_REPO_ID") == null ? null
+                : UUID.fromString(envMap.get("MDS_INPUT_REPO_ID").toString());
+        UUID pinnedCommitId = envMap.get("MDS_INPUT_COMMIT_ID") == null ? null
+                : UUID.fromString(envMap.get("MDS_INPUT_COMMIT_ID").toString());
+        if ((pinnedRepoId == null) != (pinnedCommitId == null)) {
+            throw ExceptionUtils.badRequest("固定输入必须同时提供仓库和快照");
+        }
         JsonNode inputRepoIds = job.getInputRepoIds();
         JsonNode outputRepoIds = job.getOutputRepoIds();
         if (inputRepoIds != null && inputRepoIds.isArray()) {
@@ -485,8 +519,16 @@ public class ContainerService {
                     inputRepoIds, new TypeReference<List<String>>() {
                     });
             String InputRepoId = inputList.get(0);
-            String InputCommitId = artifactCommitService.getHead(UUID.fromString(InputRepoId))
-                    .getCommitId().toString();
+            if (pinnedRepoId != null && (inputList.size() != 1 || !pinnedRepoId.toString().equals(InputRepoId))) {
+                throw ExceptionUtils.badRequest("固定输入快照不属于任务输入仓库");
+            }
+            var inputCommit = pinnedCommitId == null
+                    ? artifactCommitService.getHead(UUID.fromString(InputRepoId))
+                    : artifactCommitService.getCommit(pinnedRepoId, pinnedCommitId);
+            if (inputCommit.getCommitStatus() != com.fwdrobo.sirius.entity.artifact.CommitStatus.PUBLISHED) {
+                throw ExceptionUtils.badRequest("任务输入必须是已发布快照");
+            }
+            String InputCommitId = inputCommit.getCommitId().toString();
             envMap.put("InputRepoId", InputRepoId);
             envMap.put("InputCommitId", InputCommitId);
         }

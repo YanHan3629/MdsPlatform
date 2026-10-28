@@ -50,3 +50,11 @@ mdsPlatform/services/search-service/bge-small-zh-v1.5/
 # Temporary upload/debug artifacts
 upload_failed_*.json
 upload_summary_*.json
+
+# Local planning, acceptance evidence, test inputs and generated outputs
+/reports/
+/功能修改目标-*.md
+/mdsPlatform/services/business-worker/tests/
+**/test-results/
+**/playwright-report/
+**/coverage/

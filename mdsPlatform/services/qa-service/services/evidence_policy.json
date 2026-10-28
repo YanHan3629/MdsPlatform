@@ -1,0 +1,13 @@
+{
+  "version": "evidence-policy-2026-10-23.1-document-attribution",
+  "calibrationStatus": "named-source-and-date-regression-passed;exact-record-field-regression-pending;pending-component-field-regression;visual-semantics-separate",
+  "semanticModel": "BAAI/bge-small-zh-v1.5@7999e1d3359715c523056ef9478215996d62a620",
+  "text": {"cosineFloor": 0.68, "anchoredCosineFloor": 0.51, "lexicalCoverageFloor": 0.48, "bm25Floor": 12.0, "anchoredCoverageFloor": 0.14},
+  "visual": {"cosineFloor": 0.42, "anchoredCosineFloor": 0.40, "topicAnchoredCosineFloor": 0.30, "topicCoverageFloor": 0.30},
+  "imageText": {"cosineFloor": 0.28, "anchoredCosineFloor": 0.22, "aspectCoverageFloor": 0.50},
+  "metadata": {"exactRoleUtility": 0.85},
+  "weights": {"relevance": 0.80, "newOriginalFormat": 0.15, "complementaryInformation": 0.05, "redundancy": 0.20},
+  "maxSelectedSources": 6,
+  "maxContextTokens": 2048,
+  "maxOutputTokens": 512
+}

@@ -11,6 +11,7 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 from PIL import Image
+from .json_native import decode_document, document_items, records_payload,record_calculation_eligibility,NUMBER_ENCODING_VERSION
 
 from .contracts import (
     PARSER_CONFIG_VERSION,
@@ -25,12 +26,15 @@ from .contracts import (
 
 
 def _read_text(path: Path) -> str:
+    raw = path.read_bytes()
     for encoding in ("utf-8-sig", "utf-8", "gb18030"):
         try:
-            return path.read_text(encoding=encoding)
+            return raw.decode(encoding)
         except UnicodeDecodeError:
             continue
-    return path.read_text(encoding="utf-8", errors="replace")
+    # Replacing undecodable bytes would manufacture source text. The pipeline
+    # records PARSE_FAILED instead of silently treating replacement glyphs as facts.
+    return raw.decode("utf-8")
 
 
 def _chunks(text: str, limit: int = 900, overlap: int = 100):
@@ -78,67 +82,54 @@ class AssetParser:
 
 class ImageParser(AssetParser):
     name = "image"
+    version = "2.1"
     extensions = (".jpg", ".jpeg", ".png")
 
     def parse(self, path: Path, context: ParseContext) -> ParsedAsset:
-        with Image.open(path) as image:
-            attrs = {"width": image.width, "height": image.height, "mode": image.mode, "format": image.format}
+        from .document_native import image_content
+        text_items,attrs,flags=image_content(path)
         items = [
             ParsedItem("visual", {"path": str(path), "caption": path.name}, {"region": "full-image"}),
             ParsedItem("text", path.stem.replace("_", " "), {"source": "filename"}),
         ]
-        return self._asset(path, context, items, attrs)
+        return self._asset(path, context, [*items,*text_items], attrs,flags)
 
 
 class TextParser(AssetParser):
     name = "text"
-    extensions = (".txt",)
+    version = "2.0"
+    extensions = (".txt", ".md")
 
     def parse(self, path: Path, context: ParseContext) -> ParsedAsset:
         text = _read_text(path)
-        items = [ParsedItem("text", chunk, {"characterStart": start, "characterEnd": end})
-                 for start, end, chunk in _chunks(text) if chunk.strip()]
+        # Measurement TXT is a description + JSON metadata + TSV table. Preserve
+        # the source lines and parse the actual samples instead of indexing a caption.
+        lines = text.splitlines()
+        if len(lines) >= 3 and lines[1].lstrip().startswith("{") and "\t" in lines[2]:
+            metadata = json.loads(lines[1])
+            if "timestamp" in lines[2].split("\t") and metadata.get("series_id"):
+                from .table_native import parse_csv
+                source_lines=text.splitlines(keepends=True);prefix=''.join(source_lines[:2])
+                tables,_,flags=parse_csv(''.join(source_lines[2:]),{**context.unit_mapping,**metadata.get('units',{})},delimiter='\t',line_offset=2)
+                tables[0].locator['sheet']='samples'
+                description=ParsedItem('text',prefix,{'characterStart':0,'characterEnd':len(prefix),'characterIndexUnit':'unicode-codepoint','lineStart':1,'lineEnd':2,'contentRole':'measurement-description-and-metadata'})
+                return self._asset(path, context, [description,*tables], {"measurementMetadata": metadata,'characterCount':len(text),
+                    'measurementDescriptionPreserved':True,'sampleHeaderPhysicalLine':3,
+                    "sourceTimezone": metadata.get("timezone") or ("Asia/Shanghai" if "Asia/Shanghai" in lines[0] else context.timezone)},flags)
+        items = [ParsedItem("text", chunk, {"characterStart": start, "characterEnd": end,'characterIndexUnit':'unicode-codepoint'})
+                 for start, end, chunk in _chunks(text)]
         return self._asset(path, context, items, {"characterCount": len(text)})
 
 
 class DocumentParser(AssetParser):
     name = "pdf"
+    version = "2.1"
     extensions = (".pdf",)
 
     def parse(self, path: Path, context: ParseContext) -> ParsedAsset:
-        import fitz
-
-        items: list[ParsedItem] = []
-        flags: list[str] = []
-        document = fitz.open(path)
-        for page_number, page in enumerate(document, start=1):
-            text = page.get_text("text").strip()
-            if text:
-                for start, end, chunk in _chunks(text):
-                    items.append(ParsedItem("text", chunk, {
-                        "page": page_number, "characterStart": start, "characterEnd": end,
-                    }))
-            else:
-                flags.append(f"PAGE_{page_number}_NO_EXTRACTABLE_TEXT")
-            preview = context.output_dir / "representations" / stable_id(
-                context.dataset_version_id, context.logical_path
-            ) / "visual" / f"page-{page_number:04d}.png"
-            preview.parent.mkdir(parents=True, exist_ok=True)
-            page.get_pixmap(matrix=fitz.Matrix(1.25, 1.25), alpha=False).save(preview)
-            items.append(ParsedItem("visual", {"path": str(preview), "caption": f"{path.name} 第 {page_number} 页"}, {"page": page_number}))
-            try:
-                finder = getattr(page, "find_tables", None)
-                if finder:
-                    for table_number, table in enumerate(finder().tables, start=1):
-                        frame = table.to_pandas()
-                        items.append(ParsedItem("table", _frame_records(frame), {
-                            "page": page_number, "table": table_number, "rawRowStart": 1,
-                        }))
-            except Exception:
-                flags.append(f"PAGE_{page_number}_TABLE_EXTRACTION_UNAVAILABLE")
-        attributes = {"pageCount": document.page_count, "textExtraction": "native", "renderedPages": document.page_count}
-        document.close()
-        return self._asset(path, context, items, attributes, sorted(set(flags)))
+        from .document_native import pdf_content
+        items,attributes,flags=pdf_content(path,context)
+        return self._asset(path,context,items,attributes,flags)
 
 
 def _scalar(value):
@@ -165,7 +156,7 @@ def _scalar(value):
     return value
 
 
-def _frame_records(frame: pd.DataFrame) -> dict:
+def _frame_records(frame: pd.DataFrame, raw_row_start: int = 2) -> dict:
     columns = []
     for column in frame.columns:
         values = frame[column].dropna()
@@ -176,71 +167,103 @@ def _frame_records(frame: pd.DataFrame) -> dict:
             "sample": [_scalar(value) for value in values.head(5)],
         })
     rows = []
-    for position, (_, row) in enumerate(frame.iterrows(), start=2):
+    for position, (_, row) in enumerate(frame.iterrows(), start=raw_row_start):
         rows.append({"rawRow": position, "values": {str(key): _scalar(value) for key, value in row.items()}})
     return {"columns": columns, "records": rows}
 
 
+def read_workbook_tables(path):
+    """Return frames and one-based source data row starts after title rows."""
+    sheets = {}
+    for name, raw in pd.read_excel(path, sheet_name=None, header=None).items():
+        nonempty=[(index,row.dropna().tolist()) for index,row in raw.head(30).iterrows()]
+        header=next((index for index,values in nonempty if len(values)>=max(2,math.ceil(len(raw.columns)*.6)) and
+                     all(isinstance(value,str) and value.strip() for value in values) and
+                     len(set(values))==len(values)),None)
+        if header is None:
+            header=next((index for index,values in nonempty if values),0)
+        frame=pd.read_excel(path,sheet_name=name,header=int(header))
+        frame.attrs['rawRowStart']=int(header)+2
+        sheets[name]=(frame,int(header)+2)
+    return sheets
+
+
 class TableParser(AssetParser):
     name = "table"
+    version = "3.2"
     extensions = (".csv", ".xlsx")
 
     def parse(self, path: Path, context: ParseContext) -> ParsedAsset:
+        from .table_native import parse_csv, parse_xlsx
         if path.suffix.lower() == ".csv":
-            sheets = {"root": pd.read_csv(path, encoding_errors="replace", low_memory=False)}
+            items, attributes, flags = parse_csv(_read_text(path), context.unit_mapping)
         else:
-            sheets = pd.read_excel(path, sheet_name=None)
-        items = [ParsedItem("table", _frame_records(frame), {"sheet": str(name), "rawRowStart": 2}, units=context.unit_mapping)
-                 for name, frame in sheets.items()]
-        return self._asset(path, context, items, {"sheetCount": len(sheets)})
+            items, attributes, flags = parse_xlsx(path, context.unit_mapping)
+        return self._asset(path, context, items, attributes, flags)
 
 
 class JsonParser(AssetParser):
     name = "json"
-    version = "1.1"
+    version = "3.0"
     extensions = (".json", ".jsonl")
 
     def parse(self, path: Path, context: ParseContext) -> ParsedAsset:
         text = _read_text(path)
+        items = []
+        attributes = {"structured": True, "nativeTreeComplete": True,
+                      "jsonPointerStandard": "RFC6901", "arrayIndexBase": 0,
+                      "numericPolicy": "original-number-types-and-source-lexemes; finite-decoded-values-are-conveniences",
+                      'numberEncodingVersion':NUMBER_ENCODING_VERSION,'numericCalculationDigitLimit':4096,
+                      'numericTokenByteLimit':32768,'nativeDecodedIntegerSafeLimit':9007199254740991}
         if path.suffix.lower() == ".jsonl":
-            values = [json.loads(line) for line in text.splitlines() if line.strip()]
+            documents, records = [], []
+            lines = text.splitlines()
+            for line_number, line in enumerate(lines, start=1):
+                if not line.strip():
+                    continue
+                value, numbers = decode_document(line)
+                documents.append({"physicalLine": line_number, "value": value, "numberLexemes": numbers})
+                if isinstance(value, dict):
+                    records.append({"rawRow": line_number, "values": value, "numberLexemes": numbers,
+                                    'calculationEligibility':record_calculation_eligibility(value,numbers,''),
+                                    "locator": {"jsonlLine": line_number, "jsonPointer": ""}})
+                items.extend(document_items(value, numbers, context.unit_mapping,
+                                            physical_line=line_number, root_is_record=isinstance(value, dict)))
+            if records:
+                items.insert(0, ParsedItem("table", records_payload(records), {
+                    "jsonPath": "$", "jsonPointer": "", "rawRowStart": 1,
+                    "rowNumbering": "physical-line", "blankLinesPreserved": True,
+                }, units=dict(context.unit_mapping)))
+            attributes.update(nativeDocuments=documents, physicalLineCount=len(lines),
+                              documentCount=len(documents), blankLineCount=len(lines) - len(documents))
         else:
-            values = json.loads(text)
-        table_items: list[ParsedItem] = []
-        if isinstance(values, list) and (not values or all(isinstance(item, dict) for item in values)):
-            table_items.append(ParsedItem("table", _frame_records(pd.json_normalize(values)), {"jsonPath": "$", "rawRowStart": 1}, units=context.unit_mapping))
-        elif isinstance(values, dict):
-            for key, child in values.items():
-                if isinstance(child, list) and child and all(isinstance(item, dict) for item in child):
-                    table_items.append(ParsedItem("table", _frame_records(pd.json_normalize(child)), {"jsonPath": f"$.{key}", "rawRowStart": 1}, units=context.unit_mapping))
-        if table_items:
-            return self._asset(path, context, table_items, {"tableCount": len(table_items)})
-        items = [ParsedItem("text", chunk, {"jsonPath": "$", "characterStart": start, "characterEnd": end})
-                 for start, end, chunk in _chunks(json.dumps(values, ensure_ascii=False, indent=2))]
-        return self._asset(path, context, items, {"structured": True})
+            value, numbers = decode_document(text)
+            attributes.update(nativeDocument=value, numberLexemes=numbers)
+            items = document_items(value, numbers, context.unit_mapping)
+        attributes["tableCount"] = sum(item.kind == "table" for item in items)
+        return self._asset(path, context, items, attributes)
 
 
 class SvgParser(AssetParser):
     name = "svg"
+    version = "2.2"
     extensions = (".svg",)
 
     def parse(self, path: Path, context: ParseContext) -> ParsedAsset:
-        root = ET.fromstring(_read_text(path))
-        text_nodes = ["".join(node.itertext()).strip() for node in root.iter() if node.tag.rsplit("}", 1)[-1] == "text"]
-        preview = context.output_dir / "representations" / deterministic_asset_id(context.dataset_version_id, context.logical_path) / "visual" / "source.png"
-        preview.parent.mkdir(parents=True, exist_ok=True)
-        flags: list[str] = []
-        items = [ParsedItem("text", value, {"svgElement": "text", "sequence": index})
-                 for index, value in enumerate(text_nodes, start=1) if value]
-        try:
-            import cairosvg
-            cairosvg.svg2png(url=str(path), write_to=str(preview), output_width=1024, output_height=1024)
-            items.append(ParsedItem("visual", {"path": str(preview), "caption": path.name}, {"region": "full-svg"}))
-        except Exception as exc:
-            flags.append("SVG_RENDER_FAILED")
-            flags.append(type(exc).__name__)
-        attrs = {"width": root.attrib.get("width"), "height": root.attrib.get("height"), "viewBox": root.attrib.get("viewBox")}
-        return self._asset(path, context, items, attrs, flags)
+        from .svg_native import read_svg,render_svg,VERSION,RENDER_VERSION
+        import cairosvg,defusedxml
+        parsed=read_svg(path)
+        preview=context.output_dir/'representations'/deterministic_asset_id(context.dataset_version_id,context.logical_path)/'visual'/RENDER_VERSION/'source.png'
+        view=render_svg(parsed,preview)
+        items=[ParsedItem('text',row['text'],{'svgElementId':row['elementId'],'elementPath':row['elementPath'],
+            'coordinateSystem':'root-user-space','worldTransform':row['worldTransform']}) for row in parsed['texts']]
+        items.append(ParsedItem('visual',{'path':str(preview),'caption':path.name+' static SVG; source declarations, not 3D measurement'},
+            {'region':'full-svg','bbox':view['bbox'],'coordinateSystem':'root-user-space','renderRecipeVersion':RENDER_VERSION,'outputSha256':view['outputSha256']}))
+        attrs={**parsed['viewport'],'svgNative':{key:value for key,value in parsed.items() if key not in {'root','sourceSha256'}},
+            'svgViews':[view],'metadataNature':'source_declaration','unsupportedOperations':parsed['unsupportedOperations'],
+            'engineeringAdapters':{'svgNativeVersion':VERSION,'svgRenderVersion':RENDER_VERSION,'CairoSVG':cairosvg.__version__,
+                'defusedxml':defusedxml.__version__,'renderEngine':view['engine']}}
+        return self._asset(path,context,items,attrs,[])
 
 
 def _mesh_features(vertices: np.ndarray, faces: list[list[int]]) -> tuple[dict, np.ndarray]:
@@ -303,36 +326,31 @@ def _mesh_features(vertices: np.ndarray, faces: list[list[int]]) -> tuple[dict, 
 
 class MeshParser(AssetParser):
     name = "obj-mesh"
-    version = "2.0"
+    version = "3.1"
     extensions = (".obj",)
 
     def parse(self, path: Path, context: ParseContext) -> ParsedAsset:
-        vertices, faces, materials = [], [], set()
-        for line_number, line in enumerate(_read_text(path).splitlines(), start=1):
-            parts = line.split()
-            if not parts:
-                continue
-            if parts[0] == "v" and len(parts) >= 4:
-                try:
-                    vertices.append([float(parts[1]), float(parts[2]), float(parts[3])])
-                except ValueError:
-                    pass
-            elif parts[0] == "f" and len(parts) >= 4:
-                try:
-                    indices = [int(value.split("/", 1)[0]) for value in parts[1:]]
-                    faces.append([index - 1 if index > 0 else len(vertices) + index if index < 0 else -1 for index in indices])
-                except ValueError:
-                    pass
-            elif parts[0] in {"mtllib", "usemtl"} and len(parts) > 1:
-                materials.add(" ".join(parts[1:]))
-        if not vertices:
-            return self._asset(path, context, [], {"valid": False}, ["MESH_NO_VERTICES", "UNIT_UNKNOWN"])
-        array = np.asarray(vertices, dtype=float)
-        attrs, _ = _mesh_features(array, faces)
-        attrs.update({"materials": sorted(materials), "unitSource": "mapping" if context.unit_mapping else "unknown", "coordinateSystem": "source"})
-        flags = [] if faces else ["MESH_NO_FACES"]
-        if not context.unit_mapping:
-            flags.append("UNIT_UNKNOWN")
+        from .geometry_surface import read_obj,render_views,VERSION
+        mesh=read_obj(path)
+        if not len(mesh['triangles']):raise ValueError('OBJ_NO_SURFACE_FACES')
+        # Unused vertices are retained as source records, but cannot enlarge the
+        # measured surface or the camera framing.
+        referenced=np.unique(mesh['triangles']);surface_vertices=mesh['vertices'][referenced]
+        inverse=np.full(len(mesh['vertices']),-1,dtype=np.int32);inverse[referenced]=np.arange(len(referenced))
+        triangles=inverse[mesh['triangles']]
+        attrs,_=_mesh_features(surface_vertices,triangles.tolist())
+        attrs.update(sourceVertexCount=len(mesh['vertices']),unusedVertexCount=len(mesh['vertices'])-len(referenced),
+            sourceFaceCount=len(mesh['faceRecords']),triangleCount=len(triangles),measurementAlgorithm='source-surface-triangulation-float64',
+            coordinateSystem='unmodified-source-XYZ',featureSpaceId='mesh-principal-moments-v3',
+            materialDeclarations=mesh['externalMaterialReferences'],sourceMaterialsLoaded=False,
+            unsupportedOperations=['hole_diameter','wall_thickness','clearance','interference','manufacturing_approval'])
+        length=context.unit_mapping.get('length')
+        if length and length not in {'mm','cm','m','um','in','ft'}:raise ValueError('OBJ_UNSUPPORTED_LENGTH_UNIT_MAPPING')
+        units={'length':length,'area':length+'2' if length else None,'volume':length+'3' if length else None}
+        attrs.update(unitSource='explicit-processing-config.length' if length else 'unknown',units=units,
+            physicalUnitVerified=bool(length),unitInference='none; filenames and unrelated mappings are not unit declarations')
+        flags=[]
+        if not length:flags.append('UNIT_UNKNOWN')
         if not attrs["closed"]:
             flags.append("NON_CLOSED_MESH")
         if attrs["closed"] and not attrs["orientationConsistent"]:
@@ -340,13 +358,23 @@ class MeshParser(AssetParser):
         if attrs["degenerateFaces"]:
             flags.append("DEGENERATE_MESH_FACE")
         flags.append("MESH_SELF_INTERSECTION_NOT_CERTIFIED")
-        item = ParsedItem("geometry", attrs, {"partId": "root"}, entity_id="root", units=context.unit_mapping, quality_flags=flags)
-        return self._asset(path, context, [item], attrs, flags)
+        target=context.output_dir/'representations'/deterministic_asset_id(context.dataset_version_id,context.logical_path)/'visual'/VERSION
+        views=render_views([{'instanceId':'root','vertices':surface_vertices,'triangles':triangles}],target,mesh['sourceSha256'],
+            engine={'parser':self.name,'parserVersion':self.version,'triangulation':'simple-planar-polygons-ear-clipping'})
+        attrs['surfaceViews']=views
+        properties={key:value for key,value in attrs.items() if key!='surfaceViews'}
+        attrs['meshSource']={key:mesh[key] for key in ('vertexRecords','faceRecords','triangleSourceFaceIds')}
+        attrs['engineeringAdapters']={'surfaceRenderVersion':VERSION,'objParserVersion':self.version,'numpyVersion':np.__version__}
+        items=[ParsedItem('geometry',properties,{'partId':'root','instanceId':'root'},entity_id='root',units=units,quality_flags=flags)]
+        items.extend(ParsedItem('visual',{'path':view['path'],'caption':f"{path.name} {view['view']} surface; display colours; unit {length or 'unknown'}"},
+            {'partId':'root','instanceIds':['root'],'view':view['view'],'renderRecipeVersion':VERSION,'sourceSha256':mesh['sourceSha256'],
+             'outputSha256':view['outputSha256'],'camera':view['worldToImageDepthMatrix']}) for view in views)
+        return self._asset(path,context,items,attrs,flags)
 
 
 class CadParser(AssetParser):
     name = "step-opencascade"
-    version = "2.0"
+    version = "3.1"
     extensions = (".step", ".stp")
 
     def parse(self, path: Path, context: ParseContext) -> ParsedAsset:

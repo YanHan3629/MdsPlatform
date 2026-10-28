@@ -5,6 +5,58 @@ include:
   - mdsPlatform/services/backend/docker-compose.yml
 
 services:
+  evidence-worker:
+    image: sirius-mm-index-builder:latest
+    command: ["python", "/evidence-worker/worker.py"]
+    restart: unless-stopped
+    cpus: 1
+    mem_limit: 1g
+    pids_limit: 64
+    read_only: true
+    environment:
+      PYTHONPATH: /app
+      MM_INTERNAL_TOKEN: ${MM_INTERNAL_TOKEN:?MM_INTERNAL_TOKEN must be set in the root .env file}
+      MDS_EVIDENCE_CPU_LOCK_DIR: /var/lock/mds-evidence
+      EVIDENCE_CACHE_DIR: /cache
+      PYTHONDONTWRITEBYTECODE: "1"
+      OMP_THREAD_LIMIT: "1"
+    volumes:
+      - ./mdsPlatform/services/evidence-worker:/evidence-worker:ro
+      - evidence_region_cache:/cache
+      - evidence_cpu_queue:/var/lock/mds-evidence
+    tmpfs:
+      - /tmp:size=128m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18083/healthz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  local-receiver:
+    image: sirius-backend:latest
+    entrypoint: ["java", "-Dloader.main=com.fwdrobo.sirius.dataspace.ReceiverMain", "-cp", "/app/sirius-backend.jar", "org.springframework.boot.loader.launch.PropertiesLauncher"]
+    restart: unless-stopped
+    environment:
+      DS_RECEIVER_TOKEN: ${MM_INTERNAL_TOKEN:?MM_INTERNAL_TOKEN must be set in the root .env file}
+    volumes:
+      - ds_receiver_data:/receiver-data
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:18082/healthz >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+  business-worker:
+    image: sirius-mm-index-builder:latest
+    command: ["python", "/business-worker/worker.py"]
+    restart: unless-stopped
+    environment:
+      BACKEND_BASE_URL: http://sirius:8888
+      MM_INTERNAL_TOKEN: ${MM_INTERNAL_TOKEN:?MM_INTERNAL_TOKEN must be set in the root .env file}
+      PYTHONPATH: /app
+    volumes:
+      - ./mdsPlatform/services/business-worker:/business-worker:ro
+    depends_on:
+      sirius:
+        condition: service_started
   vllm:
     restart: unless-stopped
     # 支持 Qwen3.5 的 vLLM 官方镜像；如需其他 tag 可用环境变量 VLLM_IMAGE 覆盖
@@ -26,6 +78,11 @@ services:
       - '{"image": 2}'
       - --enforce-eager
       - --skip-mm-profiling
+      # /tokenize must not leave API-side multimodal cache references that the
+      # generation engine has never received (vLLM 0.17.0). Keep real image
+      # token accounting and both image slots; disable only this processor cache.
+      - --mm-processor-cache-gb
+      - "0"
     volumes:
       - ./mdsPlatform/services/qa-service/Qwen3.5-0.8B:/models/Qwen3.5-0.8B:ro
     ports:
@@ -60,6 +117,9 @@ services:
       SEARCH_SERVICE_BASE_URL: http://search-service:18080
       MM_INTERNAL_TOKEN: ${MM_INTERNAL_TOKEN:?MM_INTERNAL_TOKEN must be set in the root .env file}
       BACKEND_SEARCH_PATH: /api/data-space/qa/search
+      QA_EVIDENCE_TRACE_DIR: /var/log/qa-evidence
+    volumes:
+      - ${QA_EVIDENCE_TRACE_HOST_DIR:-./data/qa-evidence-traces}:/var/log/qa-evidence
     ports:
       - "18081:18081"
     depends_on:
@@ -74,3 +134,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+volumes:
+  evidence_region_cache:
+  evidence_cpu_queue:
+    name: sirius-evidence-cpu-queue
+  ds_receiver_data:

@@ -7,7 +7,7 @@ public class PathUtils {
     }
 
     // 路径白名单（校验到时前导 / 已被截去）：a/b/c
-    private static final Pattern PATH_ALLOWED_PATTERN = Pattern.compile("^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$");
+    private static final Pattern PATH_ALLOWED_PATTERN = Pattern.compile("^[\\p{L}\\p{M}\\p{N}._-]+(?:/[\\p{L}\\p{M}\\p{N}._-]+)*$");
 
     // 校验路径
     public static String normalizePath(String p) {

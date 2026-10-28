@@ -24,7 +24,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 SUPPORTED_EXTENSIONS = {
-    ".jpg", ".jpeg", ".png", ".svg", ".txt", ".csv", ".json",
+    ".jpg", ".jpeg", ".png", ".svg", ".txt", ".md", ".csv", ".json",
     ".jsonl", ".xlsx", ".pdf", ".obj", ".step",
 }
 INTERNAL_NAMES = {"faiss.index", "id_map.parquet", "manifest.json", "files.json", "files.tsv"}
@@ -120,6 +120,9 @@ def _format_number(value: float) -> str:
 
 
 def _parse_datetime(series: pd.Series, name: str) -> pd.Series:
+    # Nested JSON cells are metadata, not scalar dates. Pandas' datetime cache
+    # hashes values before coercion, so arrays/dicts must be excluded first.
+    series = series.map(lambda value: None if isinstance(value, (list, dict, tuple, set, np.ndarray)) else value)
     non_null = series.dropna()
     if non_null.empty:
         return pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
@@ -294,6 +297,7 @@ def describe_table(frame: pd.DataFrame, source_name: str, locator: dict[str, Any
         column for column in frame.columns
         if column != time_column
         and GROUP_NAME_RE.search(column)
+        and not frame[column].map(lambda value: isinstance(value, (list, dict, tuple, set, np.ndarray))).any()
         and 1 < frame[column].nunique(dropna=True) <= 50
     ]
     group_column = group_columns[0] if group_columns else None
@@ -440,7 +444,7 @@ def _table_manifest(path: Path, logical_path: str, asset_id: str, output_dir: Pa
     manifest["attributes"]["sheetCount"] = len(sheets)
     manifest["attributes"]["sheets"] = {}
     for sheet_index, (sheet_name, frame) in enumerate(sheets.items(), start=1):
-        locator = {"sheet": sheet_name}
+        locator = {"sheet": sheet_name,"rawRowStart":frame.attrs.get('rawRowStart',2)}
         attributes, units = describe_table(frame, path.name, locator)
         manifest["attributes"]["sheets"][sheet_name] = attributes
         _add_text_units(manifest, units)
@@ -484,61 +488,27 @@ def _pdf_manifest(path: Path, logical_path: str, asset_id: str, output_dir: Path
     return manifest
 
 
-def _obj_manifest(path: Path, logical_path: str, asset_id: str, output_dir: Path) -> dict[str, Any]:
-    manifest = _base_manifest(asset_id, logical_path, "OBJ")
-    vertices: list[tuple[float, float, float]] = []
-    face_count = 0
-    material_names: set[str] = set()
-    for line in _read_text(path).splitlines():
-        if line.startswith("v "):
-            parts = line.split()
-            if len(parts) >= 4:
-                try:
-                    vertices.append((float(parts[1]), float(parts[2]), float(parts[3])))
-                except ValueError:
-                    pass
-        elif line.startswith("f "):
-            face_count += 1
-        elif line.startswith("usemtl "):
-            material_names.add(line[7:].strip())
-    bounds = None
-    if vertices:
-        array = np.asarray(vertices, dtype=float)
-        minimum, maximum = array.min(axis=0), array.max(axis=0)
-        bounds = {"minimum": minimum.tolist(), "maximum": maximum.tolist(), "size": (maximum - minimum).tolist()}
-    manifest["attributes"] = {"vertexCount": len(vertices), "faceCount": face_count, "materials": sorted(material_names), "bounds": bounds}
-    manifest["summary"] = f"OBJ 三维模型 {path.name}，包含 {len(vertices)} 个顶点、{face_count} 个面，材质 {len(material_names)} 种。"
-    _add_text_units(manifest, [{"kind": "geometry-summary", "text": manifest["summary"] + (f"包围盒尺寸为 {bounds['size']}。" if bounds else ""), "locator": {}}])
-    if vertices:
-        points = np.asarray(vertices, dtype=float)
-        for name, axes in (("front", (0, 1)), ("side", (1, 2)), ("top", (0, 2))):
-            projected = points[:, axes]
-            lo, hi = projected.min(axis=0), projected.max(axis=0)
-            span = np.maximum(hi - lo, 1e-9)
-            xy = (projected - lo) / span
-            image = Image.new("RGB", (768, 768), "white")
-            draw = ImageDraw.Draw(image)
-            sample_step = max(1, len(xy) // 20000)
-            for x, y in xy[::sample_step]:
-                px, py = int(40 + x * 688), int(728 - y * 688)
-                draw.ellipse((px - 1, py - 1, px + 1, py + 1), fill="#1f5f99")
-            preview = output_dir / "representations" / asset_id / "visual" / f"view-{name}.png"
-            preview.parent.mkdir(parents=True, exist_ok=True)
-            image.save(preview)
-            _add_visual_unit(manifest, preview, output_dir, f"{path.name} {name} 标准投影视图", "model-view", {"view": name})
-    return manifest
-
-
-def _step_manifest(path: Path, logical_path: str, asset_id: str) -> dict[str, Any]:
-    manifest = _base_manifest(asset_id, logical_path, "STEP")
-    content = _read_text(path)
-    entity_counts = Counter(re.findall(r"=\s*([A-Z0-9_]+)\s*\(", content))
-    products = [name for name in re.findall(r"PRODUCT\s*\(\s*'([^']*)'", content, re.IGNORECASE) if name]
-    top_entities = dict(entity_counts.most_common(20))
-    manifest["attributes"] = {"products": products[:100], "entityCounts": top_entities}
-    product_text = "、".join(products[:20]) if products else "未标注产品名称"
-    manifest["summary"] = f"STEP 工程模型 {path.name}，产品或零件：{product_text}。主要实体类型：{top_entities}。"
-    _add_text_units(manifest, [{"kind": "cad-summary", "text": manifest["summary"], "locator": {}}])
+def _engineering_manifest(path:Path,logical_path:str,asset_id:str,output_dir:Path,dataset_version_id:str):
+    from professional.parsers import MeshParser,CadParser
+    from professional.contracts import ParseContext
+    from professional.snapshot_catalog import capability_attributes
+    parser=MeshParser() if path.suffix.lower()=='.obj' else CadParser()
+    asset=parser.parse(path,ParseContext(dataset_version_id,logical_path,output_dir))
+    if not any(item.kind=='geometry' for item in asset.items):
+        raise ValueError('ENGINEERING_GEOMETRY_UNAVAILABLE:'+str(asset.attributes.get('parseError',asset.quality_flags)))
+    manifest=_base_manifest(asset_id,logical_path,asset.source_format)
+    manifest['attributes']=capability_attributes(asset.attributes)
+    manifest['attributes']['qualityFlags']=asset.quality_flags
+    manifest['summary']=f"{asset.source_format} {path.name}，源几何计算与带遮挡的正交表面渲染。单位来源：{asset.attributes.get('unitSource',asset.attributes.get('sourceUnits'))}。"
+    passages=[]
+    for item in asset.items:
+        if item.kind=='geometry':
+            values={key:item.payload[key] for key in ('instanceId','partId','bounds','surfaceArea','volume','sourceFaceCount','faceCount',
+                'solidCount','unitSource','volumeValidation','physicalUnitVerified','unsupportedOperations') if key in item.payload}
+            passages.append({'kind':'geometry-properties','text':json.dumps({'properties':values,'units':item.units,'qualityFlags':item.quality_flags},ensure_ascii=False),'locator':item.locator})
+        elif item.kind=='visual':
+            _add_visual_unit(manifest,Path(item.payload['path']),output_dir,item.payload['caption'],'model-surface-view',item.locator)
+    _add_text_units(manifest,passages)
     return manifest
 
 
@@ -558,7 +528,8 @@ def build_asset_representation(path: Path, input_dir: Path, output_dir: Path,
             records = [json.loads(line) for line in _read_text(path).splitlines() if line.strip()]
             frame = pd.json_normalize(records)
             return _table_manifest(path, logical_path, asset_id, output_dir, {"root": frame}, "JSONL")
-        sheets = pd.read_excel(path, sheet_name=None)
+        from professional.parsers import read_workbook_tables
+        sheets = {name:frame for name,(frame,_) in read_workbook_tables(path).items()}
         return _table_manifest(path, logical_path, asset_id, output_dir, sheets, "XLSX")
 
     if extension == ".json":
@@ -572,8 +543,8 @@ def build_asset_representation(path: Path, input_dir: Path, output_dir: Path,
         _add_text_units(manifest, ({"kind": "json-content", "text": chunk, "locator": {"characterOffset": index * 620}} for index, chunk in enumerate(_chunks(serialized))))
         return manifest
 
-    if extension == ".txt":
-        manifest = _base_manifest(asset_id, logical_path, "TXT")
+    if extension in {".txt", ".md"}:
+        manifest = _base_manifest(asset_id, logical_path, "MD" if extension == ".md" else "TXT")
         text = _read_text(path)
         manifest["summary"] = f"文本文件 {path.name}，共 {len(text)} 个字符。"
         _add_text_units(manifest, ({"kind": "text-chunk", "text": chunk, "locator": {"chunk": index + 1}} for index, chunk in enumerate(_chunks(text))))
@@ -582,9 +553,9 @@ def build_asset_representation(path: Path, input_dir: Path, output_dir: Path,
     if extension == ".pdf":
         return _pdf_manifest(path, logical_path, asset_id, output_dir)
     if extension == ".obj":
-        return _obj_manifest(path, logical_path, asset_id, output_dir)
+        return _engineering_manifest(path,logical_path,asset_id,output_dir,dataset_version_id)
     if extension == ".step":
-        return _step_manifest(path, logical_path, asset_id)
+        return _engineering_manifest(path,logical_path,asset_id,output_dir,dataset_version_id)
 
     manifest = _base_manifest(asset_id, logical_path, source_format)
     if extension in {".jpg", ".jpeg", ".png"}:
@@ -594,16 +565,15 @@ def build_asset_representation(path: Path, input_dir: Path, output_dir: Path,
         _add_visual_unit(manifest, path, output_dir, manifest["summary"], "source-image")
         return manifest
     if extension == ".svg":
-        manifest["summary"] = f"SVG 矢量图 {path.name}。"
-        _add_text_units(manifest, [{"kind": "image-caption", "text": manifest["summary"], "locator": {}}])
-        try:
-            import cairosvg
-            preview = output_dir / "representations" / asset_id / "visual" / "source.png"
-            preview.parent.mkdir(parents=True, exist_ok=True)
-            cairosvg.svg2png(url=str(path), write_to=str(preview), output_width=1024, output_height=1024)
-            _add_visual_unit(manifest, preview, output_dir, manifest["summary"], "source-image")
-        except Exception as exc:
-            manifest["attributes"]["conversionWarning"] = str(exc)
+        from professional.parsers import SvgParser
+        from professional.contracts import ParseContext
+        from professional.snapshot_catalog import capability_attributes
+        asset=SvgParser().parse(path,ParseContext(dataset_version_id,logical_path,output_dir))
+        manifest['summary']=f'SVG 矢量图 {path.name}；源文字与 metadata 为源声明。'
+        manifest['attributes']=capability_attributes(asset.attributes)
+        _add_text_units(manifest,[{'kind':'svg-source-text','text':item.payload,'locator':item.locator} for item in asset.items if item.kind=='text'])
+        for item in asset.items:
+            if item.kind=='visual':_add_visual_unit(manifest,Path(item.payload['path']),output_dir,item.payload['caption'],'svg-static-render',item.locator)
         return manifest
     raise ValueError(f"unsupported source format: {extension}")
 

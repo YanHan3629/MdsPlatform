@@ -42,6 +42,7 @@ public class FileService {
     private final ArtifactFileMapper artifactFileMapper;
     private final ManifestService manifestService;
     private final TrialLimitService trialLimitService;
+    private final DatasetAccessService access;
 
     private static final String CODE_NO_SUCH_KEY = "NoSuchKey";
     private static final String CODE_NO_SUCH_OBJECT = "NoSuchObject";
@@ -53,13 +54,14 @@ public class FileService {
             ArtifactCommitMapper artifactCommitMapper,
             ArtifactFileMapper artifactFileMapper,
             ManifestService manifestService,
-            TrialLimitService trialLimitService
+            TrialLimitService trialLimitService, DatasetAccessService access
     ) {
         this.minioService = minioService;
         this.artifactCommitMapper = artifactCommitMapper;
         this.artifactFileMapper = artifactFileMapper;
         this.manifestService = manifestService;
         this.trialLimitService = trialLimitService;
+        this.access=access;
     }
 
     // PUT：draft 覆盖写/新增
@@ -78,6 +80,7 @@ public class FileService {
         ensureCommitStatusIs(artifactId, commitId, CommitStatus.DRAFT);
 
         String logicalPath = PathUtils.normalizePath(path);
+        access.requireBusinessFile(artifactId,logicalPath);
         FileResp existingFile = artifactFileMapper.selectByCommitIdAndPath(commitId, logicalPath);
         String objectKey = existingFile == null
                 ? buildWorkspaceKey(artifactId, commitId, logicalPath, contentType)
@@ -120,6 +123,7 @@ public class FileService {
         ensureCommitStatusIs(artifactId, commitId, CommitStatus.DRAFT);
 
         String logicalPath = PathUtils.normalizePath(path);
+        access.requireBusinessFile(artifactId,logicalPath);
         FileResp existingFile = artifactFileMapper.selectByCommitIdAndPath(commitId, logicalPath);
         String objectKey = existingFile == null
                 ? buildWorkspaceKey(artifactId, commitId, logicalPath, contentType)
@@ -263,6 +267,11 @@ public class FileService {
 
         String objectKey = file.getFileKey();
         // 返回预签名 URL 给客户端下载
+        if (com.fwdrobo.sirius.util.SecurityUtils.getUserId()!=null && access.isForeignArtifact(artifactId)) {
+            String proxy="/api/artifacts/"+artifactId+"/commits/"+commitId+"/files/content?path="+
+                java.net.URLEncoder.encode(logicalPath,java.nio.charset.StandardCharsets.UTF_8);
+            return new PresignGetResp("",proxy);
+        }
         String url = minioService.presignGet(objectKey, expire);
 
         return new PresignGetResp(objectKey, url);
@@ -442,6 +451,7 @@ public class FileService {
 
     // 校验 commit 是否属于当前 artifact
     private void ensureCommitExists(UUID artifactId, UUID commitId) {
+        if (com.fwdrobo.sirius.util.SecurityUtils.getUserId()!=null) access.requireArtifact(artifactId,commitId,false);
         String status = artifactCommitMapper.selectStatusByRepoAndId(artifactId, commitId);
         if (status == null) {
             throw ExceptionUtils.notFound("commit 不存在");

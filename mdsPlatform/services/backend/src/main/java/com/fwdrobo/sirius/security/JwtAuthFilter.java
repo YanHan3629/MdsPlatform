@@ -36,16 +36,19 @@ public class JwtAuthFilter extends OncePerRequestFilter {
     private final UserService userService;
     private final RoleService roleService;
     private final AuthenticationEntryPoint authenticationEntryPoint;
+    private final JobIoScope jobIoScope;
 
     public JwtAuthFilter(
             JwtService jwtService,
             UserService userService,
             RoleService roleService,
-            RestAuthenticationEntryPoint restAuthenticationEntryPoint) {
+            RestAuthenticationEntryPoint restAuthenticationEntryPoint,
+            JobIoScope jobIoScope) {
         this.jwtService = jwtService;
         this.userService = userService;
         this.roleService = roleService;
         this.authenticationEntryPoint = restAuthenticationEntryPoint;
+        this.jobIoScope = jobIoScope;
     }
 
     public record UserPrincipal(UUID userId, String userName, List<String> roles, UUID orgId) {}
@@ -65,7 +68,13 @@ public class JwtAuthFilter extends OncePerRequestFilter {
             String token = auth.substring("Bearer ".length()).trim();
 
             try {
-                var claims = jwtService.parseClaims(token, JwtService.TokenType.ACCESS);
+                var claims = jwtService.parseClaims(token, null);
+                String tokenType = claims.get("token_type", String.class);
+                boolean jobIo = JwtService.TokenType.JOB_IO.name().equals(tokenType);
+                if (!jobIo && !JwtService.TokenType.ACCESS.name().equals(tokenType)) {
+                    rejectInvalidToken(request, response, new JwtException("access token type required"));
+                    return;
+                }
                 String username = claims.getSubject();
                 Integer tokenVersion = jwtService.extractTokenVersion(claims);
 
@@ -82,6 +91,16 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                     log.debug("JWT validation failed: user '{}' token version mismatch (token: {}, user: {})",
                             username, tokenVersion, user.getTokenVersion());
                     rejectInvalidToken(request, response, new JwtException("token version mismatch"));
+                    return;
+                }
+
+                if (jobIo && !jobIoScope.permits(request, claims, user)) {
+                    SecurityContextHolder.clearContext();
+                    // Avoid /error dispatch changing this explicit denial to 401.
+                    response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+                    response.setCharacterEncoding("UTF-8");
+                    response.setContentType("application/json");
+                    response.getWriter().write("{\"error\":\"JOB_IO_SCOPE_DENIED\",\"message\":\"任务凭据不允许访问该资源或运行已结束\"}");
                     return;
                 }
 

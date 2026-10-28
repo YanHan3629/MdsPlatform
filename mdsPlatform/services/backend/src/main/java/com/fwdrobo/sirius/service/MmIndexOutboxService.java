@@ -15,7 +15,7 @@ import java.util.UUID;
 @Service
 public class MmIndexOutboxService {
     public static final String PARSER_VERSION = "parser-registry-1.1";
-    public static final String BUILDER_VERSION = "professional-indexes-1.12";
+    public static final String BUILDER_VERSION = "professional-indexes-1.14";
     public static final String CONFIG_VERSION = "2026-09-13.1";
 
     private final JdbcTemplate jdbc;
@@ -41,16 +41,30 @@ public class MmIndexOutboxService {
     public UUID enqueueSnapshot(UUID orgId, UUID datasetId, UUID versionId, UUID rawCommitId, UUID createdBy) {
         String rawConfig = jdbc.queryForObject("SELECT COALESCE(meta->'indexConfig','{}'::jsonb)::text FROM mm_dataset_version WHERE version_id=?",String.class,versionId);
         Map<String,Object> config;
+        boolean activateOnReady;
         try { config = com.fwdrobo.sirius.util.IndexProcessingConfig.validate(objectMapper.readValue(rawConfig, Map.class)); }
         catch (java.io.IOException e) { throw new IllegalArgumentException("invalid index config",e); }
-        String key = idempotencyKey(orgId, versionId, rawCommitId) + com.fwdrobo.sirius.util.IndexProcessingConfig.fingerprint(config);
+        try {
+            var policy=objectMapper.readTree(jdbc.queryForObject("SELECT COALESCE(meta->'activateOnReady','true'::jsonb)::text FROM mm_dataset_version WHERE version_id=?",String.class,versionId));
+            if(!policy.isBoolean())throw new IllegalArgumentException("invalid persisted index activation policy");
+            activateOnReady=policy.asBoolean();
+        } catch(java.io.IOException invalid){throw new IllegalArgumentException("invalid persisted index activation policy",invalid);}
+        String configFingerprint=com.fwdrobo.sirius.util.IndexProcessingConfig.fingerprint(config);
+        if(!activateOnReady) {
+            // The ingestion key column is VARCHAR(128). Domain-separate held
+            // builds inside the digest while preserving existing normal keys.
+            try { configFingerprint=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest((configFingerprint+":held").getBytes(StandardCharsets.UTF_8))); }
+            catch(java.security.NoSuchAlgorithmException impossible){throw new IllegalStateException(impossible);}
+        }
+        String key = idempotencyKey(orgId, versionId, rawCommitId) + configFingerprint;
         UUID eventId = UUID.randomUUID();
         UUID taskId = UUID.randomUUID();
         try {
             String payload = objectMapper.writeValueAsString(Map.of(
                     "datasetId", datasetId, "datasetVersionId", versionId, "rawCommitId", rawCommitId,
                     "parserVersion", PARSER_VERSION, "builderVersion", BUILDER_VERSION,
-                    "configVersion", CONFIG_VERSION, "indexConfig",config));
+                    "configVersion", CONFIG_VERSION, "indexConfig",config,"activateOnReady",activateOnReady));
             jdbc.update("""
                     INSERT INTO mm_outbox_event(event_id,org_id,aggregate_type,aggregate_id,event_type,idempotency_key,payload)
                     VALUES (?,?,?,?,?,?,?::jsonb)

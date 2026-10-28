@@ -33,7 +33,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Stream;
 
-@Service
+@Deprecated // Legacy implementation retained for migration/reference; never registered as a runtime bean.
 public class DataSpaceFlowService {
     private static final DateTimeFormatter DISPLAY_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
     private static final String PLATFORM_NAME = "产业链数据空间平台";
@@ -95,61 +95,7 @@ public class DataSpaceFlowService {
             }
             seedChainOwnerLocked();
             seedProviderSpacesLocked();
-            seedPublishedProductLocked(
-                    "quality",
-                    "fridge-quality",
-                    "智能冰箱生产质检图文数据源",
-                    "冰箱制造质量资源目录",
-                    "冰箱生产质检治理数据集",
-                    "冰箱生产质检图文数据产品",
-                    "包含冰箱产线外观图片、压缩机运行曲线、质检缺陷文本和批次追溯元数据",
-                    "冰箱,质检,缺陷,图片,文本,产线",
-                    "IMAGE_TEXT",
-                    98.2,
-                    48600,
-                    39200,
-                    9400);
-            seedPublishedProductLocked(
-                    "supply-chain",
-                    "fridge-supply",
-                    "冰箱核心零部件供应链数据源",
-                    "冰箱供应链资源目录",
-                    "冰箱供应链履约治理数据集",
-                    "冰箱零部件供应链履约数据产品",
-                    "覆盖压缩机、蒸发器、门封条等关键零部件的订单、库存、交付和异常协同数据",
-                    "冰箱,供应链,零部件,库存,交付",
-                    "TEXT",
-                    96.7,
-                    32800,
-                    0,
-                    32800);
-            seedPublishedProductLocked(
-                    "service",
-                    "fridge-service",
-                    "冰箱售后服务工单语音文本数据源",
-                    "冰箱服务资源目录",
-                    "冰箱服务工单治理数据集",
-                    "冰箱售后服务工单数据产品",
-                    "汇聚冰箱报修工单、客服转写文本、维修图片和用户反馈标签，支持故障预测与服务优化",
-                    "冰箱,售后,服务,工单,客服,语音,文本",
-                    "AUDIO_TEXT",
-                    95.8,
-                    76500,
-                    9800,
-                    66700);
-
-            Map<String, Object> intent = createIntentLocked(mapOf(
-                    "productId", "prd-fridge-quality",
-                    "consumerName", CHAIN_OWNER_NAME,
-                    "purpose", "用于智能冰箱质量追溯、缺陷识别模型训练和产线良率分析",
-                    "expectedSendTime", now().plusMinutes(30).format(DISPLAY_TIME)));
-            createContractLocked(mapOf(
-                    "intentId", intent.get("intentId"),
-                    "contractName", "冰箱质检数据流通合约",
-                    "sendTime", now().plusMinutes(30).format(DISPLAY_TIME),
-                    "receiverEndpoint", "s3://haier-chain-owner/fridge-quality/",
-                    "qualityThreshold", 96));
-            addEventLocked("系统初始化", "已加载产业链数据空间演示数据，供给方工作台可直接注册、接入、治理、建索引和发布产品", "READY");
+            addEventLocked("系统初始化", "数据空间已就绪，请通过多模态问答页上传与发布真实数据集", "READY");
         }
     }
 

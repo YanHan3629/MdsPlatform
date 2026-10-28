@@ -9,8 +9,73 @@ from typing import Any
 
 
 SCHEMA_VERSION = "1.0"
-PARSER_CONFIG_VERSION = "2026-09-09"
-ORGANIZER_VERSION = "2026-09-10.4"
+PARSER_CONFIG_VERSION = "2026-10-21.1"
+ORGANIZER_VERSION = "2026-10-23.1"
+WORKBOOK_ORGANIZER_VERSION = "2026-10-24.3"
+
+def organizer_version(source_format: str) -> str:
+    return WORKBOOK_ORGANIZER_VERSION if source_format.upper()=='XLSX' else ORGANIZER_VERSION
+EVIDENCE_SCHEMA_VERSION = "qa-evidence-bundle-2"
+EVIDENCE_RECIPE_VERSION = "native-evidence-2026-10-22.2"
+
+
+@dataclass(frozen=True)
+class EvidenceIdentity:
+    datasetId: str
+    versionId: str
+    indexVersionId: str
+    rawCommitId: str
+    assetId: str
+    logicalPath: str
+    sourceSha256: str
+    originalFormat: str
+    evidenceConfigSha256: str
+
+    def __post_init__(self):
+        for value in (self.datasetId,self.versionId,self.indexVersionId,self.rawCommitId,self.assetId):
+            uuid.UUID(str(value))
+        for checksum in (self.sourceSha256,self.evidenceConfigSha256):
+            if len(checksum)!=64 or any(c not in '0123456789abcdef' for c in checksum):
+                raise ValueError('EVIDENCE_SHA256_REQUIRED')
+        if not self.logicalPath.startswith('/') or '..' in self.logicalPath.split('/'):
+            raise ValueError('EVIDENCE_LOGICAL_PATH_INVALID')
+
+
+@dataclass
+class EvidenceFact:
+    factId: str
+    field: str
+    value: Any
+    evidenceNature: str
+    locator: dict[str, Any]
+    unit: str | None = None
+    sourceValue: Any = None
+    numberSourceExpression: str | None = None
+    calculationEligible: bool = True
+    qualityFlags: list[str] = field(default_factory=list)
+
+
+@dataclass
+class EvidenceBundle:
+    identity: EvidenceIdentity
+    evidenceId: str
+    representationId: str
+    representationKind: str
+    evidenceNature: str
+    locator: dict[str, Any]
+    content: dict[str, Any]
+    facts: list[EvidenceFact]
+    coverage: dict[str, Any]
+    capabilities: list[str]
+    unsupportedReasons: list[str]
+    transforms: list[dict[str, Any]]
+    qualityFlags: list[str] = field(default_factory=list)
+    parentEvidenceIds: list[str] = field(default_factory=list)
+    schemaVersion: str = EVIDENCE_SCHEMA_VERSION
+    recipeVersion: str = EVIDENCE_RECIPE_VERSION
+
+    def to_dict(self):
+        return json_safe(asdict(self))
 
 
 def normalized_path(value: str) -> str:
@@ -94,6 +159,7 @@ class SemanticUnit:
     parser_config_version: str
     organizer_version: str
     payload: Any
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

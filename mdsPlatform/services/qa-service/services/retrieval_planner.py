@@ -154,7 +154,7 @@ class RetrievalPlanner:
                 inferred = self._professional_rule(question, top_k)
                 if not inferred:
                     if self._needs_semantic_planning(question):
-                        raise ValueError("NEEDS_CLARIFICATION: 专业检索模式尚未明确完整条件，请填写查询表单或改用自动规划")
+                        raise ValueError("NEEDS_CLARIFICATION: 专业检索模式尚未明确完整条件，请在问题中补充字段、对象及范围")
                     inferred = {"taskIntent": "text_search", "retrievers": ["text"], "queryText": question,
                                 "operation": "search", "topK": top_k}
                 return self._plan(provider, selected, question, False, "请求明确指定专业检索", professional_plan=inferred)

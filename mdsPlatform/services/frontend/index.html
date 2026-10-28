@@ -21,14 +21,15 @@
         <a href="#dashboard" class="active">总览驾驶舱</a>
         <a href="#provider">供给方工作台</a>
         <a href="#market">链主消费搜索</a>
+        <a href="#retrieval">多模态检索</a>
         <a href="#qa">多模态问答</a>
         <a href="#contracts">合约与推送</a>
       </nav>
       <section class="business-panel">
         <div class="business-title">业务链路</div>
         <div class="tree-root">
-          <span class="caret">▾</span><span class="check">✓</span><span class="folder">📁</span>
-          <div><b>海尔智家</b><small>链主企业 / 数据消费方</small></div>
+          <span class="caret">▾</span><span class="folder">📁</span>
+          <div><b id="currentOrgName">未登录</b><small>业务域分类，不代表企业认证</small></div>
         </div>
         <div id="businessTree" class="business-tree"></div>
       </section>
@@ -42,12 +43,12 @@
     <main>
       <header class="topbar">
         <div>
-          <p class="eyebrow">家电产业链 · 冰箱场景</p>
+          <p class="eyebrow">家电产业链 · 真实数据空间</p>
           <h1>产业链数据空间平台</h1>
         </div>
         <div class="top-actions">
           <span id="health" class="badge muted">连接中</span>
-          <button id="demoDispatchBtn" class="btn primary">立即检查推送</button>
+          <button id="demoDispatchBtn" class="btn primary">刷新业务与任务状态</button>
         </div>
       </header>
 
@@ -92,7 +93,7 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>名称</th><th>业务域</th><th>来源</th><th>模态</th><th>样本量</th><th>质量</th><th>索引</th><th>状态</th></tr></thead>
+              <thead><tr><th>名称 / 版本</th><th>业务域</th><th>来源</th><th>类型 / 格式</th><th>文件数量</th><th>实测质量</th><th>索引</th><th>状态</th></tr></thead>
               <tbody id="catalogTable"></tbody>
             </table>
           </div>
@@ -102,13 +103,11 @@
       <section id="provider" class="page">
         <div class="grid two">
           <section class="card form-card">
-            <div class="card-head"><div><p class="eyebrow">Step 1</p><h2>企业 / 组织注册认证</h2></div></div>
+            <div class="card-head"><div><p class="eyebrow">Step 1</p><h2>当前组织与平台空间</h2></div></div>
             <form id="spaceForm" class="form-grid">
-              <label>组织名称<input name="orgName" required value="海尔智家产业链-制造业务中心" /></label>
-              <label>角色<select name="role"><option value="PROVIDER">数据供给方</option><option value="CONSUMER">链主消费方</option></select></label>
-              <label>业务域<select name="businessCode" id="spaceBusinessSelect"></select></label>
-              <label class="full">说明<textarea name="description">接入家电产业链冰箱业务数据，作为数据供给方。</textarea></label>
-              <button class="btn primary" type="submit">注册空间</button>
+              <label>平台空间名称<input name="orgName" required placeholder="在当前账号组织内创建空间" /></label>
+              <label class="full">说明<textarea name="description" placeholder="空间用途；创建空间不代表企业认证"></textarea></label>
+              <button class="btn primary" type="submit">创建平台空间</button>
             </form>
             <div id="spaces" class="compact-list"></div>
           </section>
@@ -116,18 +115,14 @@
           <section class="card form-card">
             <div class="card-head"><div><p class="eyebrow">Step 2</p><h2>数据源接入与文件上传</h2></div></div>
             <form id="sourceForm" class="form-grid">
-              <label>认证空间<select name="spaceId" id="sourceSpaceSelect" required></select></label>
-              <label>业务域<select name="businessCode" id="sourceBusinessSelect" required></select></label>
-              <label>数据资源名称<input name="sourceName" required value="智能冰箱压缩机运行数据源" /></label>
-              <label>数据资源类型<select name="sourceType"><option>LOCAL_UPLOAD</option><option>OBJECT_STORAGE</option><option>API_STREAM</option><option>DATABASE</option></select></label>
-              <label>模态<select name="modalityType"><option>IMAGE_TEXT</option><option>IMAGE</option><option>TEXT</option><option>VIDEO</option><option>AUDIO</option><option>AUDIO_TEXT</option></select></label>
-              <label class="full">上传方式<input name="uploadMethods" value="本地文件,文件夹批量,对象存储清单,接口接入" /></label>
-              <button class="btn primary" type="submit">接入数据资源</button>
+              <label>已有数据集<select name="datasetId" id="sourceDatasetSelect" required></select></label>
+              <label>接入方式<select name="sourceType"><option value="EXISTING_DATASET">关联已有真实数据，不重新上传</option><option disabled>OBJECT_STORAGE · 连接器未配置</option><option disabled>API_STREAM · 连接器未配置</option><option disabled>DATABASE · 连接器未配置</option></select></label>
+              <p class="full">所有权取自登录账号及真实数据集。格式、内容类型和数量由快照及解析结果确定。</p>
+              <button class="btn primary" type="submit">关联已有数据集</button>
             </form>
             <form id="uploadForm" class="upload-box">
-              <select name="sourceId" id="uploadSourceSelect" required></select>
-              <input name="files" type="file" multiple accept=".jpg,.jpeg,.png,.svg,.txt,.csv,.json,.jsonl,.xlsx,.pdf,.obj,.step,.parquet,.index" />
-              <button class="btn" type="submit">按格式分类上传数据文件</button>
+              <select name="sourceId" id="uploadSourceSelect"></select>
+              <button class="btn" type="submit">打开真实文件 / 目录上传与版本发布</button>
             </form>
           </section>
         </div>
@@ -137,32 +132,38 @@
             <p class="eyebrow">Step 3</p><h2>创建资源目录</h2>
             <form id="catalogForm" class="stack-form">
               <select name="sourceId" id="catalogSourceSelect" required></select>
-              <input name="catalogName" required value="冰箱压缩机运行资源目录" />
-              <input name="tags" value="家电,冰箱,压缩机,运行,质检" />
-              <button class="btn primary" type="submit">创建目录</button>
+              <input name="catalogName" required placeholder="真实数据资源目录名称" />
+              <label>业务域<select name="businessCode" id="sourceBusinessSelect"></select></label>
+              <textarea name="description" placeholder="数据描述、边界及更新说明"></textarea>
+              <textarea name="intendedUse" placeholder="适用用途"></textarea>
+              <button class="btn primary" type="submit">保存目录描述</button>
             </form>
           </section>
           <section class="card form-card">
-            <p class="eyebrow">Step 4</p><h2>治理加工形成数据集</h2>
+            <p class="eyebrow">Step 4</p><h2>真实数据质量检查</h2>
             <form id="governForm" class="stack-form">
               <select name="sourceId" id="governSourceSelect" required></select>
-              <input name="datasetName" required value="冰箱压缩机运行治理数据集" />
-              <input name="version" value="v1.0" />
-              <input name="qualityScore" type="number" min="0" max="100" step="0.1" value="96.8" />
-              <input name="sampleCount" type="number" value="32000" />
-              <button class="btn primary" type="submit">治理生成数据集</button>
+              <p>检查已发布版本的清单、文件及解析质量；报告列出覆盖率和问题，不改写原始文件，不接受手填数量或质量分。</p>
+              <label>补充质量规则（可选 JSON）<textarea name="rules" rows="3" placeholder='{"files":{"/example.csv":{"primaryKey":["id"],"fields":{"id":{"type":"string","nullable":false}}}}}'></textarea></label>
+              <input name="idempotencyKey" placeholder="重新测量时填写新的运行键；留空复用当前规则版本的任务" />
+              <button class="btn primary" type="submit">执行质量检查</button>
             </form>
+            <div id="qualityReport" aria-live="polite"><p>执行后可查看逐项报告，后台会独立完成检查。</p></div>
           </section>
           <section class="card form-card">
             <p class="eyebrow">Step 5-6</p><h2>索引构建与产品发布</h2>
             <form id="indexForm" class="stack-form mini-gap">
               <select name="datasetId" id="indexDatasetSelect" required></select>
-              <input name="modelName" value="CLIP-Chinese-Fridge-QA" />
-              <button class="btn" type="submit">构建索引</button>
+              <p>创建或复用真实后台任务，READY来自构建、校验及预热结果。</p>
+              <button class="btn" type="submit">创建 / 查看索引任务</button>
             </form>
             <form id="publishForm" class="stack-form mini-gap">
               <select name="datasetId" id="publishDatasetSelect" required></select>
-              <input name="productName" required value="冰箱压缩机运行数据产品" />
+              <select name="productId" id="publishProductSelect"><option value="">创建新产品</option></select>
+              <input name="productName" required placeholder="数据产品名称" />
+              <textarea name="description" placeholder="产品内容与范围说明（留空沿用目录）"></textarea>
+              <input name="allowedUse" required placeholder="允许用途；仅授权完整冻结版本读取" />
+              <select name="visibility"><option value="INTERNAL">仅本组织可发现</option><option value="PUBLIC">允许其他已登录组织发现摘要并申请</option></select>
               <button class="btn primary" type="submit">发布数据产品</button>
             </form>
           </section>
@@ -172,7 +173,7 @@
       <section id="market" class="page">
         <section class="card">
           <div class="card-head">
-            <div><p class="eyebrow">Search</p><h2>海尔智家搜索业务域数据资源 / 产品并发起消费意向</h2></div>
+            <div><p class="eyebrow">Search</p><h2>发现已发布数据产品并申请消费</h2></div>
             <div class="filters">
               <input id="productKeyword" placeholder="冰箱、质检、供应链、售后、压缩机..." />
               <select id="productBusiness"><option value="">全部业务域</option></select>
@@ -181,23 +182,26 @@
             </div>
           </div>
           <div id="productGrid" class="product-grid"></div>
+          <p id="marketSearchStatus" aria-live="polite">登录后读取真实已发布产品。</p>
+          <div class="filters"><button class="btn" type="button" id="productPrev">上一页</button><span id="productPage"></span><button class="btn" type="button" id="productNext">下一页</button></div>
         </section>
         <section class="card form-card">
           <div class="card-head"><div><p class="eyebrow">Intent</p><h2>消费意向</h2></div></div>
           <form id="intentForm" class="form-grid">
-            <label>数据产品<select name="productId" id="intentProductSelect" required></select></label>
-            <label>消费方<input name="consumerName" value="海尔智家" /></label>
-            <label>期望发送时间<input name="expectedSendTime" id="expectedSendTime" /></label>
-            <label class="full">消费目的<textarea name="purpose">用于冰箱质量追溯、供应链协同、售后服务优化和家电产业链业务验证。</textarea></label>
+            <label>数据产品及冻结版本<select name="productVersionId" id="intentProductSelect" required></select></label>
+            <p>消费主体由当前登录账号确定，不能填写其他企业名称代为申请。</p>
+            <label>期望交付时间（北京时间 +08:00）<input name="expectedSendTime" id="expectedSendTime" type="datetime-local" required /></label>
+            <label class="full">消费目的<textarea name="purpose" required placeholder="说明使用场景和用途"></textarea></label>
             <button class="btn primary" type="submit">提交消费意向</button>
           </form>
+          <div id="marketVersionDetails" aria-live="polite"></div>
         </section>
       </section>
 
-      <section id="qa" class="page">
+      <section id="multimodalShared" hidden>
         <div class="card">
-          <div class="card-head"><div><p class="eyebrow">数据空间 · Qwen3.5</p><h2>多模态问答</h2></div><span id="qaHealth" class="badge muted">检查模型状态</span></div>
-          <p>选择已建立索引的数据集，结合文字和图片提问。回答会附带检索来源，便于核对依据。</p>
+          <div class="card-head"><div><p class="eyebrow">数据空间 · Qwen3.5</p><h2>数据空间账号与版本管理</h2></div><span id="qaHealth" class="badge muted">检查模型状态</span></div>
+          <p>多模态检索与问答共享账号、组织和数据版本。检索条件与问答资料分别保存。</p>
           <form id="qaLogin" class="filters">
             <input name="userName" aria-label="数据空间账号" placeholder="数据空间账号" autocomplete="username" required />
             <input name="password" aria-label="密码" type="password" placeholder="密码" autocomplete="current-password" required />
@@ -205,9 +209,9 @@
           </form>
           <div class="filters mini-gap"><span id="qaAccount">尚未登录</span><button id="qaLogout" class="btn link" type="button" hidden>退出登录</button><button id="qaRefresh" class="btn link" type="button">刷新数据集与模型状态</button></div>
         </div>
-        <div class="card mini-gap">
+        <details class="card mini-gap"><summary>上传、发布与索引任务</summary>
           <div class="card-head"><div><p class="eyebrow">真实数据版本</p><h2>上传与自动索引</h2></div></div>
-          <p>这里操作真实持久化数据版本（与驾驶舱演示上传区不同）。选择已有空间、数据集和草稿版本，或填写新名称创建。上传完成后发布版本，系统才会自动解析、构建并预热索引；已发布版本可直接回填。</p>
+          <p>工作台、检索和问答共用此真实上传入口。选择已有空间、数据集和草稿版本，或填写新名称创建。README及数据集说明文件会排除；上传完成并发布版本后，后台自动解析、构建及预热索引。已发布版本保持不可变。</p>
           <form id="qaIngestForm" class="form-grid">
             <label>空间<select id="qaIngestSpace"><option value="">登录后加载</option></select></label>
             <label>新建空间名称<input id="qaNewSpace" maxlength="128" placeholder="留空则使用所选空间" /></label>
@@ -225,45 +229,48 @@
             <button id="qaSaveMapping" type="button" class="btn">保存映射（下次构建生效）</button>
             <div class="full filters"><button id="qaIngestSubmit" class="btn primary" type="submit">上传并发布，自动建立索引</button><button id="qaBackfill" class="btn" type="button">对已发布版本回填</button></div>
           </form>
-          <p id="qaIngestProgress" role="status">登录后可操作真实数据版本。</p>
+          <p id="qaIngestProgress" role="status">登录后可操作真实数据版本。</p><div id="qaIndexing" class="compact-list"></div>
+        </details>
+      </section>
+
+      <section id="retrieval" class="page">
+        <div class="grid two">
+          <div class="card">
+            <div class="card-head"><div><p class="eyebrow">真实快照 · 条件检索</p><h2>多模态检索</h2></div></div>
+            <p>按真实数据能力设置条件，返回原始命中或确定性计算结果。</p>
+            <form id="retrievalForm" class="form-grid">
+              <label class="full">检索数据集与版本<select id="retrievalDataset"></select></label>
+              <p id="retrievalCapabilityStatus" class="full" role="status">登录后加载快照能力。</p>
+              <label>数据类型<select id="retrievalType"></select></label>
+              <label>检索范围<select id="retrievalScope"><option value="corpus">业务证据</option><option value="catalog">目录元数据</option></select></label>
+              <label>操作<select id="retrievalOperation"></select></label>
+              <label>原始格式<select id="retrievalFormat"><option value="">全部适用格式</option></select></label>
+              <label class="full">关键词或全文<input id="retrievalQuery" maxlength="8000" placeholder="可留空以浏览所选范围" /></label>
+              <div id="retrievalSpecific" class="full form-grid"></div>
+              <fieldset id="retrievalConditions" class="full professional-options"><legend>硬条件（不同条件同时满足）</legend><div id="retrievalConditionRows" class="full"></div><button id="retrievalAddCondition" type="button" class="btn">添加条件</button></fieldset>
+              <label>最多显示结果<input id="retrievalTopK" type="number" min="1" max="50" value="8" /></label>
+              <p class="full">多选值用集合条件（OR）；多条条件为 AND。统计计算覆盖完整过滤范围，不受显示条数限制。null、空字符串与未记录字段分别保留；筛选空字符串时选择“等于”并填写 ""。</p>
+              <button id="retrievalSubmit" class="btn primary" type="submit">执行检索</button>
+            </form>
+          </div>
+          <div class="card" aria-live="polite"><h2>检索结果与来源</h2><p id="retrievalProgress">等待检索</p><p id="retrievalApplied"></p><div id="retrievalResults" class="compact-list"></div></div>
         </div>
+      </section>
+      <section id="qa" class="page">
         <div class="grid two mini-gap">
           <div class="card form-card">
+            <h2>多模态问答</h2><p>直接提问，可补充文字或图片；系统按相关性选择依据。需要特定来源时，可在问题中说明“只依据 PDF”或“优先表格”。</p>
             <form id="qaForm" class="form-grid">
               <label class="full">检索数据集<select id="qaDataset"><option value="">不使用数据空间检索</option></select></label>
               <p id="qaDatasetInfo" class="full">登录后加载当前组织真实的 READY 索引；演示目录不作为检索依据。</p>
-              <div id="qaIndexing" class="full compact-list"></div>
+
               <label>输入模式<select name="inputMode" id="qaInputMode"><option value="hybrid">用户资料 + 数据空间</option><option value="question_only">仅问题 + 数据空间</option><option value="user_data_only">仅使用用户资料</option></select></label>
               <label>任务<select name="taskType"><option value="general_qa">通用问答</option><option value="chain_risk_analysis">产业链风险分析</option><option value="demand_evaluation">需求评判</option><option value="data_summary">数据摘要</option></select></label>
-              <label>检索类型<select name="retrievalType" id="qaRetrievalType"><option value="auto">自动判断</option><option value="professional">专业检索（明确计划）</option><option value="text_to_image">兼容文搜图</option><option value="image_to_text">兼容图搜文</option><option value="dual">兼容图文双路</option><option value="none">不检索</option></select></label>
-              <label>检索数量<input name="topK" type="number" value="3" min="1" max="50" required /></label>
-              <fieldset id="qaProfessional" class="full professional-options" hidden>
-                <legend>专业查询计划</legend>
-                <label>检索器<select id="qaRetriever"><option value="text">文本</option><option value="structured">结构化</option><option value="timeseries">时序</option><option value="geometry">三维几何</option><option value="visual">视觉</option></select></label>
-                <label>操作<select id="qaOperation"><option value="search">检索</option><option value="filter">条件筛选</option><option value="sort">排序</option><option value="count">计数</option><option value="sum">求和</option><option value="min">最小值</option><option value="max">最大值</option><option value="average">样本平均</option><option value="time_weighted_average">时间加权平均</option><option value="duration_above">超过阈值时长</option><option value="compare_periods">比较时间段</option><option value="trend_start_end">起止趋势</option><option value="trend_regression">回归趋势</option><option value="trend_monotonic">持续单调趋势</option></select></label>
-                <label>结构化计算字段<input id="qaAggregateField" placeholder="例如 amount" /></label>
-                <label>排序字段<input id="qaSortField" placeholder="例如 amount" /></label>
-                <label class="checkbox"><input id="qaSortDescending" type="checkbox" />降序排列</label>
-                <label>指标字段<input id="qaMetric" placeholder="例如 temperature" /></label>
-                <label>目标单位<input id="qaUnit" placeholder="例如 °C、mm" /></label>
-                <label>开始时间<input id="qaTimeStart" type="datetime-local" /></label>
-                <label>结束时间<input id="qaTimeEnd" type="datetime-local" /></label>
-                <label>比较段开始<input id="qaCompareStart" type="datetime-local" /></label>
-                <label>比较段结束<input id="qaCompareEnd" type="datetime-local" /></label>
-                <label>阈值<input id="qaThreshold" type="number" step="any" /></label>
-                <label>实体标识<input id="qaEntity" placeholder="例如 device-01" /></label>
-                <label>几何查询样本<select id="qaQueryAsset"><option value="">选择当前数据版本中的三维文件</option></select></label>
-                <label>查询曲线（JSON 数组）<input id="qaQuerySeries" placeholder="例如 [0,1,2,3,4,5,6,7]" /></label>
-                <label class="checkbox"><input id="qaRotationInvariant" type="checkbox" />要求旋转不变</label>
-                <label class="checkbox"><input id="qaScaleInvariant" type="checkbox" />忽略绝对尺寸</label>
-                <label>硬条件字段<input id="qaConditionField" placeholder="例如 width" /></label>
-                <label>比较符<select id="qaConditionOp"><option value="eq">等于</option><option value="gte">大于等于</option><option value="lte">小于等于</option><option value="gt">大于</option><option value="lt">小于</option></select></label>
-                <label>硬条件值<input id="qaConditionValue" placeholder="数值或文本" /></label>
-                <p class="full">精确时序计算必须填写指标及起止时间；缺少关键口径时系统会明确要求补充，不会静默退回视觉相似。</p>
-              </fieldset>
+              <label class="full checkbox"><input id="qaUseSearch" type="checkbox" checked />从所选数据空间自动寻找依据</label>
               <label class="full">问题<textarea name="question" maxlength="8000" placeholder="例如：这些质检记录反映了哪些问题？请注明来源。" required></textarea></label>
-              <label class="full">补充资料<textarea name="context" id="qaContext" placeholder="可粘贴文本依据（每条最多使用前 500 字符）"></textarea></label>
+              <label class="full">补充资料<textarea name="context" id="qaContext" placeholder="可粘贴文字依据；超出当前模型上下文时会明确提示缩短"></textarea></label>
               <label class="full">图片（最多 2 张，每张不超过 10 MB）<input name="images" id="qaImages" type="file" accept="image/jpeg,image/png,image/webp" multiple /></label>
+              <div class="full"><button id="qaClearImages" type="button" class="btn link">清除图片附件</button></div>
               <button id="qaSubmit" class="btn primary" type="submit">提交问题</button>
             </form>
           </div>
@@ -277,16 +284,23 @@
       </section>
 
       <section id="contracts" class="page">
+        <section class="card"><div class="card-head"><div><p class="eyebrow">Applications</p><h2>消费申请与供给审核</h2></div></div><div id="applications" class="compact-list"></div></section>
+        <section class="card form-card"><h2>当前消费组织的受控接收端</h2><form id="receiverForm" class="filters"><input name="endpointName" required maxlength="128" placeholder="本地接收端名称" /><button class="btn" type="submit">配置本地真实接收端</button></form><p>使用独立本地服务身份及回执签名。外部 S3 / HTTP 接收器未配置，不接受任意输入地址。</p><div id="receiverConfigurations"></div></section>
         <div class="grid two">
           <section class="card form-card">
-            <div class="card-head"><div><p class="eyebrow">Contract</p><h2>确认数据源与发送时间</h2></div></div>
+            <div class="card-head"><div><p class="eyebrow">Contract</p><h2>提交技术授权条款</h2></div></div>
             <form id="contractForm" class="form-grid">
+              <input type="hidden" name="contractId" /><input type="hidden" name="revision" />
               <label>消费意向<select name="intentId" id="contractIntentSelect" required></select></label>
-              <label>发送时间<input name="sendTime" id="sendTime" type="datetime-local" required /></label>
-              <label>质量达标线<input name="qualityThreshold" type="number" min="0" max="100" step="0.1" value="95" /></label>
-              <label>消费方接收地址<input name="receiverEndpoint" value="s3://haier-chain-owner/data-space/fridge/" /></label>
-              <button class="btn primary" type="submit">生成合约并进入自动推送</button>
+              <label>发送时间（北京时间 +08:00）<input name="sendTime" id="sendTime" type="datetime-local" required /></label>
+              <label>授权开始（北京时间 +08:00）<input name="validFrom" id="contractValidFrom" type="datetime-local" required /></label>
+              <label>授权结束（北京时间 +08:00）<input name="validTo" id="contractValidTo" type="datetime-local" required /></label>
+              <label>实测断言通过率门槛（可选）<input name="minimumQuality" type="number" min="0" max="100" step="0.0001" placeholder="依据冻结质量报告；未评估不计通过" /></label>
+              <label>消费组织已配置的接收端<select name="endpointId" id="contractEndpointSelect" required><option value="">先选择已批准申请</option></select></label>
+              <label class="full">约定用途<textarea name="purpose" placeholder="留空沿用消费申请用途"></textarea></label>
+              <button class="btn primary" type="submit">提交并确认供给条款，等待消费方确认</button><button class="btn" type="button" id="contractNew">返回新建条款</button>
             </form>
+            <p>仅完整冻结版本的本地技术授权；不替代对外法律签约。双方确认且进入有效期后开放读取，后台另按发送计划交付。已实际下载到用户设备的文件无法远程收回。</p>
           </section>
           <section class="card">
             <div class="card-head"><div><p class="eyebrow">Delivery</p><h2>推送结果</h2></div><span class="badge">根据合约自动执行</span></div>
@@ -302,12 +316,14 @@
             </table>
           </div>
         </section>
+        <section class="card"><h2>交付证据与条款记录</h2><pre id="deliveryDetails" style="white-space:pre-wrap;overflow-wrap:anywhere">选择任务查看清单、回执及尝试记录。</pre></section>
       </section>
     </main>
   </div>
 
   <div id="toast" class="toast"></div>
   <script src="./app.js"></script>
-  <script src="./qa.js"></script>
+  <script src="./qa.js?v=20261024-txtscope1"></script>
+  <script src="./retrieval.js"></script>
 </body>
 </html>

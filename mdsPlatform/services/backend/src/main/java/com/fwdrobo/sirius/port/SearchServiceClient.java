@@ -38,6 +38,53 @@ public class SearchServiceClient {
                 .build();
     }
 
+    /** Preserve validation/service status codes; credentials stay server-side. */
+    public org.springframework.http.ResponseEntity<byte[]> scopedJson(String path, Object body) {
+        try {
+            HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(baseUrl + "/internal/v1" + path))
+                    .timeout(java.time.Duration.ofSeconds(120))
+                    .header("Accept", "application/json").header("X-MM-Internal-Token", internalToken);
+            if (body == null) builder.GET();
+            else builder.header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body), StandardCharsets.UTF_8));
+            var response = httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray());
+            return org.springframework.http.ResponseEntity.status(response.statusCode())
+                    .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                    .header("Cache-Control", "no-store").body(response.body());
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.BAD_GATEWAY, "检索请求已中断");
+        } catch (IOException error) {
+            throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.BAD_GATEWAY, "检索服务不可用或请求超时");
+        }
+    }
+
+    public org.springframework.http.ResponseEntity<byte[]> scopedImage(UUID dataset, UUID version, UUID index,
+                                                                        String plan, MultipartFile file) {
+        try {
+            String boundary = "----ScopedSearch" + UUID.randomUUID();
+            byte[] original = buildImageToTextMultipartBody(boundary, dataset, version, index, 8, file);
+            byte[] closing = ("--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8);
+            var buffer = new ByteArrayOutputStream();
+            buffer.write(original, 0, original.length - closing.length);
+            writeTextPart(buffer, boundary, "plan", plan, "\r\n");
+            buffer.write(closing);
+            var request = HttpRequest.newBuilder(URI.create(baseUrl + "/internal/v1/search/image-candidates"))
+                    .timeout(java.time.Duration.ofSeconds(120))
+                    .header("X-MM-Internal-Token", internalToken)
+                    .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(buffer.toByteArray())).build();
+            var response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
+            return org.springframework.http.ResponseEntity.status(response.statusCode())
+                    .contentType(org.springframework.http.MediaType.APPLICATION_JSON).header("Cache-Control", "no-store").body(response.body());
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.BAD_GATEWAY,"图搜文请求已中断");
+        } catch (IOException error) {
+            throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.BAD_GATEWAY,"图搜文服务不可用");
+        }
+    }
+
     public InternalTextToImageResp textToImage(InternalTextToImageReq req) {
         String requestBody;
         try {

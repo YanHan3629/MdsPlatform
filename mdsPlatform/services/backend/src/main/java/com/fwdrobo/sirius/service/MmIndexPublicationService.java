@@ -21,12 +21,14 @@ public class MmIndexPublicationService {
     private final SearchServiceClient search;
     private final JdbcTemplate jdbc;
     private final TransactionTemplate tx;
+    private final DatasetAccessService access;
 
     public MmIndexPublicationService(SearchServiceClient search, JdbcTemplate jdbc,
-                                     PlatformTransactionManager transactionManager) {
+                                     PlatformTransactionManager transactionManager,DatasetAccessService access) {
         this.search = search;
         this.jdbc = jdbc;
         this.tx = new TransactionTemplate(transactionManager);
+        this.access=access;
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -44,6 +46,11 @@ public class MmIndexPublicationService {
                         event.indexVersionId());
                 jdbc.update("UPDATE mm_index_version SET index_status='READY',ready_at=now(),error_message=NULL WHERE index_version_id=? AND index_status='PREWARMING'",
                         event.indexVersionId());
+                String activate=jdbc.queryForObject("SELECT COALESCE(meta->>'activateOnReady','true') FROM mm_index_version WHERE index_version_id=?",String.class,event.indexVersionId());
+                if("false".equals(activate)){
+                    jdbc.update("UPDATE mm_dataset_version SET version_status='READY' WHERE version_id=?",event.datasetVersionId());
+                    return;
+                }
                 int activated = jdbc.update("""
                         UPDATE mm_dataset_version v SET active_index_version_id=?,version_status='READY'
                         WHERE v.version_id=? AND NOT EXISTS (
@@ -71,6 +78,39 @@ public class MmIndexPublicationService {
             });
             log.error("index preload/publication failed: indexVersionId={}", event.indexVersionId(), exception);
         }
+    }
+
+    /** Explicit compare-and-set promotion; old READY scopes and contracts stay frozen. */
+    public Map<String,Object> activate(java.util.UUID datasetId,java.util.UUID versionId,java.util.UUID indexVersionId,java.util.UUID expectedActive){
+        access.requireDatasetWrite(datasetId);
+        return tx.execute(status->{
+            var versions=jdbc.queryForList("SELECT active_index_version_id FROM mm_dataset_version WHERE version_id=? AND dataset_id=? FOR UPDATE",versionId,datasetId);
+            if(versions.size()!=1)throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND,"数据版本不存在");
+            var previous=(java.util.UUID)versions.get(0).get("active_index_version_id");
+            if(!indexVersionId.equals(previous)&&!java.util.Objects.equals(previous,expectedActive))
+                throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT,"活动索引已变化，请重新核对后切换");
+            var ready=jdbc.queryForList("""
+                SELECT i.index_version_id FROM mm_index_version i
+                JOIN mm_dataset_version v ON v.version_id=i.dataset_version_id
+                JOIN mm_dataset d ON d.dataset_id=i.dataset_id
+                JOIN artifact_commit raw ON raw.repo_id=d.raw_repo_id AND raw.commit_id=v.raw_commit_id AND raw.commit_status='PUBLISHED'
+                JOIN artifact_commit idx ON idx.repo_id=i.index_repo_id AND idx.commit_id=i.index_commit_id AND idx.commit_status='PUBLISHED'
+                WHERE i.dataset_id=? AND i.dataset_version_id=? AND i.index_version_id=? AND i.index_status='READY'
+                  AND NOT EXISTS(SELECT 1 FROM mm_index_registration r WHERE r.index_version_id=i.index_version_id AND r.registration_status<>'READY')
+                """,datasetId,versionId,indexVersionId);
+            if(ready.size()!=1)throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT,"候选索引或冻结提交尚未就绪");
+            if(!indexVersionId.equals(previous)){
+                search.preload(datasetId,versionId,indexVersionId);
+                jdbc.update("UPDATE mm_dataset_version SET active_index_version_id=?,version_status='READY',updated_at=now() WHERE dataset_id=? AND version_id=?",indexVersionId,datasetId,versionId);
+                jdbc.update("""
+                    UPDATE mm_index_version SET meta=jsonb_set(COALESCE(meta,'{}'::jsonb),'{activationHistory}',
+                      COALESCE(meta->'activationHistory','[]'::jsonb)||jsonb_build_array(jsonb_build_object('activatedAt',now(),
+                        'previousIndexVersionId',?::uuid,'actorUserId',?::uuid))) WHERE index_version_id=?
+                    """,previous,com.fwdrobo.sirius.util.SecurityUtils.getUserId(),indexVersionId);
+            }
+            var result=new java.util.LinkedHashMap<String,Object>();result.put("datasetId",datasetId);result.put("versionId",versionId);
+            result.put("activeIndexVersionId",indexVersionId);result.put("previousActiveIndexVersionId",previous);result.put("activated",!indexVersionId.equals(previous));return result;
+        });
     }
 
     /** Seal verified output before search can publish a reference to it. */

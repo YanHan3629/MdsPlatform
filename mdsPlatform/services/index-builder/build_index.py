@@ -287,6 +287,7 @@ def main():
             INPUT_DIR,
             OUTPUT_DIR,
             VERSION_ID,
+            snapshot_identity={'datasetId':DATASET_ID,'indexVersionId':INDEX_VERSION_ID,'rawCommitId':os.environ.get('MDS_INPUT_COMMIT_ID')},
             timezone_name=processing.get("timezone") or os.environ.get("SOURCE_TIMEZONE") or None,
             unit_mapping=processing.get("unitMapping", json.loads(os.environ.get("UNIT_MAPPING_JSON", "{}"))),
             time_column=processing.get("timeColumn") or os.environ.get("TIME_COLUMN") or None,

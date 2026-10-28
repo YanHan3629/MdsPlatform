@@ -12,7 +12,7 @@ class SearchServiceClient:
     def __init__(self, bearer_token=None):
         self.backend_base_url = settings.backend_base_url.rstrip("/")
         self.backend_headers = {}
-        token = settings.backend_bearer_token if bearer_token is None else bearer_token
+        token = bearer_token or ""
         if token:
             self.backend_headers["Authorization"] = f"Bearer {token}"
         self.base_url = settings.search_service_base_url.rstrip("/")
@@ -41,20 +41,19 @@ class SearchServiceClient:
         resp.raise_for_status()
         return resp.content
 
-    def download_asset_image(self, dataset_id, version_id, asset_id, preview=None) -> bytes | None:
+    def download_asset_image(self, dataset_id, version_id, asset_id, preview=None, *, index_version_id=None) -> bytes | None:
         """Use the scoped authenticated gateway, never arbitrary evidence URLs."""
         from io import BytesIO
         from PIL import Image
-        from uuid import UUID
+        from urllib.parse import quote
         url = f"{self.backend_base_url}/api/data-space/qa/assets/{dataset_id}/{version_id}/{asset_id}"
         params = None
-        if preview and preview.get("artifactPath"):
-            path = preview["artifactPath"]
-            if not isinstance(path, str) or not path.startswith("/representations/") or "\\" in path or any(p in {".", ".."} for p in path.split("/")):
-                raise ValueError("invalid derivative preview path")
-            repo, commit = UUID(str(preview["indexRepoId"])), UUID(str(preview["indexCommitId"]))
-            url = f"{self.backend_base_url}/api/artifacts/{repo}/commits/{commit}/files/content"
-            params = {"path": path}
+        if preview and (preview.get("derived") or preview.get("artifactPath")):
+            representation=preview.get('representationId')
+            if not index_version_id or not isinstance(representation,str) or not representation or len(representation)>200 or '/' in representation or '\\' in representation:
+                raise ValueError('EVIDENCE_ID_MISSING: derived image requires a frozen index and representation identity')
+            url=(f"{self.backend_base_url}/api/data-space/qa/evidence/{dataset_id}/{version_id}/"
+                 f"{index_version_id}/{asset_id}/{quote(representation,safe='')}")
         with requests.get(url, params=params, headers=self.backend_headers, timeout=30, stream=True) as response:
             response.raise_for_status()
             content = bytearray()
@@ -105,3 +104,103 @@ class SearchServiceClient:
         resp = requests.post(url, json=payload, headers=self.search_headers, timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()
+
+    def capabilities(self, dataset_id, version_id, index_version_id):
+        # The public QA port must also enforce organisation scope before using
+        # an internal service credential. No cross-user capability cache.
+        response = requests.get(f"{self.backend_base_url}/api/data-space/qa/capabilities/{dataset_id}/{version_id}/{index_version_id}",
+            headers=self.backend_headers, timeout=self.timeout)
+        response.raise_for_status()
+        return response.json()
+
+    def check_scope(self,dataset_id,version_id,index_version_id):
+        response=requests.get(f"{self.backend_base_url}/api/data-space/qa/access/{dataset_id}/{version_id}/{index_version_id}",
+            headers=self.backend_headers,timeout=self.timeout)
+        response.raise_for_status()
+        return response.json()
+
+    def evidence_metadata(self,dataset_id,version_id,index_version_id,asset_id,*,timeout=None):
+        response=requests.get(f"{self.backend_base_url}/api/data-space/qa/evidence/{dataset_id}/{version_id}/{index_version_id}/{asset_id}",
+            headers=self.backend_headers,timeout=min(self.timeout,timeout) if timeout is not None else self.timeout)
+        response.raise_for_status()
+        return response.json()
+
+    def read_evidence(self,dataset_id,version_id,index_version_id,asset_id,operation,*,timeout=None):
+        from services.read_receipt import attest
+        response=requests.post(f"{self.backend_base_url}/api/data-space/qa/evidence/{dataset_id}/{version_id}/{index_version_id}/{asset_id}/read",
+            headers=self.backend_headers,json=operation,timeout=min(self.timeout,timeout) if timeout is not None else self.timeout)
+        response.raise_for_status()
+        return attest(response.json(),response.content,(dataset_id,version_id,index_version_id),asset_id,operation)
+
+    def download_registered_image(self,dataset_id,version_id,index_version_id,asset_id,view,metadata):
+        """Read unchanged registered render bytes; preprocessing is traced later."""
+        import hashlib
+        from urllib.parse import quote
+        from io import BytesIO
+        from PIL import Image
+        expected={'datasetId':dataset_id,'versionId':version_id,'indexVersionId':index_version_id,'assetId':asset_id}
+        if any(str(metadata.get(key))!=str(value) for key,value in expected.items()):raise ValueError('EVIDENCE_IMAGE_SCOPE_MISMATCH')
+        identifier=view.get('legacyRepresentationId','')
+        descriptors=[row for row in metadata['representations'] if row['representationId']==identifier]
+        if len(descriptors)!=1 or descriptors[0].get('outputSha256')!=view.get('outputSha256') or descriptors[0].get('sizeBytes')!=view.get('outputBytes'):
+            raise ValueError('EVIDENCE_REGISTERED_IMAGE_MISMATCH')
+        if not identifier or len(identifier)>200 or '/' in identifier or '\\' in identifier:raise ValueError('EVIDENCE_IMAGE_ID_INVALID')
+        url=f'{self.backend_base_url}/api/data-space/qa/evidence/{dataset_id}/{version_id}/{index_version_id}/{asset_id}/{quote(identifier,safe="")}'
+        with requests.get(url,headers=self.backend_headers,timeout=45,stream=True) as response:
+            response.raise_for_status();raw=bytearray()
+            for block in response.iter_content(65536):
+                raw.extend(block)
+                if len(raw)>16*1024*1024:raise ValueError('EVIDENCE_IMAGE_BYTE_LIMIT')
+        raw=bytes(raw)
+        if len(raw)!=view['outputBytes'] or hashlib.sha256(raw).hexdigest()!=view['outputSha256']:raise ValueError('EVIDENCE_IMAGE_HASH_MISMATCH')
+        with Image.open(BytesIO(raw)) as image:
+            if image.format!='PNG' or image.size!=(view['width'],view['height']):raise ValueError('EVIDENCE_IMAGE_DIMENSION_MISMATCH')
+        return raw
+
+    def render_asset_region(self,dataset_id,version_id,index_version_id,asset_id,parameters,*,source_sha256,_operation='render_region_image'):
+        import base64,hashlib,json
+        from io import BytesIO
+        from PIL import Image
+        url=f"{self.backend_base_url}/api/data-space/qa/evidence/{dataset_id}/{version_id}/{index_version_id}/{asset_id}/render"
+        if _operation not in {'render_region_image','render_engineering_image'}:raise ValueError('EVIDENCE_RENDER_OPERATION_UNSUPPORTED')
+        with requests.post(url,headers=self.backend_headers,json={'operation':_operation,**parameters},timeout=100,stream=True) as response:
+            response.raise_for_status();header=response.headers.get('X-Evidence-Read','')
+            if not header or len(header)>32768:raise ValueError('EVIDENCE_RENDER_METADATA_INVALID')
+            try:metadata=json.loads(base64.b64decode(header,validate=True))
+            except (ValueError,TypeError):raise ValueError('EVIDENCE_RENDER_METADATA_INVALID')
+            identity=metadata.get('identity',{})
+            for key,value in [('datasetId',dataset_id),('versionId',version_id),('indexVersionId',index_version_id),('assetId',asset_id)]:
+                if identity.get(key)!=str(value):raise ValueError('EVIDENCE_RENDER_SNAPSHOT_MISMATCH')
+            if identity.get('sourceSha256')!=source_sha256:raise ValueError('EVIDENCE_RENDER_SOURCE_MISMATCH')
+            raw=bytearray()
+            for block in response.iter_content(65536):
+                raw.extend(block)
+                if len(raw)>16*1024*1024:raise ValueError('EVIDENCE_RENDER_BYTE_LIMIT')
+        raw=bytes(raw)
+        if hashlib.sha256(raw).hexdigest()!=metadata.get('outputSha256') or len(raw)!=metadata.get('outputBytes'):
+            raise ValueError('EVIDENCE_RENDER_HASH_MISMATCH')
+        with Image.open(BytesIO(raw)) as image:
+            if image.format!='PNG' or [image.width,image.height]!=[metadata.get('width'),metadata.get('height')]:raise ValueError('EVIDENCE_RENDER_DIMENSION_MISMATCH')
+        from services.evidence_trace import current
+        if current():current().event('regionRender',metadata)
+        return raw,metadata
+
+    def render_engineering_region(self,dataset_id,version_id,index_version_id,asset_id,parameters,*,source_sha256):
+        return self.render_asset_region(dataset_id,version_id,index_version_id,asset_id,parameters,
+            source_sha256=source_sha256,_operation='render_engineering_image')
+
+    def candidates(self, dataset_id, version_id, index_version_id, question, formats=()):
+        response = requests.post(f"{self.base_url}/internal/v1/search/candidates", headers=self.search_headers,
+            json={"datasetId":str(dataset_id),"versionId":str(version_id),"indexVersionId":str(index_version_id),
+                  "question":question,"formats":list(formats),"per_format":8}, timeout=self.timeout)
+        response.raise_for_status()
+        return response.json()
+
+    def image_candidates(self,dataset_id,version_id,index_version_id,image,formats=()):
+        import json
+        plan={"taskIntent":"qa_image_to_text","retrievers":["text"],"contentType":"text","operation":"search","formats":list(formats),"topK":16}
+        response=requests.post(f"{self.base_url}/internal/v1/search/image-candidates",headers=self.search_headers,
+            data={"datasetId":str(dataset_id),"versionId":str(version_id),"indexVersionId":str(index_version_id),"plan":json.dumps(plan)},
+            files={"file":("query.png",image,"image/png")},timeout=self.timeout)
+        response.raise_for_status()
+        return response.json()

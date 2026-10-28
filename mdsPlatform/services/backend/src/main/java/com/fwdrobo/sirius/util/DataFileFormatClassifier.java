@@ -13,13 +13,14 @@ import java.util.Set;
  */
 public final class DataFileFormatClassifier {
     private static final Set<String> IMAGE_EXTENSIONS = Set.of("jpg", "jpeg", "png", "svg");
-    private static final Set<String> TEXT_EXTENSIONS = Set.of("txt");
+    private static final Set<String> TEXT_EXTENSIONS = Set.of("txt", "md");
     private static final Map<String, String> CONTENT_TYPES = Map.ofEntries(
             Map.entry("jpg", "image/jpeg"),
             Map.entry("jpeg", "image/jpeg"),
             Map.entry("png", "image/png"),
             Map.entry("svg", "image/svg+xml"),
             Map.entry("txt", "text/plain"),
+            Map.entry("md", "text/markdown"),
             Map.entry("csv", "text/csv"),
             Map.entry("json", "application/json"),
             Map.entry("jsonl", "application/x-ndjson"),
@@ -44,7 +45,7 @@ public final class DataFileFormatClassifier {
             return new Classification(extension.toUpperCase(Locale.ROOT), "image", "IMAGE");
         }
         if (TEXT_EXTENSIONS.contains(extension)) {
-            return new Classification("TXT", "text", "TEXT");
+            return new Classification(extension.toUpperCase(Locale.ROOT), "text", "TEXT");
         }
         if ("index".equals(extension)) {
             return new Classification("FAISS", "faiss", "FAISS");

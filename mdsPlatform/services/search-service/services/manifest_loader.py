@@ -7,7 +7,6 @@ import pandas as pd
 
 from adapters.backend_client import BackendClient
 from core.config import settings
-from services.professional_retrievers import ProfessionalRetrieverSuite
 
 
 class ManifestLoader:
@@ -33,6 +32,48 @@ class ManifestLoader:
                 digest.update(block)
         if digest.hexdigest() != expected_sha256:
             raise ValueError(f"bundle checksum mismatch: {path.name}")
+
+    @staticmethod
+    def _capability_registration(manifest: dict) -> tuple[dict, dict]:
+        registrations = [item for item in manifest.get('indexes', [])
+                         if item.get('semanticSpace') == 'snapshot.facets' and item.get('status') == 'READY']
+        if len(registrations) != 1:
+            raise ValueError('exactly one ready snapshot capability registration is required')
+        registration = registrations[0]
+        entries = registration.get('files', [])
+        checksum = hashlib.sha256(''.join(item.get('sha256', '') for item in entries).encode()).hexdigest()
+        if registration.get('contentChecksum') and checksum != registration['contentChecksum']:
+            raise ValueError('snapshot capability registration checksum mismatch')
+        facets = [item for item in entries if item.get('path', '').endswith('/facets.json')]
+        if len(facets) != 1 or len(facets[0].get('sha256', '')) != 64:
+            raise ValueError('one checksummed snapshot capability file is required')
+        return registration, facets[0]
+
+    def load_capabilities(self, dataset_id: str, version_id: str, index_version_id: str):
+        """Materialize only the frozen capability descriptor, not search indexes.
+
+        Explicit preload retains the publication gate. Merely describing a
+        second snapshot must not construct another set of all retrievers.
+        """
+        base_dir = Path(settings.local_cache_dir) / dataset_id / version_id / index_version_id
+        bundle = self.backend.resolve_index_bundle(dataset_id, version_id, index_version_id)
+        manifest_path = self.backend.download_to(bundle['manifestUrl'], self._target_path(base_dir, bundle['manifestPath']))
+        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        _, entry = self._capability_registration(manifest)
+        logical_path = entry['path']; target = self._target_path(base_dir, logical_path)
+        valid = False
+        if target.is_file():
+            try:
+                self._verify_file(target, entry['sha256']); valid = True
+            except ValueError:
+                pass
+        if not valid:
+            url = next((item.get('url') for item in bundle.get('indexFiles', []) if item.get('path') == logical_path), None)
+            if not url:
+                raise ValueError('registered capability file has no signed download URL')
+            self.backend.download_to(url, target)
+            self._verify_file(target, entry['sha256'])
+        return {'manifest': manifest, 'professional_files': {logical_path: target}}
 
     def load(self, dataset_id: str, version_id: str, index_version_id: str):
         base_dir = Path(settings.local_cache_dir) / dataset_id / version_id / index_version_id
@@ -92,13 +133,10 @@ class ManifestLoader:
                 self.backend.download_to(url, target)
                 self._verify_file(target, item.get("sha256"))
                 professional_files[logical_path] = target
-        # Preload parsed professional indexes as part of the publication gate.
-        # The owning LoadedIndex releases this cache when LRU eviction removes
-        # the snapshot, so professional objects obey the same memory budget.
+        # Ordinary queries prepare only their requested semantic spaces.
+        # The explicit publication endpoint still prepares all spaces through
+        # IndexRegistry.ensure_preloaded, including on an existing cache hit.
         professional_cache = {}
-        ProfessionalRetrieverSuite(
-            manifest.get("indexes", []), professional_files, cache=professional_cache
-        ).preload()
 
         return {
             "bundle": bundle,

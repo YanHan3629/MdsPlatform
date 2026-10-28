@@ -36,7 +36,7 @@ public class MmMetadataImportService {
     private static final int ASSET_UPSERT_BATCH_SIZE = 1000;
     private static final int ASSET_TEXT_INSERT_BATCH_SIZE = 1000;
     private static final Set<String> BUSINESS_FORMATS = Set.of(
-            "JPG", "JPEG", "PNG", "SVG", "TXT", "CSV", "JSON", "JSONL", "XLSX", "PDF", "OBJ", "STEP");
+            "JPG", "JPEG", "PNG", "SVG", "TXT", "MD", "CSV", "JSON", "JSONL", "XLSX", "PDF", "OBJ", "STEP");
 
     private final FileService fileService;
     private final MmAssetMapper mmAssetMapper;
@@ -76,9 +76,7 @@ public class MmMetadataImportService {
                         dataset.getRawRepoId(), version.getRawCommitId(), file.getLogicalPath());
             }
             String logicalPath = PathUtils.normalizePath(file.getLogicalPath());
-            if (coco.annotationsPath() != null && coco.annotationsPath().equals(logicalPath)) {
-                continue;
-            }
+            // Annotation JSON is also searchable source data and must have an asset record.
             DataFileFormatClassifier.Classification classification =
                     DataFileFormatClassifier.classify(logicalPath, file.getContentType());
             if (!BUSINESS_FORMATS.contains(classification.format())) {

@@ -17,10 +17,19 @@ import java.util.UUID;
 public class MmIndexController {
 
     private final MmIndexService mmIndexService;
+    private final com.fwdrobo.sirius.service.MmIndexPublicationService publication;
 
-    public MmIndexController(MmIndexService mmIndexService) {
+    public MmIndexController(MmIndexService mmIndexService,com.fwdrobo.sirius.service.MmIndexPublicationService publication) {
         this.mmIndexService = mmIndexService;
+        this.publication=publication;
     }
+
+    public record ActivationRequest(UUID expectedActiveIndexVersionId){}
+    @PostMapping("/datasets/{datasetId}/versions/{versionId}/indexes/{indexVersionId}/activate")
+    public Map<String,Object> activate(@PathVariable UUID datasetId,@PathVariable UUID versionId,@PathVariable UUID indexVersionId,
+            @RequestBody(required=false) ActivationRequest request){
+        if(request==null)throw com.fwdrobo.sirius.util.ExceptionUtils.badRequest("需要明确的候选切换参数");
+        return publication.activate(datasetId,versionId,indexVersionId,request.expectedActiveIndexVersionId());}
 
     @PostMapping("/datasets/{datasetId}/versions/{versionId}/build-index")
     public Map<String, Object> buildIndex(@PathVariable UUID datasetId,

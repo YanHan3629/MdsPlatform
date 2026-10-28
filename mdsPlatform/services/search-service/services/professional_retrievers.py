@@ -11,12 +11,29 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from threading import Lock, RLock
 
 import faiss
 import numpy as np
 
 from schemas.professional import Evidence, EvidencePack, HardCondition, QueryPlan
 from services.text_embedding import MODEL_DIMENSION, MODEL_VERSION, encode_query
+
+
+_CACHE_LOCK_INSTALL = Lock()
+
+
+def _read_jsonl(path: Path | None) -> list[dict]:
+    """Decode one physical line at a time without two whole-file text copies."""
+    if path is None:
+        return []
+    with path.open('r', encoding='utf-8') as stream:
+        return [json.loads(line) for line in stream if line.strip('\r\n')]
+
+
+def _has_identifier(text, identifier):
+    import re
+    return bool(re.search(r'(?<![A-Za-z0-9_-])'+re.escape(str(identifier))+r'(?![A-Za-z0-9_-])',str(text),re.I))
 
 
 def _tokens(text: str) -> list[str]:
@@ -43,46 +60,74 @@ def _iso(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _nested(value: Any, field: str):
+MISSING_FIELD = object()
+
+
+def _nested(value: Any, field: str, missing=None):
     if isinstance(value, dict) and field in value:
         return value[field]
     current = value
     for part in field.split("."):
         if isinstance(current, dict):
-            current = current.get(part)
+            if part not in current:
+                return missing
+            current = current[part]
         elif isinstance(current, (list, tuple)) and part.isdigit() and int(part) < len(current):
             current = current[int(part)]
         else:
-            return None
+            return missing
     return current
 
 
 def _detect_exact_conflicts(evidence: list[Evidence]) -> list[dict[str, Any]]:
     """Report only comparable, exact numeric facts; similarity scores are not facts."""
+    from decimal import Decimal,localcontext
+    from fractions import Fraction
+    def exact_ratio(facts):
+        ratio=facts.get('exactRatio')
+        if not isinstance(ratio,dict) or not all(isinstance(ratio.get(key),str) and len(ratio[key])<=16384 for key in ('numerator','denominator')):return None
+        try:return Fraction(Decimal(ratio['numerator']))/Fraction(Decimal(ratio['denominator']))
+        except (ArithmeticError,ValueError):return None
     groups: dict[tuple, list[Evidence]] = defaultdict(list)
+    exact_by_item={}
     for item in evidence:
         value = item.facts.get("value")
         subject = item.entityId or item.assetId
-        if (item.evidenceType != "calculation" or not subject or
-                not isinstance(value, (int, float)) or isinstance(value, bool) or
-                not math.isfinite(value)):
+        if item.evidenceType != 'calculation' or not subject:continue
+        ratio=exact_ratio(item.facts)
+        numeric=isinstance(value,(int,float)) and not isinstance(value,bool) and (not isinstance(value,float) or math.isfinite(value))
+        if not numeric and ratio is None:
             continue
+        exact_by_item[id(item)]=ratio
         key = (subject, item.facts.get("operation"), item.facts.get("metric") or item.facts.get("field"),
                json.dumps(item.timeRange, sort_keys=True), json.dumps(item.units, sort_keys=True),
                json.dumps(item.calculationPolicy, sort_keys=True))
         groups[key].append(item)
-    conflicts = []
+    conflicts = [{"kind":"DUPLICATE_SAMPLE_DISAGREEMENT","evidenceId":item.evidenceId,
+                  "entityId":item.entityId,"samples":item.facts.get("conflictingSamples",[])}
+                 for item in evidence if item.facts.get("status")=="EVIDENCE_CONFLICT"]
     for key, items in groups.items():
         if len(items) < 2:
             continue
-        reference = float(items[0].facts["value"])
-        if all(math.isclose(reference, float(item.facts["value"]), rel_tol=1e-6, abs_tol=1e-9)
-               for item in items[1:]):
+        ratios=[exact_by_item[id(item)] for item in items]
+        same=None
+        if all(ratio is not None for ratio in ratios):same=all(value==ratios[0] for value in ratios[1:])
+        if same is None:
+            values=[item.facts['value'] for item in items]
+            if all(isinstance(value,int) for value in values):same=all(value==values[0] for value in values[1:])
+            else:
+                with localcontext() as context:
+                    context.prec=8192
+                    decimals=[Decimal(ratio.numerator)/Decimal(ratio.denominator) if ratio is not None else Decimal(value) if isinstance(value,int) else Decimal(str(value)) for value,ratio in zip(values,ratios)]
+                    reference=decimals[0]
+                    same=all(abs(reference-value)<=max(Decimal('1e-9'),Decimal('1e-6')*max(abs(reference),abs(value))) for value in decimals[1:])
+        if same:
             continue
         conflicts.append({"kind": "EXACT_VALUE_DISAGREEMENT", "entityId": key[0],
                           "operation": key[1], "metricOrField": key[2],
                           "timeRange": items[0].timeRange,
-                          "values": [{"evidenceId": item.evidenceId, "value": item.facts["value"]}
+                          "values": [{"evidenceId": item.evidenceId, "value": item.facts.get("value"),
+                                      'exactValue':item.facts.get('exactValue'),'exactRatio':item.facts.get('exactRatio')}
                                      for item in items]})
         if len(conflicts) >= 20:
             break
@@ -102,6 +147,7 @@ def _convert(value: Any, source_unit: str | None, target_unit: str | None):
     aliases = {"°C": "C", "℃": "C", "摄氏度": "C", "开尔文": "K", "mm²": "mm2", "cm²": "cm2", "m²": "m2",
                "mm³": "mm3", "cm³": "cm3", "m³": "m3"}
     source_unit, target_unit = aliases.get(source_unit, source_unit), aliases.get(target_unit, target_unit)
+    if target_unit and (isinstance(value,bool) or not isinstance(value,(int,float))):raise ValueError('SOURCE_VALUE_NOT_NUMERIC')
     if not target_unit or source_unit == target_unit:
         return value
     if not source_unit:
@@ -116,14 +162,35 @@ def _convert(value: Any, source_unit: str | None, target_unit: str | None):
     return float(value) * source[1] / target[1]
 
 
+def _typed_equal(left,right):
+    if isinstance(left,bool) or isinstance(right,bool):return isinstance(left,bool) and isinstance(right,bool) and left==right
+    if isinstance(left,dict) and isinstance(right,dict):return left.keys()==right.keys() and all(_typed_equal(value,right[key]) for key,value in left.items())
+    if isinstance(left,list) and isinstance(right,list):return len(left)==len(right) and all(_typed_equal(a,b) for a,b in zip(left,right))
+    return left==right
+
+
 def _matches(value: Any, condition: HardCondition, source_unit: str | None = None) -> bool:
+    if value is MISSING_FIELD: return False
+    if condition.op == "is_null": return value is None
+    if condition.op == "not_null": return value is not None
     if value is None:
         return False
+    if condition.value_encoding:
+        from services.exact_structured import numeric_match
+        return bool(numeric_match({'values':{condition.field:value},'units':{condition.field:source_unit}},condition))
     try:
         value = _convert(value, source_unit, condition.unit)
         target = condition.value
-        if condition.op == "eq": return value == target
-        if condition.op == "in": return value in target
+        if isinstance(value,str) and __import__('re').fullmatch(r'\d{4}-\d{2}-\d{2}(?:[T ].+)?',value):
+            def date_value(item):
+                if not isinstance(item,str):
+                    return item
+                return datetime.fromisoformat(item.replace('Z','+00:00')) if len(item)>10 else datetime.fromisoformat(item).date()
+            value = date_value(value)
+            target = [date_value(item) for item in target] if isinstance(target,list) else date_value(target)
+        if condition.op == "eq": return _typed_equal(value,target)
+        if condition.op == "in": return any(_typed_equal(value,item) for item in target)
+        if condition.op == "contains": return isinstance(value, (list, dict)) and target in value
         if condition.op == "gt": return value > target
         if condition.op == "gte": return value >= target
         if condition.op == "lt": return value < target
@@ -150,16 +217,27 @@ def _evidence_id(space: str, asset_id: str | None, locator: dict, facts: dict) -
     return str(uuid.uuid5(uuid.NAMESPACE_URL, json.dumps([space, asset_id, locator, facts], sort_keys=True, ensure_ascii=False, default=str)))
 
 
+def _source_assets(rows: list[dict]) -> list[dict]:
+    sources = {}
+    for row in rows:
+        if row.get("assetId"):
+            sources[row["assetId"]] = {"assetId": row["assetId"], "logicalPath": row.get("logicalPath")}
+        for source in row.get('equivalentSources',[]):
+            sources[source['assetId']]=source
+    return [sources[key] for key in sorted(sources)]
+
+
 def _evidence(*, version: str, index_version: str, space: str, asset_id: str | None,
               locator: dict, facts: dict, score: float | None, score_type: str,
               rank=0, entity=None, time_range=None, units=None, policy=None, flags=None,
-              preview=None, evidence_type="retrieval") -> Evidence:
+              preview=None, evidence_type="retrieval", source_assets=None) -> Evidence:
     return Evidence(
         assetId=asset_id, dataVersion=version, evidenceId=_evidence_id(space, asset_id, locator, facts),
         semanticSpace=space, indexVersion=index_version, locator=locator, entityId=entity,
         timeRange=time_range, rank=rank, rawScore=score, scoreType=score_type, facts=facts,
         units=units or {}, calculationPolicy=policy or {},
-        provenance={"dataVersion": version, "indexVersion": index_version},
+        provenance={"dataVersion": version, "indexVersion": index_version,
+                    "sourceAssets": source_assets or ([{"assetId": asset_id}] if asset_id else [])},
         qualityFlags=sorted(set(flags or [])), preview=preview, evidenceType=evidence_type,
     )
 
@@ -179,6 +257,12 @@ class TextRetriever:
     def search(self, plan: QueryPlan, version: str, index_version: str) -> list[Evidence]:
         ranks: dict[int, float] = defaultdict(float)
         raw: dict[int, dict[str, float]] = defaultdict(dict)
+        if not plan.query_text.strip():
+            documents = (self.dense_meta or self.lexical or {}).get("documents", [])
+            selected = [d for d in documents if not hasattr(self,"allowed_document") or self.allowed_document(d["unit"])]
+            return [_evidence(version=version,index_version=index_version,space="text.hybrid.zh",asset_id=d["unit"]["asset_id"],
+                locator=d["unit"]["locator"],facts={"text":d["text"]},score=None,score_type="metadata_match",
+                preview={"logicalPath":d["unit"]["logical_path"]}) for d in selected[:plan.top_k]]
         if self.lexical:
             tokens = Counter(_tokens(plan.query_text))
             docs = self.lexical["documents"]
@@ -193,14 +277,16 @@ class TextRetriever:
                     doc_id = int(doc_id)
                     denominator = tf + 1.5 * (1 - .75 + .75 * lengths[doc_id] / avgdl)
                     scores[doc_id] += query_tf * idf * tf * 2.5 / denominator
-            candidate_count = min(len(docs), max(plan.top_k * (10 if plan.target_entity else 3), 50 if plan.target_entity else 3))
+            candidate_count = len(docs) if hasattr(self, "allowed_document") else min(len(docs), max(plan.top_k * (10 if plan.target_entity else 3), 50 if plan.target_entity else 3))
             for rank, (doc_id, score) in enumerate(sorted(scores.items(), key=lambda item: item[1], reverse=True)[:candidate_count], 1):
                 ranks[doc_id] += 1 / (60 + rank)
                 raw[doc_id]["bm25"] = score
         if self.dense is not None and self.dense.ntotal:
-            query = (encode_query(plan.query_text) if self.dense_model_version == MODEL_VERSION
+            query = getattr(self,'encoded_query',None)
+            if query is None:
+                query = (encode_query(plan.query_text) if self.dense_model_version == MODEL_VERSION
                      else _hash_vector(plan.query_text, self.dense.d).reshape(1, -1))
-            candidate_count = min(self.dense.ntotal, max(plan.top_k * (10 if plan.target_entity else 3),
+            candidate_count = self.dense.ntotal if hasattr(self, "allowed_document") else min(self.dense.ntotal, max(plan.top_k * (10 if plan.target_entity else 3),
                                                           50 if plan.target_entity else 3))
             scores, ids = self.dense.search(query, candidate_count)
             for rank, (doc_id, score) in enumerate(zip(ids[0], scores[0]), 1):
@@ -212,13 +298,19 @@ class TextRetriever:
         for doc_id, fused in sorted(ranks.items(), key=lambda item: item[1], reverse=True):
             document = documents[doc_id]
             unit = document["unit"]
-            if plan.target_entity and unit.get("entity_id") != plan.target_entity:
+            if hasattr(self, "allowed_document") and not self.allowed_document(unit):
+                continue
+            if plan.target_entity and unit.get("entity_id") != plan.target_entity and not _has_identifier(document["text"], plan.target_entity):
                 continue
             rank = len(result) + 1
-            result.append(_evidence(version=version, index_version=index_version, space="text.hybrid.zh", asset_id=unit["asset_id"],
+            item=_evidence(version=version, index_version=index_version, space="text.hybrid.zh", asset_id=unit["asset_id"],
                                     locator=unit["locator"], facts={"text": document["text"], "channelScores": raw[doc_id]},
                                     score=fused, score_type="weighted_rrf", rank=rank, entity=unit.get("entity_id"), units=unit.get("units"),
-                                    flags=unit.get("quality_flags"), preview={"logicalPath": unit["logical_path"]}))
+                                    flags=unit.get("quality_flags"), preview={"logicalPath": unit["logical_path"]})
+            if unit.get('metadata',{}).get('sourceRecord'):
+                item.provenance['sourceRecord']=unit['metadata']['sourceRecord']
+            if unit.get('metadata',{}).get('tableId'):item.provenance['tableId']=unit['metadata']['tableId']
+            result.append(item)
             if len(result) >= plan.top_k:
                 break
         return result
@@ -226,7 +318,7 @@ class TextRetriever:
 
 class StructuredRetriever:
     def __init__(self, records_path: Path | None, field_index_path: Path | None = None):
-        self.rows = [json.loads(line) for line in records_path.read_text(encoding="utf-8").splitlines() if line] if records_path else []
+        self.rows = _read_jsonl(records_path)
         self.field_index = None
         if field_index_path is not None:
             with gzip.open(field_index_path, "rt", encoding="utf-8") as stream:
@@ -243,8 +335,10 @@ class StructuredRetriever:
         return sorted(fields - self.known_fields)
 
     def _indexed_ids(self, condition: HardCondition) -> set[int] | None:
-        if not self.field_index or condition.unit:
+        if not self.field_index or condition.unit or condition.value_encoding:
             return None
+        operands=condition.value if condition.op in {'in','between'} else [condition.value]
+        if any(isinstance(value,int) and not isinstance(value,bool) and abs(value)>9007199254740991 for value in operands):return None
         categorical = self.field_index["categorical"].get(condition.field, {})
         pairs = self.field_index["numeric"].get(condition.field, [])
         if condition.op == "in" and not isinstance(condition.value, (list, tuple)):
@@ -283,63 +377,131 @@ class StructuredRetriever:
 
     def search(self, plan: QueryPlan, version: str, index_version: str) -> list[Evidence]:
         candidate_ids: set[int] | None = None
+        from services.exact_structured import numeric_match, source_decimal, numeric_source, aggregate as exact_aggregate
         for condition in plan.hard_conditions:
-            indexed = self._indexed_ids(condition)
+            # Legacy float postings are not exact enough to exclude native
+            # decimal source records at a numerical boundary.
+            indexed = None if any(row.get('numberLexemes') for row in self.rows) else self._indexed_ids(condition)
             if indexed is not None:
                 candidate_ids = indexed if candidate_ids is None else candidate_ids & indexed
+        # A missing formula cache must not disappear through an index lookup.
+        # First apply only predicates whose source cells are eligible; then
+        # reject the unresolved formula predicate within that remaining scope.
+        if any(row.get('calculationEligibility',{}).get(condition.field) is False
+               for row in self.rows for condition in plan.hard_conditions):
+            candidate_ids=None
         matches = []
         for row_id in sorted(candidate_ids) if candidate_ids is not None else range(len(self.rows)):
             row = self.rows[row_id]
+            if plan.query_text and plan.query_text.lower() not in json.dumps(row["values"], ensure_ascii=False).lower():
+                continue
             if plan.target_entity and plan.target_entity not in json.dumps(row["values"], ensure_ascii=False):
                 continue
-            if all(_matches(_nested(row["values"], condition.field), condition, row.get("units", {}).get(condition.field)) for condition in plan.hard_conditions):
+            eligible=[condition for condition in plan.hard_conditions if row.get('calculationEligibility',{}).get(condition.field) is not False]
+            def matches_condition(condition):
+                try:exact=numeric_match(row,condition)
+                except ValueError as error:
+                    from fastapi import HTTPException
+                    raise HTTPException(status_code=422,detail={'code':str(error),'reason':'源数值或单位超出已验证的比较范围'}) from error
+                return exact if exact is not None else _matches(_nested(row['values'],condition.field,MISSING_FIELD),condition,row.get('units',{}).get(condition.field))
+            if not all(matches_condition(condition) for condition in eligible):
+                continue
+            unresolved=[condition.field for condition in plan.hard_conditions if row.get('calculationEligibility',{}).get(condition.field) is False]
+            if unresolved:
+                from fastapi import HTTPException
+                raise HTTPException(status_code=422,detail={'code':'SOURCE_CELL_NOT_CALCULABLE','fields':unresolved,'locator':row['locator'],
+                    'reason':'源单元格尚不可计算（公式缓存、错误值或数值精度限制），不能据此执行筛选'})
+            if len(eligible)==len(plan.hard_conditions):
                 matches.append(row)
+        required=([plan.sort_field] if plan.operation=='sort' else
+                  [plan.aggregate_field or (plan.hard_conditions[-1].field if plan.hard_conditions else None)] if plan.operation in {'sum','min','max','average'} else [])
+        for row in matches:
+            unresolved=[field for field in required if row.get('calculationEligibility',{}).get(field) is False]
+            if unresolved:
+                from fastapi import HTTPException
+                raise HTTPException(status_code=422,detail={'code':'SOURCE_CELL_NOT_CALCULABLE','fields':unresolved,'locator':row['locator'],
+                    'reason':'源单元格尚不可计算（公式缓存、错误值或数值精度限制），不能据此计算或排序'})
         if plan.operation == "sort" and plan.sort_field:
+            if getattr(self,'sort_dynamic_unit',False):
+                from fastapi import HTTPException
+                units={row.get('units',{}).get(plan.sort_field) for row in matches if _nested(row['values'],plan.sort_field) is not None}
+                measurement=getattr(self,'sort_measurement_field',None)
+                if len(units)>1 or (measurement and len({row['values'].get(measurement) for row in matches})>1):
+                    raise HTTPException(status_code=422,detail='排序包含不同记录单位或测量项目，请先限定同一单位与项目')
             present = [row for row in matches if _nested(row["values"], plan.sort_field) is not None]
             missing = [row for row in matches if _nested(row["values"], plan.sort_field) is None]
             def sort_key(row):
                 value = _nested(row["values"], plan.sort_field)
-                return (0, float(value)) if isinstance(value, (int, float)) and not isinstance(value, bool) else (1, str(value).lower())
-            matches = sorted(present, key=sort_key, reverse=plan.sort_descending) + missing
+                number,_=source_decimal(row,plan.sort_field)
+                return (0,number) if number is not None else (1,str(value).lower())
+            try:matches = sorted(present, key=sort_key, reverse=plan.sort_descending) + missing
+            except ValueError as error:
+                from fastapi import HTTPException
+                raise HTTPException(status_code=422,detail={'code':str(error),'reason':'源数值超出已验证的排序范围'}) from error
         if plan.operation in {"count", "sum", "min", "max", "average"}:
             field = plan.aggregate_field or (plan.hard_conditions[-1].field if plan.hard_conditions else None)
-            values, mapping_required = [], False
-            for row in matches:
-                value = _nested(row["values"], field) if field else None
-                if not isinstance(value, (int, float)) or isinstance(value, bool):
-                    continue
-                try:
-                    values.append(float(_convert(value, row.get("units", {}).get(field), plan.unit)))
-                except (TypeError, ValueError):
-                    mapping_required = True
-            if mapping_required and plan.operation != "count":
+            aggregate_unit=plan.unit
+            if plan.operation!='count':
+                from fastapi import HTTPException
+                if getattr(self,'aggregate_unit_unresolved',False):
+                    raise HTTPException(status_code=422,detail='统计字段单位规则尚未可靠映射，不能执行该计算')
+                source_units={row.get('units',{}).get(field) for row in matches
+                    if numeric_source(row,field)[2]}
+                measurement=getattr(self,'aggregate_measurement_field',None)
+                if measurement and len({row['values'].get(measurement) for row in matches})>1:
+                    raise HTTPException(status_code=422,detail=f'统计包含不同{measurement}，请先限定同一个测量项目')
+                if len(source_units)>1:
+                    raise HTTPException(status_code=422,detail='统计字段包含不同或未知单位，请先按记录单位筛选')
+                aggregate_unit=aggregate_unit or next(iter(source_units),None)
+            try:
+                exact=exact_aggregate(matches,field,plan.operation,aggregate_unit)
+            except ValueError as error:
+                if str(error) not in {'UNIT_UNKNOWN','UNIT_INCOMPATIBLE'}:
+                    from fastapi import HTTPException
+                    raise HTTPException(status_code=422,detail={'code':str(error),'reason':'源数值超出已验证的计算精度或输出范围'}) from error
                 facts = {"operation": plan.operation, "field": field, "value": None,
                          "matchedRowCount": len(matches), "status": "NEEDS_UNIT_MAPPING"}
                 return [_evidence(version=version, index_version=index_version, space="structured.typed", asset_id=None,
                                   locator={}, facts=facts, score=None, score_type="exact", evidence_type="calculation",
-                                  flags=["UNIT_MAPPING_REQUIRED"])]
-            aggregate = {"sum": np.sum, "min": np.min, "max": np.max, "average": np.mean}
-            result = len(matches) if plan.operation == "count" else (aggregate[plan.operation](values).item() if values else None)
-            facts = {"operation": plan.operation, "field": field, "value": result, "matchedRowCount": len(matches), "completeFilteredSet": True}
-            return [_evidence(version=version, index_version=index_version, space="structured.typed", asset_id=None, locator={}, facts=facts,
-                              score=None, score_type="exact", evidence_type="calculation", units={"value": plan.unit} if plan.unit else {})]
+                                  flags=["UNIT_MAPPING_REQUIRED"], source_assets=_source_assets(matches))]
+            facts = {"operation": plan.operation, "field": field, **exact, "matchedRowCount": len(matches), "completeFilteredSet": True}
+            item = _evidence(version=version, index_version=index_version, space="structured.typed", asset_id=None, locator={}, facts=facts,
+                              score=None, score_type="exact", evidence_type="calculation", units={"value": aggregate_unit} if aggregate_unit else {},
+                              flags=['SOURCE_NUMBER_LEXEMES_UNAVAILABLE'] if exact['legacyDecodedNumberCount'] and plan.operation!='count' else [],
+                              source_assets=_source_assets(matches))
+            from services.structured_calculation_inputs import receipt
+            item.provenance['structuredCalculationInputs'] = receipt(matches, plan, field, len(self.rows))
+            item.provenance['nullPredicatePolicy'] = 'Explicit null only; empty strings are present non-null values; absent fields match neither null predicate.'
+            return [item]
         result = []
         for rank, row in enumerate(matches[:plan.top_k], 1):
-            result.append(_evidence(version=version, index_version=index_version, space="structured.typed", asset_id=row["assetId"],
+            item=_evidence(version=version, index_version=index_version, space="structured.typed", asset_id=row["assetId"],
                                     locator=row["locator"], facts=row["values"], score=1.0, score_type="hard_conditions", rank=rank,
-                                    units=row.get("units"), flags=row.get("qualityFlags"), preview={"logicalPath": row["logicalPath"]}, evidence_type="constraint"))
+                                    units=row.get("units"), flags=row.get("qualityFlags"), preview={"logicalPath": row["logicalPath"]}, evidence_type="constraint")
+            item.provenance['sourceRecord']={key:row[key] for key in
+                ('sourceValues','numberLexemes','formulas','calculationEligibility','valueTransforms') if key in row}
+            item.provenance['tableId']=row['unitId']
+            item.provenance['nullPredicatePolicy'] = 'Explicit null only; empty strings are present non-null values; absent fields match neither null predicate.'
+            result.append(item)
         return result
 
 
 def _deduplicate(rows: list[dict]) -> list[dict]:
     selected = {}
     for row in rows:
-        # A generated fallback entity is scoped to its source asset.  Even for
-        # explicitly named entities, retaining the asset in the key prevents
-        # one file from silently overwriting an observation from another file.
-        key = (row.get("assetId"), row["entity"], row["metric"], row["normalizedTime"])
-        if key not in selected or (row.get("rawRow") or 0) >= (selected[key].get("rawRow") or 0):
-            selected[key] = row
+        # Explicit series + metric + instant identifies a sample across copies.
+        # A disagreement remains visible and blocks numerical calculations.
+        key = (row["entity"], row["metric"], _iso(row["normalizedTime"]))
+        source={"assetId":row.get('assetId'),"logicalPath":row.get('logicalPath'),"locator":row.get('locator',{})}
+        if key not in selected:
+            selected[key]={**row,'equivalentSources':[source]}
+            continue
+        previous=selected[key]
+        previous['equivalentSources'].append(source)
+        equal=previous.get('unit')==row.get('unit') and math.isclose(float(previous['value']),float(row['value']),rel_tol=1e-9,abs_tol=1e-12)
+        if not equal:
+            previous['qualityFlags']=sorted(set(previous.get('qualityFlags',[]))|{'DUPLICATE_SAMPLE_CONFLICT'})
+            previous.setdefault('conflictingValues',[{'value':previous['value'],'unit':previous.get('unit'),'source':previous['equivalentSources'][0]}]).append({'value':row['value'],'unit':row.get('unit'),'source':source})
     return sorted(selected.values(), key=lambda row: _iso(row["normalizedTime"]))
 
 
@@ -426,7 +588,7 @@ def _time_weighted_average(rows: list[dict]) -> tuple[float | None, dict, list[s
 
 class TimeSeriesRetriever:
     def __init__(self, facts_path: Path | None, segments_path: Path | None, feature_path: Path | None = None):
-        self.facts = [json.loads(line) for line in facts_path.read_text(encoding="utf-8").splitlines() if line] if facts_path else []
+        self.facts = _read_jsonl(facts_path)
         self.segments = json.loads(segments_path.read_text(encoding="utf-8")).get("segments", []) if segments_path else []
         self.feature_index = faiss.read_index(str(feature_path)) if feature_path else None
         self.feature_partitions: dict[tuple[str, ...], tuple[Any, list[int]]] = {}
@@ -442,8 +604,9 @@ class TimeSeriesRetriever:
                 partition.add(np.ascontiguousarray(vectors[source_ids]))
                 self.feature_partitions[key] = (partition, source_ids)
 
-    @staticmethod
-    def _segment_allowed(segment: dict, plan: QueryPlan) -> bool:
+    def _segment_allowed(self, segment: dict, plan: QueryPlan) -> bool:
+        if hasattr(self, "allowed_segment") and not self.allowed_segment(segment):
+            return False
         if plan.metric and segment["metric"] != plan.metric:
             return False
         if plan.target_entity and segment["entity"] != plan.target_entity:
@@ -463,6 +626,11 @@ class TimeSeriesRetriever:
                 (not plan.target_entity or row["entity"] == plan.target_entity) and
                 _iso(row["normalizedTime"]) >= start and
                 (_iso(row["normalizedTime"]) <= end if inclusive_end else _iso(row["normalizedTime"]) < end)]
+        if any(row.get('calculationEligible') is False for row in rows):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=422,detail={'code':'SOURCE_CELL_NOT_CALCULABLE','reason':'窗口包含不可计算的源样本（公式缓存、错误值或数值表示范围限制），不能执行时序计算'})
+        rows = [row for row in rows if all(_matches(_nested(row.get("recordValues", {}), condition.field), condition,
+                row.get("unit") if condition.field == row.get("metric") else None) for condition in plan.hard_conditions)]
         source_units = {row.get("unit") for row in rows}
         if not plan.unit and (None in source_units or len(source_units) > 1):
             return [], ["UNIT_MAPPING_REQUIRED"]
@@ -480,6 +648,25 @@ class TimeSeriesRetriever:
 
     def search(self, plan: QueryPlan, version: str, index_version: str) -> list[Evidence]:
         if plan.operation == "search":
+            if plan.hard_conditions:
+                rows = [row for row in self.facts if (not plan.metric or row["metric"]==plan.metric)
+                    and (not plan.target_entity or row["entity"]==plan.target_entity)
+                    and all(_matches(_nested(row.get("recordValues",{}),c.field),c,
+                        row.get("unit") if c.field==row.get("metric") else None) for c in plan.hard_conditions)]
+                if plan.time_range:
+                    rows = [row for row in rows if _iso(row["normalizedTime"]) >= _iso(plan.time_range.start)
+                        and (_iso(row["normalizedTime"])<=_iso(plan.time_range.end) if plan.time_range.boundary=="[start,end]"
+                             else _iso(row["normalizedTime"])<_iso(plan.time_range.end))]
+                from services.exact_structured import numeric_source
+                evidence=[]
+                for row in rows[:plan.top_k]:
+                    _,number,_=numeric_source({'values':row.get('recordValues',{}),'numberLexemes':row.get('numberLexemes',{}),'locator':row.get('locator',{})},row['metric'])
+                    facts={"metric":row["metric"],"value":row["value"],"timestamp":row["normalizedTime"],
+                        'calculationEligible':row.get('calculationEligible',True),'valueStatus':'FINITE_DECODED_VALUE' if row.get('calculationEligible',True) else 'SOURCE_NOT_CALCULABLE'}
+                    if number:facts['numberSourceExpression']=number['lexeme']
+                    evidence.append(_evidence(version=version,index_version=index_version,space="timeseries.facts",asset_id=row["assetId"],
+                        locator=row.get("locator",{}),facts=facts,score=None,score_type="metadata_match",entity=row["entity"],units={"value":row.get("unit")},flags=row.get('qualityFlags',[])))
+                return evidence
             selected = [segment for segment in self.segments if self._segment_allowed(segment, plan)]
             return [_evidence(version=version, index_version=index_version, space="timeseries.shape", asset_id=segment["assetId"], locator={},
                               facts={"metric": segment["metric"], "sampleCount": len(segment["values"]), "candidateOnly": True},
@@ -490,13 +677,11 @@ class TimeSeriesRetriever:
             if self.feature_index is None or not self.feature_index.ntotal:
                 return []
             query = _segment_features(plan.query_series).reshape(1, -1)
-            partition_key = (("metric_entity", plan.metric, plan.target_entity) if plan.metric and plan.target_entity
-                             else ("metric", plan.metric) if plan.metric
-                             else ("entity", plan.target_entity) if plan.target_entity else None)
-            selected_index, source_ids = ((self.feature_index, list(range(self.feature_index.ntotal)))
-                                          if partition_key is None else self.feature_partitions.get(partition_key, (None, [])))
-            if selected_index is None or not selected_index.ntotal:
+            source_ids=[index for index,segment in enumerate(self.segments) if self._segment_allowed(segment,plan)]
+            if not source_ids:
                 return []
+            selected_index=faiss.IndexFlatIP(self.feature_index.d)
+            selected_index.add(np.ascontiguousarray(np.asarray([self.feature_index.reconstruct(index) for index in source_ids],dtype='float32')))
             candidate_limit = min(selected_index.ntotal, max(plan.top_k * 10, 50), 200)
             _, ids = selected_index.search(query, candidate_limit)
             recalled = [self.segments[source_ids[int(index)]] for index in ids[0] if index >= 0 and
@@ -504,17 +689,23 @@ class TimeSeriesRetriever:
             candidates = sorted(((_dtw(plan.query_series, segment["values"]), segment) for segment in recalled), key=lambda item: item[0])[:plan.top_k]
             return [_evidence(version=version, index_version=index_version, space="timeseries.shape", asset_id=segment["assetId"], locator={},
                               facts={"metric": segment["metric"], "dtwDistance": distance, "amplitudeNormalization": "zscore", "timeWarping": True,
-                                     "candidateRecallAlgorithm": "faiss-shape12-ip-prefiltered" if partition_key else "faiss-shape12-ip",
-                                     "candidateCount": len(recalled)},
+                                     "candidateRecallAlgorithm": "faiss-shape12-ip-after-hard-filter",
+                                     "candidateCount": len(recalled),"eligibleWindowCount":len(source_ids),"candidateOnly":True},
                               score=distance, score_type="dtw_distance_lower_is_better", rank=rank, entity=segment["entity"],
                               time_range={"start": segment["timeStart"], "end": segment["timeEnd"]}, units={"value": segment.get("unit")})
                     for rank, (distance, segment) in enumerate(candidates, 1)]
         rows, range_flags = self._range(plan)
         values = np.asarray([row["value"] for row in rows], dtype=float)
-        series_keys = {(row.get("assetId"), row["entity"]) for row in rows}
+        series_keys = {row["entity"] for row in rows}
         asset_ids = {row.get("assetId") for row in rows if row.get("assetId")}
+        source_assets = _source_assets(rows)
         flags = sorted({flag for row in rows for flag in row.get("qualityFlags", [])} | set(range_flags))
-        policy = rows[0].get("calculationPolicy", {}) if rows else {}
+        # Source rows store the default series policy. The current calculation
+        # has already filtered using the validated query's endpoint semantics.
+        # Copy the source policy so this view never rewrites cached source rows.
+        policy = dict(rows[0].get("calculationPolicy", {}) if rows else {})
+        if plan.time_range:
+            policy['intervalBoundary'] = plan.time_range.boundary
         facts: dict[str, Any] = {"operation": plan.operation, "metric": plan.metric, "sampleCount": len(rows),
                                  "sourceSeriesCount": len(series_keys), "completeAuthorizedRange": True}
         single_series_operations = {"time_weighted_average", "duration_above", "compare_periods",
@@ -524,8 +715,13 @@ class TimeSeriesRetriever:
             flags.append("MULTIPLE_SERIES_REQUIRE_EXPLICIT_TARGET")
         elif "SOURCE_TIMEZONE_UNSPECIFIED" in flags:
             facts.update({"value": None, "status": "NEEDS_TIMEZONE_MAPPING", "completeAuthorizedRange": False})
+        elif 'DUPLICATE_SAMPLE_CONFLICT' in flags:
+            facts.update(value=None,status='EVIDENCE_CONFLICT',completeAuthorizedRange=False,
+                conflictingSamples=[{'timestamp':row['normalizedTime'],'values':row['conflictingValues']} for row in rows if row.get('conflictingValues')][:20])
         elif range_flags:
             facts.update({"value": None, "status": "NEEDS_UNIT_MAPPING", "completeAuthorizedRange": False})
+        elif not len(values) and plan.operation == "count":
+            facts["value"] = 0
         elif not len(values):
             facts.update({"value": None, "status": "NO_DATA"})
         elif plan.operation == "count":
@@ -550,9 +746,11 @@ class TimeSeriesRetriever:
             policy = {**policy, **estimate_policy}; flags.extend(estimate_flags)
         elif plan.operation == "compare_periods":
             second, second_flags = self._range(plan, plan.compare_time_range)
+            source_assets = _source_assets(rows + second)
+            asset_ids.update(row["assetId"] for row in second if row.get("assetId"))
             flags.extend(second_flags)
             flags.extend(flag for row in second for flag in row.get("qualityFlags", []))
-            combined_series = series_keys | {(row.get("assetId"), row["entity"]) for row in second}
+            combined_series = series_keys | {row["entity"] for row in second}
             facts["sourceSeriesCount"] = len(combined_series)
             if len(combined_series) > 1:
                 facts.update({"value": None, "difference": None, "status": "TARGET_ENTITY_REQUIRED",
@@ -561,6 +759,9 @@ class TimeSeriesRetriever:
             elif "SOURCE_TIMEZONE_UNSPECIFIED" in flags:
                 facts.update({"value": None, "difference": None, "status": "NEEDS_TIMEZONE_MAPPING",
                               "completeAuthorizedRange": False})
+            elif 'DUPLICATE_SAMPLE_CONFLICT' in flags:
+                facts.update(value=None,difference=None,status='EVIDENCE_CONFLICT',completeAuthorizedRange=False,
+                    conflictingSamples=[{'timestamp':row['normalizedTime'],'values':row['conflictingValues']} for row in rows+second if row.get('conflictingValues')][:20])
             elif second_flags:
                 facts.update({"value": None, "difference": None, "status": "NEEDS_UNIT_MAPPING",
                               "completeAuthorizedRange": False})
@@ -584,7 +785,7 @@ class TimeSeriesRetriever:
                           locator={}, facts=facts, score=None, score_type="exact_programmatic", entity=plan.target_entity,
                           time_range=plan.time_range.model_dump() if plan.time_range else None,
                           units={"value": plan.unit or (rows[0].get("unit") if rows else None)}, policy=policy,
-                          flags=flags, evidence_type="calculation")]
+                          flags=flags, evidence_type="calculation", source_assets=source_assets)]
 
 
 class GeometryRetriever:
@@ -600,34 +801,16 @@ class GeometryRetriever:
         return unit["payload"].get("featureSpaceId") or ("cad-aabb-brep-v1" if unit.get("parser_name") == "step-opencascade" else "mesh-principal-moments-v1")
 
     def search(self, plan: QueryPlan, version: str, index_version: str) -> list[Evidence]:
-        query = next((unit for unit in self.units if unit["asset_id"] == plan.query_asset_id), None) if plan.query_asset_id else None
+        query = next((unit for unit in getattr(self,'query_units',self.units) if unit["asset_id"] == plan.query_asset_id), None) if plan.query_asset_id else None
         candidate_units = self.units
-        recalled_scores: dict[str, float] = {}
         if plan.operation == "similar_shape":
-            shape_index, shape_items = self.shape_index, self.shape_items
-            if query and self.partitions:
-                shape_index, shape_items = self.partitions.get(self.feature_space(query), (None, []))
-            if not query or shape_index is None or not shape_index.ntotal or not shape_items:
+            if not query or not query['payload'].get('featureVector'):
                 return []
-            vector = np.asarray(query["payload"].get("featureVector", []), dtype="float32")
-            if not len(vector):
-                return []
-            padded = np.zeros(shape_index.d, dtype="float32")
-            padded[:min(len(vector), shape_index.d)] = vector[:shape_index.d]
-            padded /= max(float(np.linalg.norm(padded)), 1e-12)
-            candidate_limit = min(shape_index.ntotal, max(plan.top_k * 10, 50), 200)
-            scores, ids = shape_index.search(padded.reshape(1, -1), candidate_limit)
-            candidate_units = []
-            for score, row_id in zip(scores[0], ids[0]):
-                if row_id < 0:
-                    continue
-                unit = shape_items[int(row_id)]
-                if self.feature_space(unit) != self.feature_space(query):
-                    continue
-                candidate_units.append(unit)
-                recalled_scores[unit["unit_id"]] = float(score)
+            candidate_units=[unit for unit in self.units if self.feature_space(unit)==self.feature_space(query)]
         candidates = []
         for unit in candidate_units:
+            if hasattr(self, "allowed_geometry") and not self.allowed_geometry(unit):
+                continue
             payload, units = unit["payload"], unit.get("units", {})
             if plan.target_entity and unit.get("entity_id") != plan.target_entity:
                 continue
@@ -636,7 +819,9 @@ class GeometryRetriever:
             if not all(_matches(_nested(payload, condition.field), condition, _geometry_unit(units, condition.field)) for condition in plan.hard_conditions):
                 continue
             score = 1.0
-            facts = {"conditionsSatisfied": True, "algorithm": "geometry-properties-1.0", "tolerance": plan.tolerance}
+            facts = {"conditionsSatisfied": True, "algorithm": "geometry-properties-1.0", "tolerance": plan.tolerance,
+                     "attributes": {key: value for key, value in payload.items() if key != "featureVector"},
+                     "engineeringReplacementProven": False}
             if plan.operation == "similar_shape":
                 if not query or not payload.get("featureVector") or not query["payload"].get("featureVector"):
                     continue
@@ -646,8 +831,8 @@ class GeometryRetriever:
                 facts.update({"shapeSimilarity": score, "shapeMatch": score >= 1.0 - plan.tolerance,
                               "scaleInvariant": True, "requestedScaleInvariant": plan.scale_invariant,
                               "rotationInvariant": bool(payload.get("shapeFeatureRotationInvariant")),
-                              "candidateRecallAlgorithm": "faiss-geometry-feature-ip",
-                              "candidateRecallScore": recalled_scores.get(unit["unit_id"]),
+                              "candidateRecallAlgorithm": "geometry-feature-cosine-after-hard-filter",
+                              "candidateRecallScore": score,
                               "candidateLimit": len(candidate_units),
                               "dimensionMatch": None if plan.scale_invariant else self._dimension_match(
                                   query["payload"], payload, query.get("units", {}), units, plan.tolerance)})
@@ -690,6 +875,8 @@ class ProfessionalRetrieverSuite:
         self.files = files
         self.visual_search = visual_search
         self.cache = cache if cache is not None else {}
+        with _CACHE_LOCK_INSTALL:
+            self._prepare_guard = self.cache.setdefault('_prepare_guard', RLock())
 
     def _path(self, space: str, suffix: str) -> Path | None:
         registration = self.registrations.get(space)
@@ -697,9 +884,12 @@ class ProfessionalRetrieverSuite:
         return next((self.files.get(item["path"]) for item in registration.get("files", []) if item["path"].endswith(suffix)), None)
 
     def _cached(self, key: str, factory: Callable[[], Any]) -> Any:
-        if key not in self.cache:
-            self.cache[key] = factory()
-        return self.cache[key]
+        # All suites for one frozen index share the same guard. Concurrent
+        # first queries must not decode the same large index twice.
+        with self._prepare_guard:
+            if key not in self.cache:
+                self.cache[key] = factory()
+            return self.cache[key]
 
     def _prepare(self, name: str):
         if name == "text":
@@ -740,6 +930,32 @@ class ProfessionalRetrieverSuite:
         return self.cache
 
     def _run(self, name: str, plan: QueryPlan, version: str, index_version: str) -> tuple[list[Evidence], list[str]]:
+        if self._path("snapshot.facets", "facets.json"):
+            from services.snapshot_scope import SnapshotScope
+            scope = SnapshotScope.from_suite(self)
+            if name == 'timeseries' and plan.operation == 'count':
+                from services.timeseries_count import execute
+                hits=execute(self,scope,plan,version,index_version)
+                for item in hits:item.provenance['validatedQuery']=plan.model_dump()
+                return [scope.enrich(item,plan) for item in hits],[]
+            if name == 'timeseries' and plan.operation in {'time_weighted_average','duration_above'}:
+                from services.interval_statistics import execute
+                hits=execute(self,scope,plan,version,index_version)
+                for item in hits:item.provenance['validatedQuery']=plan.model_dump()
+                return [scope.enrich(item,plan) for item in hits],[]
+            retriever = self._prepare(name)
+            if retriever:
+                retriever = scope.scoped_retriever(retriever, name, plan)
+                hits = retriever.search(plan, version, index_version)
+                for item in hits:
+                    if item.evidenceType == "calculation":
+                        item.provenance["validatedQuery"] = plan.model_dump()
+                    if item.evidenceType == "calculation" and plan.table_id:
+                        table = scope.tables[plan.table_id]
+                        item.assetId = table["assetId"]
+                        item.locator = {**table["locator"],"tableId":plan.table_id,"filteredRowCount":item.facts.get("matchedRowCount")}
+                        item.provenance["sourceAssets"] = [{"assetId":table["assetId"],"logicalPath":table["logicalPath"]}]
+                return [scope.enrich(e,plan) for e in hits], []
         if name == "text":
             retriever = self._prepare("text")
             return ((retriever.search(plan, version, index_version), [])
@@ -777,14 +993,21 @@ class ProfessionalRetrieverSuite:
                 result.append(_evidence(version=version, index_version=index_version, space="visual.clip-cn-v1",
                                         asset_id=str(raw_asset_id) if raw_asset_id is not None else None,
                                         locator=item.get("locator", {}),
-                                        facts={"captions": item.get("captions") or item.get("texts") or []},
+                                        facts={"visualOnly": True},
                                         score=item.get("score"), score_type="clip_cosine", rank=rank,
                                         preview=item.get("preview") or {"logicalPath": item.get("logicalPath")},
                                         flags=item.get("qualityFlags")))
+            if self._path("snapshot.facets", "facets.json"):
+                from services.snapshot_scope import SnapshotScope
+                scope = SnapshotScope.from_suite(self)
+                result = [scope.enrich(e,plan) for e in result if scope.allowed_asset(e.assetId, plan)]
             return result, []
         return [], [f"UNSUPPORTED_RETRIEVER:{name}"]
 
     def execute(self, plan: QueryPlan, version: str, index_version: str) -> EvidencePack:
+        if self._path("snapshot.facets", "facets.json") or plan.content_type or plan.formats or plan.asset_ids or plan.table_id or plan.object_conditions:
+            from services.snapshot_scope import SnapshotScope
+            SnapshotScope.from_suite(self).validate(plan)
         started = time.perf_counter(); evidence, limitations, timings = [], [], {}
         channel_evidence: dict[str, list[Evidence]] = {}
         ready_channels = []
@@ -805,7 +1028,7 @@ class ProfessionalRetrieverSuite:
                     limitations.append(f"{code}:{name}")
                     channel_evidence[name] = []
                     continue
-                relations = [json.loads(line) for line in relation_path.read_text(encoding="utf-8").splitlines() if line]
+                relations = _read_jsonl(relation_path)
                 source_entities = {item.entityId for source in dependencies for item in channel_evidence[source] if item.entityId}
                 relation_rows = [row for row in relations if row.get("sourceEntityId") in source_entities]
                 targets = sorted({row["targetEntityId"] for row in relation_rows})

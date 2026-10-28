@@ -30,19 +30,21 @@ public class MmDatasetVersionService {
     private final MmIndexOutboxService indexOutboxService;
     private final JdbcTemplate jdbc;
     private final FileService fileService;
+    private final DatasetAccessService access;
 
     public MmDatasetVersionService(MmDatasetService mmDatasetService,
                                    MmDatasetVersionMapper mmDatasetVersionMapper,
                                    ArtifactCommitService artifactCommitService,
                                    MmIndexOutboxService indexOutboxService,
                                    JdbcTemplate jdbc,
-                                   FileService fileService) {
+                                   FileService fileService, DatasetAccessService access) {
         this.mmDatasetService = mmDatasetService;
         this.mmDatasetVersionMapper = mmDatasetVersionMapper;
         this.artifactCommitService = artifactCommitService;
         this.indexOutboxService = indexOutboxService;
         this.jdbc = jdbc;
         this.fileService = fileService;
+        this.access=access;
     }
 
     @Transactional
@@ -76,6 +78,11 @@ public class MmDatasetVersionService {
 
     @Transactional
     public MmDatasetVersionResp publishVersion(UUID datasetId, UUID versionId) {
+        return publishVersion(datasetId,versionId,true);
+    }
+
+    @Transactional
+    public MmDatasetVersionResp publishVersion(UUID datasetId, UUID versionId,boolean activateOnReady) {
         MmDataset dataset = mmDatasetService.getDatasetOrNotFound(datasetId);
         MmDatasetVersion version = getVersionOrNotFound(versionId);
         if (!datasetId.equals(version.getDatasetId())) {
@@ -85,6 +92,13 @@ public class MmDatasetVersionService {
         String publishComment = version.getComment() == null || version.getComment().isBlank()
                 ? "发布数据版本 " + version.getVersionName() : version.getComment();
         verifyRawSnapshotReady(dataset.getRawRepoId(), version.getRawCommitId());
+        // Keep the commit-first lock order used by upload verification, then
+        // freeze the activation policy before the durable automatic task exists.
+        jdbc.queryForObject("SELECT version_id FROM mm_dataset_version WHERE version_id=? AND dataset_id=? FOR UPDATE",UUID.class,versionId,datasetId);
+        version=getVersionOrNotFound(versionId);
+        if(version.getMeta()!=null&&!version.getMeta().isObject())throw ExceptionUtils.conflict("版本配置必须为 JSON 对象");
+        var metadata=(com.fasterxml.jackson.databind.node.ObjectNode)(version.getMeta()==null?JsonbTypeHandler.toJsonNode(Map.of()):version.getMeta().deepCopy());
+        metadata.put("activateOnReady",activateOnReady);version.setMeta(metadata);
         artifactCommitService.publishCommit(dataset.getRawRepoId(), version.getRawCommitId(), publishComment);
         version.setVersionStatus("RAW_READY");
         version.setPublishedAt(OffsetDateTime.now());
@@ -115,6 +129,7 @@ public class MmDatasetVersionService {
         }
         for (Map<String, Object> file : files) {
             String path = String.valueOf(file.get("logical_path"));
+            if(com.fwdrobo.sirius.util.DataSpaceBusinessFilePolicy.isDescription(path))throw ExceptionUtils.conflict("说明文件不属于业务资产，请在发布前从草稿移除："+path);
             if (!"READY".equals(file.get("upload_state"))) {
                 throw ExceptionUtils.conflict("文件尚未完成上传与校验: " + path);
             }
@@ -143,6 +158,7 @@ public class MmDatasetVersionService {
     }
 
     public MmDatasetVersionResp getById(UUID datasetId, UUID versionId) {
+        access.requireVersionRead(datasetId,versionId,null);
         MmDatasetVersion version = getVersionOrNotFound(versionId);
         if (!datasetId.equals(version.getDatasetId())) {
             throw ExceptionUtils.badRequest("dataset 与 version 不匹配");
@@ -151,13 +167,16 @@ public class MmDatasetVersionService {
     }
 
     public PageRes<MmDatasetVersionResp> listByDataset(UUID datasetId, Integer page, Integer size) {
+        List<UUID> allowed=access.readableVersionIds(datasetId);
         int pageOrDefault = page == null ? 1 : page;
         int sizeOrDefault = size == null ? 20 : size;
+        if (pageOrDefault<1 || sizeOrDefault<1 || sizeOrDefault>1000) throw ExceptionUtils.badRequest("分页范围无效");
         int offset = (pageOrDefault - 1) * sizeOrDefault;
-        long total = mmDatasetVersionMapper.countByDatasetId(datasetId);
+        long total = allowed==null?mmDatasetVersionMapper.countByDatasetId(datasetId):allowed.size();
         int totalPages = total == 0 ? 0 : (int) ((total + sizeOrDefault - 1) / sizeOrDefault);
-        List<MmDatasetVersionResp> items = mmDatasetVersionMapper.selectByDatasetId(datasetId, sizeOrDefault, offset)
-                .stream().map(this::toResp).toList();
+        List<MmDatasetVersionResp> items = allowed==null?mmDatasetVersionMapper.selectByDatasetId(datasetId, sizeOrDefault, offset)
+                .stream().map(this::toResp).toList():allowed.stream().map(mmDatasetVersionMapper::selectById)
+                .sorted(java.util.Comparator.comparing(MmDatasetVersion::getCreatedAt).reversed()).skip(offset).limit(sizeOrDefault).map(this::toResp).toList();
         return new PageRes<>(total, totalPages, pageOrDefault, sizeOrDefault, items);
     }
 

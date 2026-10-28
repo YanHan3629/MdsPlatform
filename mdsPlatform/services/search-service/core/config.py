@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
 
 
 class Settings(BaseSettings):
@@ -11,7 +12,7 @@ class Settings(BaseSettings):
     backend_bearer_token: str = ""
     mm_internal_token: str = ""
     request_timeout_seconds: int = 120
-    max_loaded_indexes: int = 2
+    max_loaded_indexes: int = Field(default=1, ge=1)
 
 
 settings = Settings()

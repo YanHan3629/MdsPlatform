@@ -13,6 +13,9 @@ public interface MmDatasetMapper {
 
     MmDataset selectById(@Param("datasetId") UUID datasetId);
 
+    // Only after DatasetAccessService has authorized the exact object.
+    MmDataset selectAuthorizedRead(@Param("datasetId") UUID datasetId);
+
     MmDataset selectBySpaceIdAndName(@Param("spaceId") UUID spaceId, @Param("datasetName") String datasetName);
 
     List<MmDataset> selectBySpaceId(@Param("spaceId") UUID spaceId, @Param("limit") int limit, @Param("offset") int offset);

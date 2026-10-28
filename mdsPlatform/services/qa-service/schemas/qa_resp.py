@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class SourceItem(BaseModel):
     """回答引用的来源（图片 / 文本片段 / 检索结果 / bundle 文本）。"""
+    model_config = ConfigDict(protected_namespaces=())
 
     source_id: str
     source_type: str  # image / text_chunk / context / search_result / bundle_text
@@ -29,6 +30,13 @@ class SourceItem(BaseModel):
     provenance: Dict[str, Any] = Field(default_factory=dict)
     quality_flags: List[str] = Field(default_factory=list)
     evidence_type: Optional[str] = None
+    original_format: Optional[str] = None
+    representation_id: Optional[str] = None
+    representation_kind: Optional[str] = None
+    evidence_bundle: Optional[Dict[str, Any]] = None
+    calculation_lineage: Optional[Dict[str, Any]] = None
+    fact_ids: List[str] = Field(default_factory=list)
+    model_context: Optional[str] = None
 
 
 class QAMeta(BaseModel):
@@ -44,6 +52,7 @@ class QAMeta(BaseModel):
     completion_tokens: int = 0
     total_tokens: int = 0
     request_id: Optional[str] = None
+    trace_id: Optional[str] = None
     retrieval_type: str = "none"
     intent_analysis_used: bool = False
     intent_confidence: float = 1.0
@@ -55,6 +64,9 @@ class QAMeta(BaseModel):
     retrieval_ms: float = 0.0
     generation_ms: float = 0.0
     professional_timings_ms: Dict[str, float] = Field(default_factory=dict)
+    retrieval_status: str = "NOT_REQUESTED"
+    generation_status: str = "complete"
+    evidence_selection: Dict[str, Any] = Field(default_factory=dict)
 
 
 class RetrievedItem(BaseModel):
@@ -69,6 +81,7 @@ class RetrievedItem(BaseModel):
 
 class QAResponse(BaseModel):
     answer: str
+    answer_claims: List[Dict[str, Any]] = Field(default_factory=list)
     confidence: float
     sources: List[SourceItem]
     processing_time_ms: int

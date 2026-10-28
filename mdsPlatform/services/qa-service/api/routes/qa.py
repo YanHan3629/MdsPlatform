@@ -1,7 +1,8 @@
 import json
 from typing import List
 
-from fastapi import APIRouter, HTTPException, Request, UploadFile
+from fastapi import APIRouter, HTTPException, Request
+from starlette.datastructures import UploadFile
 from starlette.concurrency import run_in_threadpool
 
 from adapters.vllm_client import VllmClientError
@@ -14,10 +15,38 @@ router = APIRouter()
 
 
 def _handle_errors(exc: Exception) -> HTTPException:
+    import requests
+    from services.evidence_trace import TraceStorageError
+    if isinstance(exc, TraceStorageError):
+        return HTTPException(status_code=503, detail="EVIDENCE_TRACE_UNAVAILABLE: 本次证据记录未能保存，暂不能交付回答，请稍后重试")
+    if isinstance(exc, requests.RequestException):
+        status = exc.response.status_code if exc.response is not None else 503
+        if status in {401,403}:
+            return HTTPException(status_code=status, detail="账号或数据范围授权失效")
+        if status == 409:
+            return HTTPException(status_code=409, detail="INDEX_NOT_READY: 当前索引尚未具备所需能力")
+        if status == 404:
+            return HTTPException(status_code=404, detail="SOURCE_OR_EVIDENCE_NOT_FOUND: 冻结来源或所选字段不存在")
+        if status == 413:
+            return HTTPException(status_code=413, detail="EVIDENCE_READ_BUDGET_EXCEEDED: 原生读取内容超限，请缩小行列或子树")
+        if status == 422:
+            return HTTPException(status_code=422, detail="EVIDENCE_OPERATION_UNSUPPORTED: 所选读取或源值状态不支持当前操作")
+        if status == 400:
+            return HTTPException(status_code=400, detail="EVIDENCE_SELECTOR_INVALID: 读取范围或字段参数无效")
+        return HTTPException(status_code=503, detail="RETRIEVAL_SERVICE_UNAVAILABLE: 检索服务异常，请稍后重试")
     if isinstance(exc, ValueError):
         return HTTPException(status_code=400, detail=str(exc))
     if isinstance(exc, VllmClientError):
-        return HTTPException(status_code=502, detail=str(exc))
+        public={
+            "unavailable":(503,"MODEL_SERVICE_UNAVAILABLE: 模型服务暂不可用，请稍后重试。"),
+            "timeout":(504,"MODEL_SERVICE_TIMEOUT: 模型处理超时，请稍后重试。"),
+            "busy":(503,"MODEL_SERVICE_BUSY: 模型服务繁忙，请稍后重试。"),
+            "configuration":(503,"MODEL_SERVICE_CONFIGURATION_ERROR: 模型服务配置暂不可用，请联系管理员。"),
+            "request_rejected":(502,"MODEL_REQUEST_REJECTED: 模型未接受本次请求，请调整资料范围后重试。"),
+            "invalid_response":(502,"MODEL_RESPONSE_INVALID: 模型服务返回了无效响应，请稍后重试。"),
+        }
+        status,detail=public.get(getattr(exc,"category",None),public["unavailable"])
+        return HTTPException(status_code=status,detail=detail)
     return HTTPException(status_code=500, detail=str(exc))
 
 
@@ -81,19 +110,27 @@ async def ask_question(request: Request):
 
         form = await request.form()
         question = str(form.get("question") or "").strip()
-        if not question:
-            raise ValueError("question 不能为空")
-        images: List[UploadFile] = form.getlist("images") if "images" in form else []
-        image_limit = min(settings.max_upload_images, settings.max_prompt_images)
-        if len(images) > image_limit:
-            for img in images:
-                await img.close()
-            raise HTTPException(status_code=400, detail=f"单次最多上传 {image_limit} 张图片")
+        images = form.getlist("images") if "images" in form else []
         image_payloads = []
-        for img in images:
-            content = await img.read()
-            if content:
+        try:
+            if not question:
+                raise ValueError("question 不能为空")
+            image_limit = min(settings.max_upload_images, settings.max_prompt_images)
+            if len(images) > image_limit:
+                raise HTTPException(status_code=400, detail=f"单次最多上传 {image_limit} 张图片")
+            if any(not isinstance(img, UploadFile) for img in images):
+                raise HTTPException(status_code=400, detail="USER_IMAGE_FILE_REQUIRED: images 必须是图片文件")
+            for img in images:
+                # Reject a missing attachment before retrieval or generation;
+                # a silent omission would answer a different question.
+                content = await img.read(10 * 1024 * 1024 + 1)
+                if not content:
+                    raise HTTPException(status_code=400, detail="USER_IMAGE_EMPTY: 图片附件为空，请重新选择有效图片")
+                if len(content) > 10 * 1024 * 1024:
+                    raise HTTPException(status_code=413, detail="USER_IMAGE_BYTE_LIMIT: 每张图片不得超过10 MB")
                 image_payloads.append((img.filename or "upload.jpg", content))
+        finally:
+            await form.close()
 
         payload = {
             "question": question,

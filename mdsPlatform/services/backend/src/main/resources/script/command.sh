@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 # 下载、转换/训练、上传任务脚本
+set -e
 if (set -o pipefail) 2>/dev/null; then
   set -o pipefail
 fi
@@ -64,6 +65,7 @@ page_size = int(page_size)
 page_idx = 1
 all_files = []
 last_payload = {}
+expected_total = None
 
 while True:
     sep = "&" if "?" in base_url else "?"
@@ -75,11 +77,17 @@ while True:
     with urllib.request.urlopen(req, timeout=120) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
     files = payload.get("fileRespList") or []
+    total = int(payload.get("total") if payload.get("total") is not None else len(all_files) + len(files))
+    if expected_total is None:
+        expected_total = total
+    if total != expected_total or (not files and len(all_files) < total):
+        raise ValueError("mandatory input listing is incomplete or changed")
     all_files.extend(files)
     last_payload = payload
-    total = int(payload.get("total") or len(all_files))
     print(f"listed page={page_idx} files={len(files)} accumulated={len(all_files)} total={total}", file=sys.stderr)
-    if not files or len(all_files) >= total:
+    if len(all_files) > total:
+        raise ValueError("mandatory input listing exceeds declared total")
+    if len(all_files) == total:
         break
     page_idx += 1
 
@@ -104,13 +112,18 @@ log "DOWNLOAD_URL: $DOWNLOAD_URL"
 LIST_TSV="$INPUT_DIR/files.tsv"
 
 python3 - "$FILES_JSON" >"$LIST_TSV" <<'PY'
-import json,sys
+import json,pathlib,sys
 p=sys.argv[1]
 data=json.load(open(p,'r',encoding='utf-8'))
 
 lst=data.get("fileRespList") or []
+seen=set()
 for x in lst:
     lp=x.get("logicalPath","") or ""
+    parts=pathlib.PurePosixPath(lp).parts
+    if not lp.startswith('/') or any(c in lp for c in '\t\r\n') or '\\' in lp or '..' in parts or lp in seen:
+        raise ValueError("invalid or duplicate mandatory input path")
+    seen.add(lp)
     ct=x.get("contentType","") or ""
     bn=x.get("bucketName","") or ""
     fk=x.get("fileKey","") or ""
@@ -137,9 +150,30 @@ while IFS="$(printf '\t')" read -r logicalPath contentType bucketName fileKey; d
 
   case "$http_code" in
     2??) : ;;
-    *) log "!! download failed http=$http_code path=$logicalPath (see: $out)";;
+    *) die "mandatory input download failed http=$http_code path=$logicalPath";;
   esac
 done <"$LIST_TSV"
+
+python3 - "$FILES_JSON" "$INPUT_DIR" <<'PY'
+import hashlib,json,pathlib,sys
+manifest=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+root=pathlib.Path(sys.argv[2]).resolve()
+for item in manifest.get('fileRespList') or []:
+    path=(root/item['logicalPath'].lstrip('/')).resolve()
+    if root not in path.parents or not path.is_file():
+        raise ValueError('mandatory input file is missing')
+    expected_size=item.get('sizeBytes')
+    if expected_size is not None and path.stat().st_size != int(expected_size):
+        raise ValueError('mandatory input byte count mismatch')
+    expected_sha=item.get('sha256')
+    if expected_sha:
+        digest=hashlib.sha256()
+        with path.open('rb') as stream:
+            for chunk in iter(lambda:stream.read(1024*1024),b''):digest.update(chunk)
+        if digest.hexdigest().lower()!=str(expected_sha).lower():
+            raise ValueError('mandatory input checksum mismatch')
+print('[download] mandatory input files verified='+str(len(manifest.get('fileRespList') or [])),file=sys.stderr)
+PY
 
 log "[download] done -> $INPUT_DIR"
 

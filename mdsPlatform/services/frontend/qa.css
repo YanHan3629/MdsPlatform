@@ -1,6 +1,13 @@
 [hidden]{display:none!important}
 .qa-answer{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8;margin:16px 0}
+.qa-answer-table{max-width:100%;overflow-x:auto;white-space:normal;margin:12px 0}
+.qa-answer-table table{width:100%;min-width:0;table-layout:fixed;border-collapse:collapse;font-size:13px}
+.qa-answer-table th,.qa-answer-table td{border:1px solid var(--line);padding:8px;text-align:left;vertical-align:top;overflow-wrap:anywhere}
+.qa-answer-table th{background:#eef4ff;color:#44546a}
 .qa-notice{padding:12px;background:#fff7e6;border-radius:12px;color:#925b00}
+.evidence-image{margin:12px 0;max-width:100%}
+.evidence-image img{display:block;max-width:100%;max-height:640px;object-fit:contain;background:#f7f9fc}
+.evidence-image figcaption{font-size:12px;color:var(--muted);margin-top:6px}
 #qaSources .compact{overflow-wrap:anywhere}
 #qaSources .compact>div{min-width:0}
 #qaDataset{max-width:100%}
@@ -20,3 +27,22 @@
 .evidence-meta span{padding:3px 7px;border-radius:999px;background:#eef4ff;color:#44546a;font-size:11px}
 @media (max-width:720px){.professional-options{grid-template-columns:1fr}}
 .btn:disabled{opacity:.55;cursor:wait}
+.retrieval-condition{padding:12px;border:1px solid var(--line);border-radius:12px;margin-bottom:10px}
+#retrievalResults .compact>div{min-width:0;width:100%}
+#retrievalApplied,.source-preview,#retrievalResults{overflow-wrap:anywhere;white-space:pre-wrap}
+#retrievalSpecific select,.form-grid input,.form-grid select,.form-grid textarea{min-width:0;max-width:100%;width:100%}
+.stack-form{min-width:0;grid-template-columns:minmax(0,1fr)}
+.stack-form input,.stack-form select,.stack-form textarea,.stack-form button{min-width:0;width:100%;max-width:100%;overflow-wrap:anywhere}
+.stack-form label,.compact>div,.event>div{min-width:0;overflow-wrap:anywhere}
+.card pre,.card p{overflow-wrap:anywhere}
+.table-wrap{max-width:100%}
+.product,.product header>div,.product .meta>div{min-width:0;overflow-wrap:anywhere}
+.product .status{flex-shrink:0}
+#contracts .table-wrap table{min-width:1540px;table-layout:fixed}
+#contracts .table-wrap th:nth-child(4){width:260px}
+.status.FAILED,.status.REVOKED,.status.CANCELLED{color:var(--bad);background:#fee2e2}
+.status.PARTIAL,.status.PENDING_CONFIRMATION,.status.RETRY{color:var(--warn);background:#fef3c7}
+@media(max-width:1400px){#provider>.grid.three{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:720px){.topbar,.card-head,.compact{flex-wrap:wrap}.form-grid{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:720px){.product .meta{grid-template-columns:repeat(2,minmax(0,1fr))}}
+#multimodalShared{margin-bottom:16px}summary{cursor:pointer;color:var(--brand);font-weight:800}

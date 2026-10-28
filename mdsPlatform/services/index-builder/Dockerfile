@@ -4,12 +4,18 @@ WORKDIR /app
 ARG INSTALL_SYSTEM_PACKAGES=1
 RUN if [ "$INSTALL_SYSTEM_PACKAGES" = "1" ]; then \
       apt-get update \
-      && apt-get install -y --no-install-recommends curl bash file libcairo2 libgl1 fonts-dejavu-core \
+      && apt-get install -y --no-install-recommends curl bash file libcairo2 libgl1 fonts-dejavu-core fonts-noto-cjk \
       && rm -rf /var/lib/apt/lists/*; \
     fi
 COPY requirements.txt /app/requirements.txt
 ARG INSTALL_PYTHON_PACKAGES=1
 RUN if [ "$INSTALL_PYTHON_PACKAGES" = "1" ]; then pip install --no-cache-dir -r /app/requirements.txt; fi
+ARG INSTALL_OCR_PACKAGES=1
+RUN if [ "$INSTALL_OCR_PACKAGES" = "1" ]; then \
+      apt-get update -o Acquire::Retries=3 \
+      && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
 COPY . /app
 ARG PREPARE_TEXT_MODEL=1
 RUN if [ "$PREPARE_TEXT_MODEL" = "1" ]; then python /app/prepare_text_model.py; fi

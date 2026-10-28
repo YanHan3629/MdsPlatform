@@ -11,16 +11,18 @@ from typing import Any
 import faiss
 import numpy as np
 
-from .contracts import (ORGANIZER_VERSION, PARSER_CONFIG_VERSION, ParseContext, ParsedAsset,
+from .contracts import (organizer_version, PARSER_CONFIG_VERSION, ParseContext, ParsedAsset,ParsedItem,
                         SCHEMA_VERSION, SemanticUnit, content_sha256, deterministic_asset_id,
                         normalized_path, stable_id, write_json)
 from .organizer import SemanticOrganizer
 from .parsers import default_parser_registry
 from .text_embedding import MODEL_DIMENSION, MODEL_VERSION, QUERY_INSTRUCTION, encode_passages
 from .derived_cache import DerivedCache
+from .snapshot_catalog import SnapshotCatalog, CATALOG_VERSION
+from .json_native import is_encoded_number,number_metadata
 
 
-INDEX_BUILDER_VERSION = "professional-indexes-1.12"
+INDEX_BUILDER_VERSION = "professional-indexes-1.17"
 
 
 def _tokens(text: str) -> list[str]:
@@ -51,40 +53,67 @@ def _source_formats(units: list[SemanticUnit], asset_formats: dict[str, str]) ->
     return sorted({asset_formats[unit.asset_id] for unit in units if unit.asset_id in asset_formats})
 
 
-def _load_previous_assets(previous_asset_dir: Path | None) -> dict[str, dict[str, Any]]:
-    """Load immutable per-asset shards from the preceding published snapshot."""
-    cached: dict[str, dict[str, Any]] = {}
+def _load_previous_assets(previous_asset_dir: Path | None) -> dict[str, Path]:
+    """Index frozen cache paths without retaining every decoded old snapshot."""
+    cached: dict[str, Path] = {};ambiguous=set()
     if previous_asset_dir is None or not previous_asset_dir.is_dir():
         return cached
     for path in previous_asset_dir.glob("*.json"):
         try:
             item = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(item,dict) or not isinstance(item.get('asset'),dict):continue
             asset = item.get("asset") or {}
             logical_path = normalized_path(str(asset.get("logical_path") or asset.get("logicalPath") or ""))
-            if logical_path != "/":
-                cached[logical_path] = item
+            if logical_path != "/" and logical_path not in ambiguous:
+                if logical_path in cached:
+                    cached.pop(logical_path,None);ambiguous.add(logical_path)
+                else:cached[logical_path] = path
         except (OSError, ValueError, TypeError):
             continue
     return cached
 
 
-def _reuse_cached_asset(cached: dict[str, Any], path: Path, relative: Path,
+def _reuse_cached_asset(cached: dict[str, Any] | Path, path: Path, relative: Path,
                         dataset_version_id: str, parser, processing_config: dict[str, Any]) -> tuple[ParsedAsset, list[SemanticUnit]] | None:
+    if isinstance(cached,Path):
+        try:cached=json.loads(cached.read_text(encoding='utf-8'))
+        except (OSError,ValueError,TypeError):return None
+    if not isinstance(cached,dict):return None
     asset_data = cached.get("asset") or {}
     units_data = cached.get("units") or []
+    if not isinstance(asset_data,dict) or not isinstance(units_data,list) or any(not isinstance(unit,dict) for unit in units_data):return None
+    if not isinstance(asset_data.get('attributes',{}),dict):return None
+    # Engineering render attributes contain paths local to their build job.
+    # Reparse against the current output (the legacy conversion has already
+    # materialized hash-checked views there), rather than copying stale paths
+    # from a preceding immutable index. Embeddings retain their content cache.
+    if asset_data.get('attributes',{}).get('engineeringAdapters'):
+        return None
     source_hash = content_sha256(path)
+    logical_path = normalized_path(relative.as_posix())
+    expected_format='JPG' if path.suffix.lower()=='.jpeg' else path.suffix.lstrip('.').upper()
     cached_config = cached.get("processingConfig") or {
         "timezone": None, "unitMapping": {}, "timeColumn": None, "entityColumns": []
     }
     if not units_data or source_hash != asset_data.get("content_sha256") or cached_config != processing_config:
         return None
+    if asset_data.get('logical_path')!=logical_path or asset_data.get('source_format')!=expected_format:return None
     if (asset_data.get("parser_name") != parser.name
             or asset_data.get("parser_version") != parser.version
             or asset_data.get("parser_config_version") != PARSER_CONFIG_VERSION
-            or any(unit.get("organizer_version") != ORGANIZER_VERSION for unit in units_data)):
+            or any(unit.get("organizer_version") != organizer_version(asset_data.get('source_format','')) for unit in units_data)):
         return None
-    logical_path = normalized_path(relative.as_posix())
     old_asset_id = str(asset_data.get("asset_id"))
+    if any(unit.get('asset_id')!=old_asset_id or unit.get('dataset_version_id')!=asset_data.get('dataset_version_id')
+        or unit.get('logical_path')!=logical_path or unit.get('content_sha256')!=source_hash
+        or unit.get('parser_name')!=parser.name or unit.get('parser_version')!=parser.version
+        or unit.get('parser_config_version')!=PARSER_CONFIG_VERSION for unit in units_data):return None
+    by_id={unit.get('unit_id'):unit for unit in units_data}
+    if len(by_id)!=len(units_data) or None in by_id:return None
+    for unit in units_data:
+        if not isinstance(unit.get('metadata',{}),dict):return None
+        table_id=unit.get('metadata',{}).get('tableId')
+        if table_id is not None and (table_id not in by_id or by_id[table_id].get('unit_type')!='TableUnit'):return None
     asset_id = deterministic_asset_id(dataset_version_id, logical_path)
     asset = ParsedAsset(
         asset_id=asset_id,
@@ -99,6 +128,18 @@ def _reuse_cached_asset(cached: dict[str, Any], path: Path, relative: Path,
         attributes=dict(asset_data.get("attributes") or {}),
         quality_flags=list(asset_data.get("quality_flags") or []),
     )
+    if old_asset_id!=asset_id:
+        # Changing UUIDs in existing units leaves table/row/entity references
+        # pointing at the old scope. Reorganize verified parsed source items;
+        # never substitute UUID-looking strings inside original business data.
+        original_items=asset_data.get('items')
+        if not original_items:return None
+        try:
+            asset.items=[ParsedItem(**item) for item in original_items]
+            fresh_units=SemanticOrganizer().organize(asset,timezone_name=processing_config.get('timezone'),
+                time_column=processing_config.get('timeColumn'),entity_columns=processing_config.get('entityColumns',[]))
+        except (TypeError,ValueError,KeyError):return None
+        return asset,fresh_units
     reused_units = []
     for raw in units_data:
         item = dict(raw)
@@ -106,8 +147,6 @@ def _reuse_cached_asset(cached: dict[str, Any], path: Path, relative: Path,
         item["dataset_version_id"] = dataset_version_id
         item["logical_path"] = logical_path
         item["content_sha256"] = source_hash
-        if old_asset_id != asset_id:
-            item["unit_id"] = stable_id(asset_id, str(raw.get("unit_id")))
         reused_units.append(SemanticUnit(**item))
     return asset, reused_units
 
@@ -172,8 +211,14 @@ def _build_structured(units: list[SemanticUnit], root: Path, output_dir: Path,
         for record in unit.payload.get("records", []):
             values = record.get("values", {})
             rows.append({"unitId": unit.unit_id, "assetId": unit.asset_id, "datasetVersionId": unit.dataset_version_id,
-                         "logicalPath": unit.logical_path, "locator": {**unit.locator, "rawRow": record.get("rawRow")},
-                         "values": values, "units": unit.units, "qualityFlags": unit.quality_flags})
+                         "logicalPath": unit.logical_path, "locator": {**unit.locator, **record.get('locator',{}), "rawRow": record.get("rawRow")},
+                         "values": values, "units": unit.units, "qualityFlags": unit.quality_flags,
+                         "sourceValues":record.get('sourceValues',values),
+                         "numberLexemes":record.get('numberLexemes',{}),
+                         "valueTransforms":record.get('valueTransforms',[]),
+                         "formulas":record.get('formulas',{}),
+                         "calculationEligibility":record.get('calculationEligibility',{}),
+                         "metadata": unit.metadata})
             by_name = {str(key).lower(): value for key, value in values.items()}
             source = by_name.get("source_entity_id", by_name.get("sourceentityid"))
             relation = by_name.get("relation_type", by_name.get("relationtype"))
@@ -182,7 +227,7 @@ def _build_structured(units: list[SemanticUnit], root: Path, output_dir: Path,
                 relations.append({"sourceEntityId": str(source), "relationType": str(relation),
                                   "targetEntityId": str(target), "assetId": unit.asset_id,
                                   "logicalPath": unit.logical_path,
-                                  "locator": {**unit.locator, "rawRow": record.get("rawRow")}})
+                                  "locator": {**unit.locator, **record.get('locator',{}), "rawRow": record.get("rawRow")}})
     rows_path, schema_path = root / "records.jsonl", root / "schema.json"
     root.mkdir(parents=True, exist_ok=True)
     rows_path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows), encoding="utf-8")
@@ -195,15 +240,20 @@ def _build_structured(units: list[SemanticUnit], root: Path, output_dir: Path,
         values = [row["values"] for _,row in group]
         def create_postings():
             cats, nums, fields = defaultdict(lambda: defaultdict(list)), defaultdict(list), set()
-            for local_id, row in enumerate(values):
+            for local_id, (_,record) in enumerate(group):
+                row=record['values']
                 for field, value in row.items():
                     fields.add(field)
+                    if is_encoded_number(value,number_metadata(record,field)):continue
                     if isinstance(value,bool) or (isinstance(value,str) and len(value)<=128):
                         cats[field][json.dumps(value,ensure_ascii=False)].append(local_id)
-                    elif isinstance(value,(int,float)) and math.isfinite(value):
-                        nums[field].append([float(value),local_id])
+                    elif isinstance(value,(int,float)):
+                        try:decoded=float(value)
+                        except OverflowError:continue
+                        if math.isfinite(decoded):nums[field].append([decoded,local_id])
             return {"categorical":dict(cats),"numeric":dict(nums),"fields":sorted(fields)}
-        shard = cache.memo("structuredPostings",values,create_postings) if cache else create_postings()
+        posting_inputs=[{'values':record['values'],'numberLexemes':record.get('numberLexemes',{})} for _,record in group]
+        shard = cache.memo("structuredPostings-lexeme-aware-2",posting_inputs,create_postings) if cache else create_postings()
         known_fields.update(shard["fields"])
         for field, posting in shard["categorical"].items():
             for value, local_ids in posting.items(): categorical[field][value].extend(group[i][0] for i in local_ids)
@@ -256,7 +306,7 @@ def _build_timeseries(units: list[SemanticUnit], root: Path, output_dir: Path,
     for unit in temporal_units:
         for fact in unit.payload["facts"]:
             row = {**fact, "unitId": unit.unit_id, "assetId": unit.asset_id, "datasetVersionId": unit.dataset_version_id,
-                   "logicalPath": unit.logical_path, "locator": {**unit.locator, "rawRow": fact.get("rawRow")},
+                   "logicalPath": unit.logical_path, "locator": {**unit.locator, **fact.get('locator',{}), "rawRow": fact.get("rawRow")},
                    "qualityFlags": sorted(set(unit.quality_flags + fact.get("qualityFlags", []))),
                    "calculationPolicy": {key: unit.payload[key] for key in ("duplicatePolicy", "intervalBoundary", "missingPolicy", "interpolation", "outlierPolicy")}}
             facts.append(row)
@@ -267,6 +317,10 @@ def _build_timeseries(units: list[SemanticUnit], root: Path, output_dir: Path,
     aggregates, segment_meta, vectors = [], [], []
     for key, rows in groups.items():
         ordered = sorted(rows, key=lambda row: (row["normalizedTime"], row.get("rawRow") or 0))
+        # Retain unresolved samples in facts so reads/queries can explain them,
+        # but never derive numeric summaries or shape vectors from their cache.
+        if any(row.get('calculationEligible') is False for row in rows):
+            continue
         identity_free = [[row["normalizedTime"],row["value"],row.get("unit"),row.get("rawRow"),row.get("calculationPolicy")] for row in ordered]
         cached = cache.get("timeSeries",identity_free) if cache else None
         if cached is not None:
@@ -281,7 +335,7 @@ def _build_timeseries(units: list[SemanticUnit], root: Path, output_dir: Path,
                            "timeStart": times[0], "timeEnd": times[-1], "count": len(values), "sum": float(values.sum()),
                            "min": float(values.min()), "max": float(values.max()), "first": float(values[0]), "last": float(values[-1]),
                            "duplicateTimestampCount": len(times) - len(set(times)), "mergeable": ["count", "sum", "min", "max"]})
-        frame = __import__("pandas").DataFrame({"time": __import__("pandas").to_datetime(times, utc=True), "value": values}).set_index("time")
+        frame = __import__("pandas").DataFrame({"time": __import__("pandas").to_datetime(times, utc=True, format="ISO8601"), "value": values}).set_index("time")
         for level, rule in (("hour", "1h"), ("day", "1D")):
             for bucket, group in frame.resample(rule):
                 if group.empty:
@@ -316,15 +370,19 @@ def _build_timeseries(units: list[SemanticUnit], root: Path, output_dir: Path,
     write_json(aggregate_path, {"levels": ["full-series", "hour", "day"], "aggregates": aggregates})
     write_json(segment_path, {"segments": segment_meta, "dtw": {"windowRatio": 0.15, "timeWarping": True, "amplitudeNormalization": "zscore", "scaleInvariant": False}})
     index = faiss.IndexFlatIP(12)
-    index.add(np.asarray(vectors, dtype="float32"))
+    if vectors:index.add(np.asarray(vectors, dtype="float32").reshape(-1,12))
     faiss.write_index(index, str(feature_path))
     formats = _source_formats(temporal_units, asset_formats)
-    return [
+    registrations = [
         _base_registration("timeseries.facts", "EXACT_FACTS_AGGREGATES", "timeseries-exact-1.0", None,
                            [_file_entry(facts_path, output_dir), _file_entry(aggregate_path, output_dir)], len(facts), formats),
         _base_registration("timeseries.shape", "FAISS_FEATURE_DTW", "shape12-dtw-1.0", 12,
                            [_file_entry(feature_path, output_dir), _file_entry(segment_path, output_dir)], len(segment_meta), formats),
     ]
+    for registration in registrations:
+        registration['coverage'].update(sourceSampleCount=len(facts),calculationEligibleSampleCount=sum(row.get('calculationEligible',True) for row in facts),
+            uncalculableSampleCount=sum(row.get('calculationEligible') is False for row in facts),shapeVectorCount=len(vectors))
+    return registrations
 
 
 def _build_geometry(units: list[SemanticUnit], root: Path, output_dir: Path,
@@ -374,7 +432,10 @@ def build_professional_indexes(input_dir: Path, output_dir: Path, dataset_versio
                                *, timezone_name: str | None = None, unit_mapping: dict[str, str] | None = None,
                                time_column: str | None = None, entity_columns: list[str] | None = None,
                                asset_mappings: dict | None = None,
+                               snapshot_identity: dict | None = None,
                                previous_asset_dir: Path | None = None) -> dict:
+    if not snapshot_identity or not all(snapshot_identity.get(key) for key in ('datasetId','indexVersionId','rawCommitId')):
+        raise ValueError('EVIDENCE_FROZEN_SNAPSHOT_IDENTITY_REQUIRED')
     registry = default_parser_registry()
     derived = DerivedCache(output_dir / "professional" / "derived", previous_asset_dir.parent / "derived" if previous_asset_dir else None)
     organizer = SemanticOrganizer()
@@ -432,6 +493,21 @@ def build_professional_indexes(input_dir: Path, output_dir: Path, dataset_versio
             "asset": asset, "units": [unit.to_dict() for unit in asset_units],
             "processingConfig": local_config,
         })
+    catalog = SnapshotCatalog(input_dir, assets, units)
+    from .native_evidence import NativeEvidenceWriter
+    evidence_manifests={}
+    # Persist enriched units after snapshot-local catalog validation.
+    for asset in assets:
+        target = output_dir / "professional" / "assets" / f"{asset.asset_id}.json"
+        cached = json.loads(target.read_text(encoding="utf-8"))
+        cached["units"] = [unit.to_dict() for unit in catalog.by_asset[asset.asset_id]]
+        write_json(target, cached)
+        evidence_manifests[asset.asset_id]=NativeEvidenceWriter(asset,catalog.by_asset[asset.asset_id],output_dir,snapshot_identity,
+            processing_config=cached['processingConfig']).write()
+        catalog.descriptions[asset.asset_id]['nativeEvidence']={
+            'schemaVersion':evidence_manifests[asset.asset_id]['schemaVersion'],
+            'manifestSha256':evidence_manifests[asset.asset_id]['sha256'],
+            'representationCount':evidence_manifests[asset.asset_id]['representationCount']}
     asset_formats = {asset.asset_id: asset.source_format for asset in assets}
     root = output_dir / "indexes"
     registrations = []
@@ -439,6 +515,10 @@ def build_professional_indexes(input_dir: Path, output_dir: Path, dataset_versio
     registrations.extend(_build_structured(units, root / "structured", output_dir, asset_formats, derived))
     registrations.extend(_build_timeseries(units, root / "timeseries", output_dir, asset_formats, derived))
     registrations.extend(_build_geometry(units, root / "geometry", output_dir, asset_formats))
+    facets_path = root / "snapshot" / "facets.json"
+    write_json(facets_path, catalog.describe())
+    registrations.append(_base_registration("snapshot.facets", "SNAPSHOT_CAPABILITIES", CATALOG_VERSION, None,
+        [_file_entry(facets_path, output_dir)], len(assets), sorted(set(asset_formats.values()))))
     derived.flush()
     catalog_path = output_dir / "professional" / "manifest.json"
     deleted_paths = sorted(set(previous_assets) - current_paths)
@@ -454,6 +534,7 @@ def build_professional_indexes(input_dir: Path, output_dir: Path, dataset_versio
         "incremental": incremental,
         "assets": [{"assetId": asset.asset_id, "logicalPath": asset.logical_path, "contentSha256": asset.content_sha256,
                     "sourceFormat": asset.source_format, "parser": f"{asset.parser_name}:{asset.parser_version}",
+                    "evidenceManifest":evidence_manifests[asset.asset_id],
                     "qualityFlags": asset.quality_flags} for asset in assets],
     })
     return {"indexes": registrations, "professionalManifestPath": "/professional/manifest.json",

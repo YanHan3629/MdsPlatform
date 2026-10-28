@@ -28,6 +28,7 @@
         )
     </insert>
     <select id="selectById" resultMap="MmDatasetMap">SELECT * FROM public.mm_dataset WHERE dataset_id = #{datasetId}</select>
+    <select id="selectAuthorizedRead" resultMap="MmDatasetMap">SELECT /*IGNORE_ORG*/ * FROM public.mm_dataset WHERE dataset_id = #{datasetId}</select>
     <select id="selectBySpaceIdAndName" resultMap="MmDatasetMap">SELECT * FROM public.mm_dataset WHERE space_id = #{spaceId} AND dataset_name = #{datasetName}</select>
     <select id="selectBySpaceId" resultMap="MmDatasetMap">SELECT * FROM public.mm_dataset WHERE space_id = #{spaceId} ORDER BY created_at DESC LIMIT #{limit} OFFSET #{offset}</select>
     <select id="countBySpaceId" resultType="long">SELECT COUNT(*) FROM public.mm_dataset WHERE space_id = #{spaceId}</select>

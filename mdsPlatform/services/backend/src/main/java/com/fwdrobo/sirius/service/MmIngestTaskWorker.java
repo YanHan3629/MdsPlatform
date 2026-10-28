@@ -51,18 +51,16 @@ public class MmIngestTaskWorker {
         if (task != null) process(task);
     }
 
-    /** Recover terminal container state when the backend missed Docker events during a restart. */
+    /** Reconcile all index runs, including explicit builds and recovered READY artifacts. */
     private void refreshMissedContainerEvents() {
         List<Map<String, Object>> rows = jdbc.queryForList("""
                 SELECT DISTINCT r.run_id,r.container_id,r.docker_host
-                FROM mm_ingest_task t
-                JOIN mm_index_version i ON i.index_version_id=t.index_version_id
+                FROM mm_index_version i
                 JOIN job_run r ON r.run_id=i.build_run_id
-                WHERE t.task_status='WAITING_INDEX'
-                  AND i.index_status IN ('QUEUED','BUILDING','PREWARMING')
-                  AND r.run_status IN ('QUEUED','RUNNING')
+                WHERE r.run_status IN ('QUEUED','RUNNING')
                   AND r.container_id IS NOT NULL
                   AND (r.last_seen_at IS NULL OR r.last_seen_at < now()-interval '20 seconds')
+                ORDER BY r.run_id LIMIT 50
                 """);
         for (Map<String, Object> row : rows) {
             try {
@@ -121,12 +119,13 @@ public class MmIngestTaskWorker {
             SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(
                     principal, null, List.of(new SimpleGrantedAuthority("ROLE_SYSTEM"))));
             var taskMeta = new com.fasterxml.jackson.databind.ObjectMapper().readTree(String.valueOf(task.get("task_meta")));
+            if(taskMeta.has("activateOnReady")&&!taskMeta.get("activateOnReady").isBoolean())throw new IllegalStateException("invalid persisted index activation policy");
             Map<String,Object> indexConfig = new com.fasterxml.jackson.databind.ObjectMapper().convertValue(taskMeta.path("indexConfig"),Map.class);
-            Map<String, Object> result = indexes.buildIndex(
-                    (UUID) task.get("dataset_id"), (UUID) task.get("dataset_version_id"),
+            Map<String, Object> result = indexes.buildIndexForIngestion(
+                    (UUID) task.get("dataset_id"), (UUID) task.get("dataset_version_id"),taskId,
                     new MmBuildIndexReq(MmIndexOutboxService.BUILDER_VERSION
                             .replace("professional-indexes-", "professional-multispace-"),
-                            "MULTI_SPACE", false,indexConfig == null ? Map.of() : indexConfig), credential.token());
+                            "MULTI_SPACE", false,indexConfig == null ? Map.of() : indexConfig,taskMeta.path("activateOnReady").asBoolean(true)), credential.token());
             jdbc.update("""
                     UPDATE mm_ingest_task SET task_status='WAITING_INDEX',stage='BUILDING',lease_until=NULL,
                       index_version_id=? WHERE task_id=?

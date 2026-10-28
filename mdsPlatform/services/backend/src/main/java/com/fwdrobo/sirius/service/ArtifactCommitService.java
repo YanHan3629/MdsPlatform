@@ -39,17 +39,20 @@ public class ArtifactCommitService {
     private final ArtifactCommitMapper artifactCommitMapper;
     private final ManifestService manifestService;
     private final UserService userService;
+    private final DatasetAccessService datasetAccess;
 
     public ArtifactCommitService(
             ArtifactRepoMapper artifactRepoMapper, 
             ArtifactCommitMapper artifactCommitMapper,
             ManifestService manifestService,
-            UserService userService
+            UserService userService,
+            DatasetAccessService datasetAccess
     ) {
         this.artifactRepoMapper = artifactRepoMapper;
         this.artifactCommitMapper = artifactCommitMapper;
         this.manifestService = manifestService;
         this.userService = userService;
+        this.datasetAccess = datasetAccess;
     }
 
     /**
@@ -187,7 +190,10 @@ public class ArtifactCommitService {
     public ArtifactCommitResponse getCommit(UUID repoId, UUID commitId) {
         log.info("查询指定 commit: repoId={}, commitId={}", repoId, commitId);
 
-        ensureRepoExists(repoId);
+        // A consumer may read only its granted commit; the owner-filtered repo
+        // lookup cannot represent this exact-commit authorization.
+        if(SecurityUtils.getUserId()!=null)datasetAccess.requireArtifact(repoId,commitId,false);
+        else ensureRepoExists(repoId);
 
         ArtifactCommit commit = artifactCommitMapper.selectByRepoAndCommit(repoId, commitId);
         log.debug("查询结果: repoId={}, commitId={}, commit={}", repoId, commitId, commit);

@@ -1,8 +1,15 @@
 package com.fwdrobo.sirius.dataspace;
 
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import com.fwdrobo.sirius.dto.mm.InternalTextToImageReq;
 import com.fwdrobo.sirius.port.SearchServiceClient;
 import com.fwdrobo.sirius.service.MmAssetService;
+import com.fwdrobo.sirius.service.MmSourceFileService;
+import com.fwdrobo.sirius.service.DatasetAccessService;
 import com.fwdrobo.sirius.util.SecurityUtils;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ByteArrayResource;
@@ -24,18 +31,32 @@ import java.util.*;
 @RestController
 @RequestMapping("/api/data-space/qa")
 public class DataSpaceQaController {
+    private static final String[][] SCOPE_FIELDS = {
+            {"datasetId", "dataset_id"}, {"versionId", "version_id"},
+            {"indexVersionId", "index_version_id"}
+    };
+    // Local reader: ambiguous requests must be rejected before Map binding can
+    // discard duplicate JSON keys, without changing other controllers' parsing.
+    private static final ObjectReader REQUEST_READER = new ObjectMapper()
+            .readerFor(new TypeReference<LinkedHashMap<String, Object>>() {})
+            .with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+            .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     private final JdbcTemplate jdbc;
     private final SearchServiceClient search;
     private final MmAssetService assets;
+    private final MmSourceFileService sourceFiles;
     private final RestTemplate http;
     private final String qaUrl;
+    private final DatasetAccessService access;
 
     public DataSpaceQaController(JdbcTemplate jdbc, SearchServiceClient search,
-                                 MmAssetService assets,
+                                 MmAssetService assets, MmSourceFileService sourceFiles, DatasetAccessService access,
                                  @Value("${QA_SERVICE_BASE_URL:http://localhost:18081}") String qaUrl) {
         this.jdbc = jdbc;
         this.search = search;
         this.assets = assets;
+        this.sourceFiles = sourceFiles;
+        this.access=access;
         this.qaUrl = qaUrl.replaceAll("/+$", "");
         var factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(5000);
@@ -44,29 +65,8 @@ public class DataSpaceQaController {
     }
 
     @GetMapping("/datasets")
-    public List<Map<String, Object>> datasets() {
-        UUID org = SecurityUtils.getUserOrgId();
-        if (org == null) throw new ResponseStatusException(HttpStatus.FORBIDDEN, "账号未绑定组织");
-        List<Map<String, Object>> result = jdbc.query("""
-                SELECT d.dataset_id, d.dataset_name, d.modality_type, v.version_id, v.version_name,
-                       i.index_version_id, i.index_status, v.sample_count
-                FROM mm_dataset d JOIN mm_dataset_version v ON v.dataset_id = d.dataset_id
-                JOIN mm_index_version i ON i.index_version_id = v.active_index_version_id
-                  AND i.dataset_id = d.dataset_id AND i.dataset_version_id = v.version_id
-                WHERE d.org_id = ? AND d.status = 'ACTIVE' AND i.index_status = 'READY'
-                ORDER BY d.dataset_name, v.created_at DESC
-                """, (rs, row) -> {
-            Map<String, Object> item = new LinkedHashMap<>();
-            item.put("datasetId", rs.getString("dataset_id"));
-            item.put("datasetName", rs.getString("dataset_name"));
-            item.put("versionId", rs.getString("version_id"));
-            item.put("versionName", rs.getString("version_name"));
-            item.put("indexVersionId", rs.getString("index_version_id"));
-            item.put("indexStatus", rs.getString("index_status"));
-            item.put("modalityType", rs.getString("modality_type"));
-            item.put("sampleCount", rs.getLong("sample_count"));
-            return item;
-        }, org);
+    public List<Map<String, Object>> datasets(@RequestParam(defaultValue="false") boolean includeOwnerCandidates) {
+        List<Map<String,Object>> result=access.readableReadyScopes(includeOwnerCandidates);
         result.forEach(item -> item.put("capabilities", jdbc.queryForList("""
                 SELECT semantic_space AS "semanticSpace",index_type AS "indexType",
                        registration_status AS status,coverage
@@ -75,13 +75,20 @@ public class DataSpaceQaController {
         return result;
     }
 
+    @GetMapping("/access/{datasetId}/{versionId}/{indexVersionId}")
+    public ResponseEntity<Map<String,Object>> access(@PathVariable UUID datasetId,@PathVariable UUID versionId,@PathVariable UUID indexVersionId){
+        access.requireVersionRead(datasetId,versionId,indexVersionId);
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(Map.of("datasetId",datasetId,"versionId",versionId,"indexVersionId",indexVersionId,"authorized",true));
+    }
+
     /** Real durable ingestion progress for the signed-in organisation. */
     @GetMapping("/indexing")
     public List<Map<String, Object>> indexing() {
         UUID org = SecurityUtils.getUserOrgId();
         if (org == null) throw new ResponseStatusException(HttpStatus.FORBIDDEN, "账号未绑定组织");
         return jdbc.queryForList("""
-                SELECT t.task_id AS "taskId",d.dataset_name AS "datasetName",v.version_name AS "versionName",
+                SELECT t.task_id AS "taskId",t.dataset_id AS "datasetId",t.dataset_version_id AS "versionId",
+                       d.dataset_name AS "datasetName",v.version_name AS "versionName",
                        t.task_status AS status,t.stage,t.attempt_count AS "attemptCount",
                        t.max_attempts AS "maxAttempts",t.error_message AS error,t.updated_at AS "updatedAt"
                 FROM mm_ingest_task t JOIN mm_dataset d ON d.dataset_id=t.dataset_id
@@ -92,44 +99,42 @@ public class DataSpaceQaController {
 
     @GetMapping("/query-assets/{datasetId}/{versionId}")
     public List<Map<String,Object>> queryAssets(@PathVariable UUID datasetId, @PathVariable UUID versionId) {
-        UUID org = SecurityUtils.getUserOrgId();
-        if (org == null) throw new ResponseStatusException(HttpStatus.FORBIDDEN,"账号未绑定组织");
+        access.requireVersionRead(datasetId,versionId,null);
         return jdbc.queryForList("""
                 SELECT a.asset_id AS "assetId",a.logical_path AS "logicalPath"
                 FROM mm_asset a JOIN mm_dataset_version v ON v.version_id=a.dataset_version_id
                 JOIN mm_dataset d ON d.dataset_id=v.dataset_id
-                WHERE d.org_id=? AND d.dataset_id=? AND v.version_id=? AND d.status='ACTIVE'
+                WHERE d.dataset_id=? AND v.version_id=? AND d.status='ACTIVE'
                   AND (lower(a.logical_path) LIKE '%.obj' OR lower(a.logical_path) LIKE '%.step' OR lower(a.logical_path) LIKE '%.stp')
                 ORDER BY a.logical_path LIMIT 500
-                """,org,datasetId,versionId);
+                """,datasetId,versionId);
     }
 
     // Reject incomplete, mismatched, unpublished or foreign scopes before any
-    // retrieval/model call. The selector lists ACTIVE only, while an explicit
-    // historical READY snapshot remains queryable for reproducibility.
+    // retrieval/model call. Owner candidate selection does not activate it;
+    // every explicit READY scope still passes the same live authority check.
     void validateScope(Map<String, ?> body) {
-        String dataset = field(body, "datasetId", "dataset_id");
-        String version = field(body, "versionId", "version_id");
-        String index = field(body, "indexVersionId", "index_version_id");
-        if (dataset.isBlank() && version.isBlank() && index.isBlank()) return;
+        validatedBody(body, false);
+    }
+
+    private Map<String, Object> validatedBody(Map<String, ?> body, boolean required) {
+        Map<String, Object> normalized = normalizeScope(body);
+        String dataset = Objects.toString(normalized.get("dataset_id"), "");
+        String version = Objects.toString(normalized.get("version_id"), "");
+        String index = Objects.toString(normalized.get("index_version_id"), "");
+        if (dataset.isBlank() && version.isBlank() && index.isBlank() && !required) return normalized;
         if (dataset.isBlank() || version.isBlank() || index.isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "datasetId、versionId 与 indexVersionId 必须同时提供");
         }
-        boolean active = datasets().stream().anyMatch(d -> dataset.equals(d.get("datasetId"))
-                && version.equals(d.get("versionId")) && index.equals(d.get("indexVersionId")));
-        if (active) return;
         try {
-            Integer readable = jdbc.queryForObject("""
-                    SELECT count(*) FROM mm_dataset d
-                    JOIN mm_dataset_version v ON v.dataset_id=d.dataset_id
-                    JOIN mm_index_version i ON i.dataset_id=d.dataset_id AND i.dataset_version_id=v.version_id
-                    JOIN artifact_commit c ON c.repo_id=i.index_repo_id AND c.commit_id=i.index_commit_id
-                    WHERE d.org_id=? AND d.status='ACTIVE' AND d.dataset_id=? AND v.version_id=?
-                      AND i.index_version_id=? AND i.index_status='READY' AND c.commit_status='PUBLISHED'
-                    """, Integer.class, SecurityUtils.getUserOrgId(), UUID.fromString(dataset),
-                    UUID.fromString(version), UUID.fromString(index));
-            if (readable != null && readable > 0) return;
+            UUID datasetId = UUID.fromString(dataset), versionId = UUID.fromString(version),
+                    indexId = UUID.fromString(index);
+            access.requireVersionRead(datasetId, versionId, indexId);
+            normalized.put("dataset_id", datasetId.toString());
+            normalized.put("version_id", versionId.toString());
+            normalized.put("index_version_id", indexId.toString());
+            return normalized;
         } catch (IllegalArgumentException ignored) {
             // Malformed identifiers are reported as an unavailable scope below.
         }
@@ -137,9 +142,44 @@ public class DataSpaceQaController {
                 "数据集、版本或索引不可用，或不属于当前账号可访问的 PUBLISHED/READY 快照");
     }
 
-    private static String field(Map<String, ?> body, String camel, String snake) {
-        Object value = body.containsKey(camel) ? body.get(camel) : body.get(snake);
-        return value == null ? "" : value.toString();
+    static Map<String, Object> parseJson(String rawBody) {
+        try {
+            Map<String, Object> body = REQUEST_READER.readValue(rawBody);
+            if (body != null) return body;
+        } catch (java.io.IOException ignored) {
+            // Do not echo payloads or parser excerpts containing user content.
+        }
+        throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "请求必须是 JSON 对象，且不能包含重复字段");
+    }
+
+    private static String scopeValue(Object value) {
+        if (value == null) return "";
+        if (!(value instanceof String) && !(value instanceof UUID))
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "数据范围字段必须是 UUID 字符串");
+        return value.toString().strip();
+    }
+
+    static Map<String, Object> normalizeScope(Map<String, ?> body) {
+        Map<String, Object> normalized = new LinkedHashMap<>(body);
+        for (String[] names : SCOPE_FIELDS) {
+            String camel = scopeValue(body.get(names[0])), snake = scopeValue(body.get(names[1]));
+            if (body.containsKey(names[0]) && body.containsKey(names[1]) && !camel.equals(snake))
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, names[0] + " 的字段别名值冲突");
+            String value = body.containsKey(names[0]) ? camel : snake;
+            normalized.remove(names[0]);
+            normalized.remove(names[1]);
+            if (!value.isBlank()) normalized.put(names[1], value);
+        }
+        return normalized;
+    }
+
+    static Map<String, Object> multipartFields(MultiValueMap<String, String> fields) {
+        for (String[] names : SCOPE_FIELDS) for (String name : names) {
+            List<String> values = fields.get(name);
+            if (values != null && values.stream().map(DataSpaceQaController::scopeValue).distinct().count() > 1)
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, name + " 包含冲突的重复字段");
+        }
+        return normalizeScope(fields.toSingleValueMap());
     }
 
     @GetMapping("/health")
@@ -148,9 +188,9 @@ public class DataSpaceQaController {
     }
 
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<byte[]> askJson(@RequestBody Map<String, Object> body,
+    public ResponseEntity<byte[]> askJson(@RequestBody String rawBody,
             @RequestHeader(HttpHeaders.AUTHORIZATION) String authorization) {
-        validateScope(body);
+        Map<String, Object> body = validatedBody(parseJson(rawBody), false);
         var headers = headers(authorization, MediaType.APPLICATION_JSON);
         return forward("/api/v1/qa", HttpMethod.POST, body, headers);
     }
@@ -159,11 +199,16 @@ public class DataSpaceQaController {
     public ResponseEntity<byte[]> askMultipart(@RequestParam MultiValueMap<String, String> fields,
             @RequestParam(required = false) List<MultipartFile> images,
             @RequestHeader(HttpHeaders.AUTHORIZATION) String authorization) throws Exception {
-        validateScope(fields.toSingleValueMap());
+        Map<String, Object> normalized = validatedBody(multipartFields(fields), false);
         if (images != null && images.size() > 2)
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "单次最多上传 2 张图片");
         MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
         fields.forEach((k, values) -> values.forEach(v -> body.add(k, v)));
+        for (String[] names : SCOPE_FIELDS) {
+            body.remove(names[0]);
+            body.remove(names[1]);
+            if (normalized.containsKey(names[1])) body.add(names[1], normalized.get(names[1]));
+        }
         if (images != null) for (MultipartFile image : images) {
             if (image.getSize() > 10 * 1024 * 1024)
                 throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "每张图片不得超过 10 MB");
@@ -180,43 +225,87 @@ public class DataSpaceQaController {
     }
 
     @PostMapping("/search")
-    public Map<String, Object> search(@RequestBody Map<String, Object> body) {
-        validateScope(body);
-        UUID dataset = UUID.fromString(field(body, "datasetId", "dataset_id"));
-        UUID version = UUID.fromString(field(body, "versionId", "version_id"));
-        UUID index = UUID.fromString(field(body, "indexVersionId", "index_version_id"));
+    public Map<String, Object> search(@RequestBody String rawBody) throws Exception {
+        Map<String, Object> body = validatedBody(parseJson(rawBody), true);
+        UUID dataset = UUID.fromString(body.get("dataset_id").toString());
+        UUID version = UUID.fromString(body.get("version_id").toString());
+        UUID index = UUID.fromString(body.get("index_version_id").toString());
         int topK = Math.max(1, Math.min(50, Integer.parseInt(body.getOrDefault("topK", 8).toString())));
         var result = search.textToImage(new InternalTextToImageReq(dataset, version, index,
                 Objects.toString(body.get("query"), ""), topK));
         List<Map<String, Object>> items = new ArrayList<>();
+        Map<UUID, MmSourceFileService.Source> resolved = new HashMap<>();
+        if (result != null && result.items() != null)
+            for (var source : sourceFiles.resolve(dataset, version,
+                    result.items().stream().map(hit -> hit.assetId()).toList()))
+                resolved.put(source.assetId(), source);
         if (result != null && result.items() != null) for (var hit : result.items()) {
-            var asset = assets.getAsset(dataset, version, hit.assetId());
+            var asset = resolved.get(hit.assetId());
+            if (!asset.available()) continue; // Stale index entry must not become a broken source link.
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("assetId", hit.assetId());
             item.put("logicalPath", asset.logicalPath());
             item.put("score", hit.score());
             // Unified-index evidence contains temporal windows, not just legacy captions.
-            item.put("texts", hit.texts() == null || hit.texts().isEmpty() ? asset.captions() : hit.texts());
+            var texts = hit.texts();
+            if (texts == null || texts.isEmpty()) {
+                try { texts = assets.getAsset(dataset, version, hit.assetId()).captions(); }
+                catch (ResponseStatusException error) {
+                    // A snapshot source (e.g. COCO JSON) need not have imported captions.
+                    if (error.getStatusCode() != HttpStatus.NOT_FOUND) throw error;
+                    texts = List.of();
+                }
+            }
+            item.put("texts", texts);
             item.put("contentType", asset.contentType());
-            item.put("previewUrl", asset.previewUrl());
+            item.put("previewUrl", sourceFiles.downloadUrl(dataset, version, asset));
             items.add(item);
         }
         return Map.of("items", items, "indexVersionId", index);
     }
 
+    @GetMapping("/capabilities/{datasetId}/{versionId}/{indexVersionId}")
+    public ResponseEntity<byte[]> capabilities(@PathVariable UUID datasetId, @PathVariable UUID versionId,
+                                               @PathVariable UUID indexVersionId) {
+        validateScope(Map.of("datasetId", datasetId, "versionId", versionId, "indexVersionId", indexVersionId));
+        return search.scopedJson("/indexes/" + datasetId + "/" + versionId + "/" + indexVersionId + "/capabilities", null);
+    }
+
+    @PostMapping("/retrieval/execute")
+    public ResponseEntity<byte[]> retrieve(@RequestBody String rawBody) {
+        Map<String, Object> body = validatedBody(parseJson(rawBody), true);
+        return search.scopedJson("/search/execute", body);
+    }
+
+    @PostMapping(value="/retrieval/image-to-text", consumes=MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<byte[]> imageRetrieval(@RequestParam MultiValueMap<String, String> fields,
+            @RequestParam String plan, @RequestParam MultipartFile file) {
+        Map<String, Object> body = validatedBody(multipartFields(fields), true);
+        UUID datasetId = UUID.fromString(body.get("dataset_id").toString());
+        UUID versionId = UUID.fromString(body.get("version_id").toString());
+        UUID indexVersionId = UUID.fromString(body.get("index_version_id").toString());
+        if (file.getSize()>10*1024*1024) throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE,"查询图片不得超过10 MB");
+        return search.scopedImage(datasetId,versionId,indexVersionId,plan,file);
+    }
+
+    @PostMapping("/source-files/{datasetId}/{versionId}")
+    public List<MmSourceFileService.Source> sourceFiles(@PathVariable UUID datasetId,
+            @PathVariable UUID versionId, @RequestBody List<UUID> assetIds) throws Exception {
+        return sourceFiles.resolve(datasetId, versionId, assetIds);
+    }
+
     @GetMapping("/assets/{datasetId}/{versionId}/{assetId}")
-    public ResponseEntity<byte[]> source(@PathVariable UUID datasetId, @PathVariable UUID versionId,
-                                         @PathVariable UUID assetId) {
-        var asset = assets.getAsset(datasetId, versionId, assetId);
-        if (asset.previewUrl() == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "来源文件不可用");
-        // URL is generated from a validated stored asset, never supplied by the browser.
-        // Presigned query parameters are already encoded; the String overload encodes '%' again.
-        var response = http.getForEntity(java.net.URI.create(asset.previewUrl()), byte[].class);
+    public ResponseEntity<org.springframework.core.io.InputStreamResource> source(@PathVariable UUID datasetId, @PathVariable UUID versionId,
+                                         @PathVariable UUID assetId) throws Exception {
+        var asset = sourceFiles.resolve(datasetId, versionId, List.of(assetId)).get(0);
+        var stream=sourceFiles.open(datasetId,versionId,asset);
         return ResponseEntity.ok().contentType(MediaType.parseMediaType(
                 asset.contentType() == null ? "application/octet-stream" : asset.contentType()))
+                .contentLength(stream.size())
                 .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment()
-                        .filename(asset.fileName(), java.nio.charset.StandardCharsets.UTF_8).build().toString())
-                .header(HttpHeaders.CACHE_CONTROL, "no-store").body(response.getBody());
+                        .filename(asset.logicalPath().substring(asset.logicalPath().lastIndexOf('/') + 1),
+                                java.nio.charset.StandardCharsets.UTF_8).build().toString())
+                .header(HttpHeaders.CACHE_CONTROL, "no-store").body(new org.springframework.core.io.InputStreamResource(stream.inputStream()));
     }
 
     private static HttpHeaders headers(String authorization, MediaType type) {

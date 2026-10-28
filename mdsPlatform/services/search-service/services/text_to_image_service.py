@@ -7,15 +7,25 @@ from services.result_assembler import ResultAssembler
 
 class TextToImageService:
     def __init__(self):
-        self.encoder = QueryEncoder()
+        self._encoder = None
 
-    def search_visual(self, loaded, query, top_k):
+    @property
+    def encoder(self):
+        if self._encoder is None:
+            self._encoder = QueryEncoder()
+        return self._encoder
+
+    def search_visual(self, loaded, query, top_k, allowed=None, encoded_query=None):
         """Image representations only; preserve page/frame identity and preview location."""
         import json
         if loaded.image_index is None or loaded.image_index.ntotal == 0:
             return []
-        vector = self.encoder.encode_text(query)
-        scores, indices = FaissRetriever.search(loaded.image_index, vector, min(top_k, loaded.image_index.ntotal))
+        if query:
+            vector = encoded_query if encoded_query is not None else self.encoder.encode_text(query)
+            scores, indices = FaissRetriever.search(loaded.image_index, vector, loaded.image_index.ntotal if allowed else min(top_k, loaded.image_index.ntotal))
+        else:
+            indices = range(len(loaded.image_metadata))
+            scores = [0.0] * len(loaded.image_metadata)
         result = []
         for score, index in zip(scores, indices):
             if index < 0:
@@ -24,16 +34,20 @@ class TextToImageService:
             locator = row.get("locator", {})
             if isinstance(locator, str):
                 locator = json.loads(locator) if locator else {}
+            if allowed and not allowed(str(row["asset_id"]), locator if isinstance(locator,dict) else {}):
+                continue
             path = row.get("preview_path")
             preview = {"logicalPath": str(row["logical_path"])}
             if isinstance(path, str) and path.startswith("/representations/"):
-                preview.update(artifactPath=path, indexRepoId=loaded.bundle.get("indexRepoId"),
-                               indexCommitId=loaded.bundle.get("indexCommitId"))
+                preview.update(derived=True,representationId=str(row.get("representation_id") or ""))
             result.append({"assetId": str(row["asset_id"]), "score": float(score),
                            "logicalPath": str(row["logical_path"]), "locator": locator if isinstance(locator, dict) else {},
                            "texts": ResultAssembler._normalize_texts(row), "preview": preview})
+            if len(result) >= top_k:
+                break
         return result
 
+    @registry.serialized
     def search(self, req):
         loaded = registry.ensure_loaded(str(req.datasetId), str(req.versionId), str(req.indexVersionId))
         vector = self.encoder.encode_text(req.query)
