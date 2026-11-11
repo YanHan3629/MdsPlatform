@@ -16,15 +16,7 @@ public interface ArtifactCommitMapper {
 
     List<ArtifactCommit> selectByRepoId(@Param("repoId") UUID repoId);
 
-    /**
-     * 分页查询 commits
-     */
-    List<ArtifactCommit> selectByRepoIdPaged(@Param("query") ListCommitsQuery query);
-
-    /**
-     * 统计 commits 总数
-     */
-    long countByRepoId(@Param("query") ListCommitsQuery query);
+    List<ArtifactCommit> selectCatalogueCandidates(@Param("query") ListCommitsQuery query);
 
     ArtifactCommit selectDraftByRepoId(@Param("repoId") UUID repoId);
 

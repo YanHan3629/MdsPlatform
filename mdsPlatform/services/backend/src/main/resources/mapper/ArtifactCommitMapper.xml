@@ -39,7 +39,7 @@
         ORDER BY created_at DESC
     </select>
 
-    <select id="selectByRepoIdPaged" resultMap="ArtifactCommitMap">
+    <select id="selectCatalogueCandidates" resultMap="ArtifactCommitMap">
         SELECT commit_id, repo_id, commit_status, commit_source, created_by, published_by, created_at, published_at, comment, meta
         FROM public.artifact_commit
         WHERE repo_id = #{query.repoId}
@@ -49,20 +49,7 @@
         <if test="query.commitSourceOrNull != null">
             AND commit_source = #{query.commitSourceOrNull}
         </if>
-        ORDER BY ${query.sortByOrDefault} ${query.sortOrderOrDefault}
-        LIMIT #{query.limit} OFFSET #{query.offset}
-    </select>
-
-    <select id="countByRepoId" resultType="long">
-        SELECT COUNT(*)
-        FROM public.artifact_commit
-        WHERE repo_id = #{query.repoId}
-        <if test="query.commitStatusOrNull != null">
-            AND commit_status = #{query.commitStatusOrNull}
-        </if>
-        <if test="query.commitSourceOrNull != null">
-            AND commit_source = #{query.commitSourceOrNull}
-        </if>
+        ORDER BY ${query.sortByOrDefault} ${query.sortOrderOrDefault}, commit_id
     </select>
 
     <select id="selectCommitIdsByRepoId" resultType="java.util.UUID">

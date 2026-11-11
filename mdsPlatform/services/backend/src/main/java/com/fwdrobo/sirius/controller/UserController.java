@@ -1,74 +1,30 @@
 package com.fwdrobo.sirius.controller;
-
 import com.fwdrobo.sirius.dto.user.PasswordResetReq;
-import com.fwdrobo.sirius.entity.FwdUser;
-import com.fwdrobo.sirius.service.RoleService;
-import com.fwdrobo.sirius.service.UserService;
-import com.fwdrobo.sirius.util.SecurityUtils;
-import org.springframework.security.access.prepost.PreAuthorize;
-import org.springframework.security.core.Authentication;
+import com.fwdrobo.sirius.security.*;
+import com.fwdrobo.sirius.security.IdentityManagementService.TypeAssignment;
 import org.springframework.web.bind.annotation.*;
-
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
-
-
+import java.util.*;
 @RestController
 @RequestMapping("/api/users")
 public class UserController {
-    private final UserService userService;
-    private final RoleService roleService;
-
-    public UserController(UserService userService, RoleService roleService) {
-        this.userService = userService;
-        this.roleService = roleService;
+    private final AuthorizationService auth;private final IdentitySessionService sessions;private final IdentityManagementService management;private final com.fwdrobo.sirius.service.DatasetAccessService access;
+    public UserController(AuthorizationService auth,IdentitySessionService sessions,IdentityManagementService management,com.fwdrobo.sirius.service.DatasetAccessService access){this.auth=auth;this.sessions=sessions;this.management=management;this.access=access;}
+    @GetMapping public Object list(){return management.users(null);}
+    @GetMapping("/me") public Object me(){var out=new LinkedHashMap<String,Object>(auth.currentIdentity());out.put("account",management.ownAccount());return out;}
+    @GetMapping("/me/scopes") public Object scopes(@RequestParam String operation,jakarta.servlet.http.HttpServletRequest request){
+        var scopes=access.scopesForOperation(operation);
+        request.setAttribute(AuthorizationService.REQUEST_OPERATION,operation);
+        return org.springframework.http.ResponseEntity.ok().cacheControl(org.springframework.http.CacheControl.noStore())
+            .header("X-Authorization-Policy-Version",Long.toString(auth.currentPolicyVersion())).body(scopes);
     }
-
-    /**
-     * 列出所有用户（仅管理员）
-     */
-    @GetMapping
-    @PreAuthorize("hasAnyRole('ADMIN','SUPER_ADMIN')")
-    public List<FwdUser> list() {
-        return userService.list();
+    @PatchMapping("/me/password") public Object password(@RequestBody PasswordResetReq req){
+        sessions.changePassword(auth.actor().userId(),req.oldPassword(),req.newPassword());return Map.of("success",true,"loginRequired",true);
     }
-
-    /**
-     * 获取当前登录用户信息
-     * - 返回用户名和角色权限
-     * - 需要提供有效的访问令牌
-     */
-    @GetMapping("/me")
-    public Map<String, Object> me(Authentication authentication) {
-        String username = SecurityUtils.getUserName();
-        List<String> roles = SecurityUtils.getUserRoles();
-        return Map.of(
-                "userName", username,
-                "roles", roles
-        );
+    @PostMapping("/me/close") public Object close(@RequestBody IdentityManagementController.VersionRequest req){
+        management.closeSelf(req.expectedVersion());return Map.of("success",true,"accountState","CLOSED");
     }
-
-    /**
-     * 修改当前登录用户密码
-     * - 采用 旧密码 + 新密码 的方式修改密码
-     * - 需要提供有效的访问令牌
-     */
-    @PatchMapping("/me/password")
-    public Map<String, Object> changePassword(@RequestBody PasswordResetReq req) {
-        userService.changePassword(req.oldPassword(), req.newPassword());
-        return Map.of(
-                "message", "密码修改成功"
-        );
-    }
-
-    @PutMapping("/{userId}/roles")
-    @PreAuthorize("hasAnyRole('ADMIN','SUPER_ADMIN')")
-    public Map<String, Object> setUserRoles(@PathVariable UUID userId, @RequestBody List<UUID> roleIds) {
-        roleService.setUserRoles(userId, roleIds);
-        return Map.of(
-                "success", true,
-                "message", "用户授权成功"
-        );
+    @PutMapping("/{uid}/roles") public Object roles(@PathVariable UUID uid,@RequestBody List<UUID> ids,
+            @RequestHeader(value="If-Match",required=false) Long version){
+        return management.assignTypes(uid,new TypeAssignment(ids,ids==null||ids.isEmpty()?null:ids.get(0),version));
     }
 }

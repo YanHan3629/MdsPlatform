@@ -1,6 +1,8 @@
 (() => {
-  let token = sessionStorage.getItem('qaToken') || '';
-  let account = sessionStorage.getItem('qaAccount') || '';
+  let token = false;
+  let account = '';
+  let scopeSets = new Map(), searchIndex = '';
+  const downloadUrls = new Set();
   let datasets = [];
   let busy = false;
   let authRevision = 0;
@@ -9,19 +11,23 @@
   let qaSequence = 0;
   let qaAbort = null;
   let ingestLoaded = false;
+  let ingestWork = null;
   let mappingEditRevision = 0;
-  let mappingLoadRevision = 0;
-  const previewUrls = new Map();
+  let ingestSelectionRevision = 0;
+  const sourceUrls = new Map();
   function clearQaMeta() {
     const meta=$('#qaMeta');meta.textContent='';
     for(const key of ['traceId','retrievalStatus','generationStatus','httpStatus'])delete meta.dataset[key];
   }
-  function releasePreviews(root) {
-    for(const [url,image] of previewUrls) if(!root || root.contains(image)) { URL.revokeObjectURL(url);previewUrls.delete(url); }
+  function releaseSourceUrls(root) {
+    for(const [url,element] of sourceUrls) if(!root || root.contains(element)) { URL.revokeObjectURL(url);sourceUrls.delete(url); }
+  }
+  function clearSources(root) {
+    releaseSourceUrls(root);root.replaceChildren();
   }
   function invalidateQaResult() {
-    qaSequence++;qaAbort?.abort();releasePreviews();
-    $('#qaAnswer').textContent='';$('#qaSources').replaceChildren();clearQaMeta();$('#qaNotice').hidden=true;
+    qaSequence++;qaAbort?.abort();
+    $('#qaAnswer').textContent='';clearSources($('#qaSources'));clearQaMeta();$('#qaNotice').replaceChildren();$('#qaNotice').hidden=true;
     $('#qaProgress').textContent='数据范围已更新，可重新提问。';delete $('#qaProgress').dataset.request;
   }
   const base = () => state.api.replace(/\/$/, '');
@@ -41,17 +47,10 @@
   }
 
   async function authorizedFetch(url, options = {}) {
-    const revision = authRevision;
-    const response = await fetch(url, {
-      ...options, signal: options.signal ? AbortSignal.any([options.signal, authAbort.signal]) : authAbort.signal, headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers }
-    });
-    if (revision !== authRevision) throw new DOMException('账号已变化', 'AbortError');
-    if (!response.ok) {
-      if (response.status === 401) { clearSession(); throw new Error('登录已失效，请重新登录数据空间'); }
-      const raw = await response.text();
-      let error; try { error = JSON.parse(raw); } catch (_) { /* plain upstream error */ }
-      throw new Error(error?.detail || error?.message || raw || `HTTP ${response.status}`);
-    }
+    const revision=authRevision;
+    const signal=options.signal?AbortSignal.any([options.signal,authAbort.signal]):authAbort.signal;
+    const response=await window.mdsIdentity.fetch(url,{...options,signal});
+    if(revision!==authRevision)throw new DOMException('账号已变化','AbortError');
     return response;
   }
   const request=(path,options={})=>authorizedFetch(base()+'/qa'+path,options);
@@ -65,52 +64,61 @@
   const mmJson = (path, value) => requestMm(path, { method: 'POST',
     headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) });
   async function mmList(path) {
+    const revision = authRevision;
     const rows = [];
     for (let page = 1; page <= 50; page++) {
+      if (revision !== authRevision) throw new DOMException('账号或权限已变化', 'AbortError');
       const result = await requestMm(`${path}${path.includes('?') ? '&' : '?'}page=${page}&size=100`);
       rows.push(...(result.items || []));
       if (page >= result.totalPages) return rows;
     }
     throw new Error('目录超过页面可加载范围，请缩小数据范围');
   }
-  async function loadIngestSpaces(preferred) {
+  async function loadIngestSpaces(preferred, preferredDataset) {
+    const selection = ++ingestSelectionRevision;
     const spaces = await mmList('/spaces');
+    if (selection !== ingestSelectionRevision) return;
     const previous = preferred || $('#qaIngestSpace').value;
     $('#qaIngestSpace').innerHTML = option('', '选择已有空间') + spaces.map(s => option(s.spaceId, s.spaceName)).join('');
-    $('#qaIngestSpace').value = spaces.some(s => s.spaceId === previous) ? previous : spaces[0]?.spaceId || '';
-    await loadIngestDatasets();
+    $('#qaIngestSpace').value = spaces.some(s => s.spaceId === previous) ? previous : preferred ? '' : spaces[0]?.spaceId || '';
+    await loadIngestDatasets(preferredDataset, selection);
   }
-  async function loadIngestDatasets(preferred) {
+  async function loadIngestDatasets(preferred, selection = ++ingestSelectionRevision) {
     const spaceId = $('#qaIngestSpace').value;
     const datasetsInSpace = spaceId ? await mmList(`/spaces/${spaceId}/datasets`) : [];
+    if (selection !== ingestSelectionRevision) return;
     const previous = preferred || $('#qaIngestDataset').value;
     $('#qaIngestDataset').innerHTML = option('', '选择已有数据集')
       + datasetsInSpace.map(d => option(d.datasetId, d.datasetName)).join('');
     $('#qaIngestDataset').value = datasetsInSpace.some(d => d.datasetId === previous)
-      ? previous : datasetsInSpace[0]?.datasetId || '';
-    await loadIngestVersions();
+      ? previous : preferred ? '' : datasetsInSpace[0]?.datasetId || '';
+    await loadIngestVersions(undefined, selection);
   }
-  async function loadIngestVersions(preferred) {
-    const loadRevision = ++mappingLoadRevision;
+  async function loadIngestVersions(preferred, selection = ++ingestSelectionRevision) {
     const editRevision = mappingEditRevision;
     const datasetId = $('#qaIngestDataset').value;
     const versions = datasetId ? await mmList(`/datasets/${datasetId}/versions`) : [];
+    if (selection !== ingestSelectionRevision) return;
     const previous = preferred || $('#qaIngestVersion').value;
     $('#qaIngestVersion').innerHTML = option('', '选择已有版本')
       + versions.map(v => option(v.versionId, `${v.versionName} · ${v.versionStatus}`)).join('');
     $('#qaIngestVersion').value = versions.some(v => v.versionId === previous)
-      ? previous : versions[0]?.versionId || '';
+      ? previous : preferred ? '' : versions[0]?.versionId || '';
     $('#qaIngestVersion').dataset.status = versions.find(v => v.versionId === $('#qaIngestVersion').value)?.versionStatus || '';
-    if ($('#qaIngestVersion').value) {
-      const config = await requestMm(`/datasets/${datasetId}/versions/${$('#qaIngestVersion').value}/ingest-tasks/mapping`);
-      // A late response must not erase fields the user has already started editing.
-      if (loadRevision !== mappingLoadRevision || editRevision !== mappingEditRevision) return;
-      $('#qaSourceTimezone').value = config?.timezone || '';
-      $('#qaSourceTimeColumn').value = config?.timeColumn || '';
-      $('#qaSourceEntities').value = (config?.entityColumns || []).join(',');
-      $('#qaSourceUnits').value = config?.unitMapping ? JSON.stringify(config.unitMapping) : '';
-      $('#qaAssetMappings').value = config?.assetMappings ? JSON.stringify(config.assetMappings) : '';
-    }
+    const auth = window.mdsIdentity;
+    const canReadMapping = auth.has('dataset.draft.manage') || auth.has('dataset.index.build');
+    const versionId = $('#qaIngestVersion').value;
+    const config = versionId && canReadMapping
+      ? await requestMm(`/datasets/${datasetId}/versions/${versionId}/ingest-tasks/mapping`) : null;
+    // A late response must not erase fields the user has already started editing.
+    if (selection === ingestSelectionRevision && editRevision === mappingEditRevision) showIngestMapping(config);
+  }
+  function showIngestMapping(config) {
+    $('#qaSourceTimezone').value = config?.timezone || '';
+    $('#qaSourceTimeColumn').value = config?.timeColumn || '';
+    $('#qaSourceEntities').value = (config?.entityColumns || []).join(',');
+    $('#qaSourceUnits').value = config?.unitMapping ? JSON.stringify(config.unitMapping) : '';
+    $('#qaAssetMappings').value = config?.assetMappings ? JSON.stringify(config.assetMappings) : '';
   }
   async function saveMapping(datasetId = $('#qaIngestDataset').value, versionId = $('#qaIngestVersion').value, provided) {
     if (!datasetId || !versionId) throw new Error('请先选择数据集和版本');
@@ -140,37 +148,73 @@
       return { file, logicalPath };
     });
   }
+  function releaseIngest(work = ingestWork) {
+    if (!work || ingestWork !== work) return;
+    ingestWork = null;
+    delete $('#qaIngestForm').dataset.ingestBusy;
+    for (const [control, disabled] of work.controls) control.disabled = disabled;
+    window.mdsIdentityUi?.applyCapabilities();
+  }
+  async function prepareIngestTarget(work, newSpace, newDataset) {
+    const auth = window.mdsIdentity;
+    const actor = auth.identity;
+    const revision = authRevision;
+    let spaceId = $('#qaIngestSpace').value;
+    if (newSpace) {
+      spaceId = (await mmJson('/spaces', { spaceName: newSpace })).spaceId;
+      $('#qaNewSpace').value = '';
+      await loadIngestSpaces(spaceId);
+    }
+    if (ingestWork !== work || revision !== authRevision) throw new DOMException('账号或权限已变化', 'AbortError');
+    if (!spaceId || $('#qaIngestSpace').value !== spaceId) throw new Error('请选择或创建空间');
+    const { datasetId } = await mmJson(`/spaces/${spaceId}/datasets`, {
+      datasetName: newDataset, datasetType: 'GENERAL', modalityType: 'MIXED'
+    });
+    // The creator grant advances the policy. A pending identity check may predate it.
+    let current = await auth.check();
+    if (current?.policyVersion === actor.policyVersion) current = await auth.check();
+    if (ingestWork !== work || current?.userId !== actor.userId || current.orgId !== actor.orgId ||
+        current.permissionVersion !== actor.permissionVersion || !auth.has('dataset.upload')) return;
+    $('#qaNewDataset').value = '';
+    await loadIngestSpaces(spaceId, datasetId);
+    if (ingestWork !== work) return;
+    if ($('#qaIngestSpace').value !== spaceId || $('#qaIngestDataset').value !== datasetId)
+      throw new Error('已创建的数据集不在当前可用范围内，请刷新后重新选择');
+    ingestLoaded = true;
+    $('#qaIngestProgress').textContent = auth.has('dataset.draft.manage')
+      ? '数据集已创建并选中。请选择文件并填写草稿版本名称，再提交上传。'
+      : '数据集已创建并选中。请在有权限的草稿版本可用后再选择文件上传。';
+  }
   async function submitIngest(event) {
     event.preventDefault();
+    if (ingestWork) return;
     if (!token) return toast('请先登录数据空间账号');
-    const button = $('#qaIngestSubmit');
-    const ingestRevision=authRevision;
-    const controls=[...$('#qaIngestForm').querySelectorAll('input,select,textarea,button')].map(e=>[e,e.disabled]);
-    controls.forEach(([e])=>e.disabled=true);
-    button.disabled = true;
-    let currentPath='';let uploaded=0;
+    const auth = window.mdsIdentity;
+    if (!auth.has('dataset.upload')) return toast('当前账号没有上传权限');
+    const newSpace = $('#qaNewSpace').value.trim();
+    const newDataset = $('#qaNewDataset').value.trim();
+    if (newSpace && !newDataset) return toast('在新空间上传时，请先填写新建数据集名称');
+    if (newDataset && !auth.has('dataset.create')) return toast('当前账号没有创建数据集权限');
+    const form = $('#qaIngestForm');
+    const work = { preparing: !!newDataset,
+      controls: [...form.querySelectorAll('input,select,textarea,button')].map(e => [e, e.disabled]) };
+    ingestWork = work;
+    form.dataset.ingestBusy = 'true';
+    for (const [control] of work.controls) control.disabled = true;
+    const ingestRevision = authRevision;
+    let currentPath = '', uploaded = 0, completed = false;
     try {
+      if (work.preparing) {
+        // Dataset creation can change authority. Do not retain selected files across it.
+        $('#qaIngestFiles').value = ''; $('#qaIngestFolder').value = '';
+        await prepareIngestTarget(work, newSpace, newDataset);
+        return;
+      }
       const configuredMapping = mappingForm();
       const files = ingestFiles();
       if (!files.length) throw new Error('没有可入库的业务文件；README/数据集说明.md已排除，请选择业务文件');
-      let spaceId = $('#qaIngestSpace').value;
-      const newSpace = $('#qaNewSpace').value.trim();
-      if (newSpace) {
-        spaceId = (await mmJson('/spaces', { spaceName: newSpace })).spaceId;
-        $('#qaNewSpace').value = '';
-        await loadIngestSpaces(spaceId);
-      }
-      if (!spaceId) throw new Error('请选择或创建空间');
-      let datasetId = $('#qaIngestDataset').value;
-      const newDataset = $('#qaNewDataset').value.trim();
-      if (newDataset) {
-        datasetId = (await mmJson(`/spaces/${spaceId}/datasets`, {
-          datasetName: newDataset, datasetType: 'GENERAL', modalityType: 'MIXED'
-        })).datasetId;
-        $('#qaNewDataset').value = '';
-        await loadIngestDatasets(datasetId);
-      }
-      if (!datasetId) throw new Error('请选择或创建数据集');
+      const datasetId = $('#qaIngestDataset').value;
+      if (!datasetId) throw new Error('请选择数据集或先创建新数据集');
       let versionId = $('#qaIngestVersion').value;
       const newVersion = $('#qaNewVersion').value.trim();
       if (newVersion) {
@@ -180,10 +224,9 @@
         $('#qaNewVersion').value = '';
         await loadIngestVersions(versionId);
         if(ingestRevision!==authRevision)throw new DOMException('账号已变化','AbortError');
-        $('#qaSourceTimezone').value=configuredMapping.timezone||'';$('#qaSourceTimeColumn').value=configuredMapping.timeColumn||'';
-        $('#qaSourceEntities').value=(configuredMapping.entityColumns||[]).join(',');$('#qaSourceUnits').value=JSON.stringify(configuredMapping.unitMapping||{});$('#qaAssetMappings').value=JSON.stringify(configuredMapping.assetMappings||{});
+        showIngestMapping(configuredMapping);
       }
-      if (!versionId) throw new Error('请选择或创建版本');
+      if (!versionId || $('#qaIngestVersion').value !== versionId) throw new Error('请选择或创建版本');
       if (!['DRAFT', 'UPLOADING'].includes($('#qaIngestVersion').dataset.status)) {
         throw new Error('已发布版本不可写，请填写新版本名称后再上传');
       }
@@ -195,18 +238,31 @@
           { method: 'PUT', headers: { 'Content-Type': file.type || 'application/octet-stream' }, body: file });
         uploaded++;
       }
-      $('#qaIngestProgress').textContent = '上传完成，正在发布版本并创建索引任务…';
       if(ingestRevision!==authRevision)throw new DOMException('账号已变化','AbortError');
-      await saveMapping(datasetId,versionId,configuredMapping);
-      await requestMm(`/datasets/${datasetId}/versions/${versionId}/publish`, { method: 'POST' });
-      $('#qaIngestProgress').textContent = `版本已发布，${files.length} 个业务文件已校验，已排除 ${$('#qaIngestProgress').dataset.skipped||0} 个说明文件；后台索引任务已自动创建。`;
+      if(auth.has('dataset.draft.manage'))await saveMapping(datasetId,versionId,configuredMapping);
+      if(auth.has('dataset.publish')){
+        await requestMm(`/datasets/${datasetId}/versions/${versionId}/publish`,{method:'POST'});
+        $('#qaIngestProgress').textContent=window.mdsIdentity.has('dataset.index.build')?
+          `版本已发布，${files.length} 个业务文件已校验；索引任务状态以服务端任务列表为准。`:
+          `已上传并发布 ${files.length} 个业务文件，等待有权维护者构建索引。`;
+      }else $('#qaIngestProgress').textContent=`已上传 ${files.length} 个业务文件并保留为草稿，等待本企业有权维护者发布。`;
+      completed = true;
       $('#qaIngestFiles').value = ''; $('#qaIngestFolder').value = '';
       await loadIngestVersions(versionId);
       await refresh();
     } catch (error) {
-      if(ingestRevision!==authRevision||error.name==='AbortError')return;
-      $('#qaIngestProgress').textContent = `入库未完成，已上传 ${uploaded} 个文件${currentPath?'，当前文件 '+currentPath:''}：${error.message}。已上传的草稿文件保留，可纠错后续作。`;
-    } finally { controls.forEach(([e,disabled])=>e.disabled=disabled);button.disabled = false; }
+      if (ingestWork !== work) return;
+      if (error.name === 'AbortError') {
+        if (work.preparing && token) $('#qaIngestProgress').textContent = '权限已重新核对。请在当前目录确认数据集是否已创建，再选择文件继续。';
+      } else if (work.preparing) $('#qaIngestProgress').textContent = `数据集准备未完成：${error.message}`;
+      else if (completed) toast(`上传已完成，刷新版本状态失败：${error.message}`);
+      else $('#qaIngestProgress').textContent = `入库未完成，已上传 ${uploaded} 个文件${currentPath?'，当前文件 '+currentPath:''}：${error.message}。已上传的草稿文件保留，可纠错后续作。`;
+    } finally {
+      if (ingestWork === work) {
+        releaseIngest(work);
+        if (work.preparing && token && !ingestLoaded) void refresh();
+      }
+    }
   }
   async function backfillIngest() {
     const revision=authRevision;
@@ -222,7 +278,7 @@
       $('#qaIngestProgress').textContent = `回填任务 ${task.status} · ${task.stage}；重复请求会复用同一任务。`;
       await refresh();
     } catch (error) { if(revision===authRevision&&error.name!=='AbortError')$('#qaIngestProgress').textContent = `回填失败：${error.message}`; }
-    finally { button.disabled = false; }
+    finally { if(revision===authRevision)button.disabled=false;window.mdsIdentityUi?.applyCapabilities(); }
   }
   function showAccount() {
     $('#qaAccount').textContent = token ? `已登录：${account}` : '尚未登录';
@@ -232,34 +288,52 @@
   function notifyScope() {
     window.dispatchEvent(new CustomEvent('dataspace-scope', {detail: {revision: authRevision}}));
   }
-  function clearSession() {
-    releasePreviews();
+  function resetSessionView(reason) {
+    // Only the metadata-only creation step can finish reselecting a freshly authorized target.
+    if (!ingestWork?.preparing || !['permissions-changed','permissions-verified'].includes(reason)) releaseIngest();
+    releaseSourceUrls();
     authRevision++; authAbort.abort(); authAbort = new AbortController(); qaSequence++; qaAbort?.abort();
-    token = ''; account = ''; datasets = []; ingestLoaded = false;
+    token=window.mdsIdentity.authenticated;account=window.mdsIdentity.identity?.username||'';
+    datasets=[];scopeSets=new Map();searchIndex='';ingestLoaded=false;busy=false;
+    for(const url of downloadUrls)URL.revokeObjectURL(url);downloadUrls.clear();
     for (const key of ['qaToken','qaAccount','qaIndex','qaDraft','retrievalDraft']) sessionStorage.removeItem(key);
     $('#qaDataset').innerHTML = option('', '不使用数据空间检索');
     $('#qaAnswer').textContent = ''; $('#qaSources').replaceChildren(); clearQaMeta();
-    $('#qaProgress').textContent = '请登录后提问'; $('#qaNotice').hidden = true; $('#qaForm').reset();
+    $('#qaProgress').textContent = '请登录后提问'; $('#qaNotice').replaceChildren(); $('#qaNotice').hidden = true; $('#qaForm').reset();
     delete $('#qaProgress').dataset.request;
-    $('#qaIngestForm').reset(); mappingLoadRevision++;
+    $('#qaIngestForm').reset(); ingestSelectionRevision++;
     for (const [id,label] of [['qaIngestSpace','登录后加载'],['qaIngestDataset','先选择空间'],['qaIngestVersion','先选择数据集']]) $('#'+id).innerHTML = option('',label);
     $('#qaIndexing').replaceChildren(); showAccount(); syncMode(); notifyScope();
+    delete $('#qaIngestVersion').dataset.status;
+    delete $('#qaIngestProgress').dataset.skipped;
     $('#qaIngestProgress').textContent='登录后可操作真实数据版本。';
+    window.mdsIdentityUi?.applyCapabilities();
   }
   function selectedDataset() { return datasets.find(d => d.indexVersionId === $('#qaDataset').value); }
-  function selectIndex(value) {
+  function scopesFor(operation){return scopeSets.get(operation)||[];}
+  function scopeFor(operation){
+    const selected=operation==='data.search'?searchIndex:$('#qaDataset').value;
+    const item=scopesFor(operation).find(d=>d.indexVersionId===selected);return item?{...item}:null;
+  }
+  function canUseScope(scope,operation){
+    return !!scope&&window.mdsIdentity.has(operation)&&scopesFor(operation).some(d=>d.datasetId===scope.datasetId&&d.versionId===scope.versionId&&
+      (operation==='data.raw.download'||d.indexVersionId===scope.indexVersionId));
+  }
+  function selectIndex(value,operation='data.qa') {
+    if(operation==='data.search'){searchIndex=scopesFor(operation).some(d=>d.indexVersionId===value)?value:'';notifyScope();return;}
     invalidateQaResult();
-    $('#qaDataset').value = datasets.some(d=>d.indexVersionId === value) ? value : '';
-    sessionStorage.setItem('qaIndex', $('#qaDataset').value); syncMode(); notifyScope();
+    $('#qaDataset').value=datasets.some(d=>d.indexVersionId===value)?value:'';
+    sessionStorage.setItem('qaIndex',$('#qaDataset').value);syncMode();notifyScope();
   }
   async function openProductScope(scope,target) {
-    const revision=authRevision;
-    await refresh();if(revision!==authRevision)throw new DOMException('账号已变化','AbortError');
-    if(!datasets.some(d=>d.datasetId===scope.datasetId&&d.versionId===scope.versionId&&d.indexVersionId===scope.indexVersionId))throw new Error('该产品冻结范围当前不可用，请核对授权或索引状态');
-    qaSequence++;qaAbort?.abort();
-    $('#qaAnswer').textContent='';$('#qaSources').replaceChildren();clearQaMeta();
-    $('#qaInputMode').value='question_only';$('#qaUseSearch').checked=true;
-    selectIndex(scope.indexVersionId);location.hash=target==='#retrieval'?'#retrieval':'#qa';
+    const operation=target==='#retrieval'?'data.search':'data.qa';
+    if(!window.mdsIdentity.has(operation))throw new Error(operation==='data.search'?'当前账号没有检索权限。':'当前账号没有问答权限。');
+    const revision=authRevision;await refresh();
+    if(revision!==authRevision)throw new DOMException('账号已变化','AbortError');
+    if(!scopesFor(operation).some(d=>d.datasetId===scope.datasetId&&d.versionId===scope.versionId&&d.indexVersionId===scope.indexVersionId))
+      throw new Error('该冻结范围当前未获授权或尚不可用。');
+    if(operation==='data.qa'){$('#qaInputMode').value='question_only';$('#qaUseSearch').checked=true;}
+    selectIndex(scope.indexVersionId,operation);location.hash=target==='#retrieval'?'#retrieval':'#qa';
   }
   function syncMode() {
     const mode = $('#qaInputMode').value;
@@ -269,35 +343,50 @@
     const d = selectedDataset();
     $('#qaDatasetInfo').textContent = mode === 'user_data_only' ? '本次只使用提交的资料。'
       : d ? `${d.datasetName} · ${d.versionName} · ${d.sampleCount} 个文件 · ${d.isOwnerCandidate?'私有候选，未启用':'索引 READY'}`
-      : '未选择数据集，本次回答不会检索数据空间。';
+      : '请选择当前获授权的数据范围。';
   }
   async function refresh() {
-    const revision = authRevision;
-    const health = async () => {
-      try {
-        const r = await (await request('/health')).json();
-        if (revision !== authRevision) return;
-        const ready = r.model?.loaded && r.vllm?.status === 'ok';
-        $('#qaHealth').textContent = ready ? '问答模型已就绪' : '模型正在启动或不可用';
-        $('#qaHealth').className = ready ? 'badge' : 'badge muted';
-      } catch (e) { if (e.name !== 'AbortError') $('#qaHealth').textContent = '问答服务未就绪'; }
+    const revision=authRevision;
+    const health=async()=>{
+      try{
+        const response=await fetch(base()+'/qa/health',{credentials:'omit',redirect:'error',signal:authAbort.signal});
+        const value=await response.json();if(revision!==authRevision)return;
+        const ready=value.model?.loaded&&value.vllm?.status==='ok';
+        $('#qaHealth').textContent=ready?'问答模型已就绪':'模型正在启动或不可用';
+        $('#qaHealth').className=ready?'badge':'badge muted';
+      }catch(error){if(revision===authRevision&&error.name!=='AbortError')$('#qaHealth').textContent='问答服务未就绪';}
     };
-    const scopes = async () => {
-      if (!token) return;
-      const [dr,tr] = await Promise.all([request('/datasets?includeOwnerCandidates=true'),request('/indexing')]);
-      const [rows,tasks] = await Promise.all([dr.json(),tr.json()]);
-      if (revision !== authRevision) return;
-      const previous = $('#qaDataset').value || sessionStorage.getItem('qaIndex');
-      datasets = rows;
-      updateIndexingTasks(tasks);
-      $('#qaDataset').innerHTML = option('', '不使用数据空间检索') + datasets.map(d=>option(d.indexVersionId,`${d.datasetName} / ${d.versionName} / ${d.isOwnerCandidate?'私有候选（未启用）':d.isActiveIndex===false?'产品冻结索引':'当前索引'} ${d.indexVersionId.slice(0,8)}`)).join('');
-      const fallback=datasets.find(d=>d.isActiveIndex===true)||datasets.find(d=>!d.isOwnerCandidate);
-      $('#qaDataset').value = datasets.some(d=>d.indexVersionId === previous) ? previous : previous === '' ? '' : fallback?.indexVersionId || '';
-      if(previous && previous!==$('#qaDataset').value)invalidateQaResult();
-      syncMode(); notifyScope();
+    const scopes=async()=>{
+      if(!token)return;
+      const operations=['data.catalog.read','data.preview','data.search','data.qa','data.raw.download'];
+      const values=await Promise.all(operations.map(async operation=>[operation,window.mdsIdentity.has(operation)?
+        await window.mdsIdentity.api('/users/me/scopes?operation='+encodeURIComponent(operation)):[]]));
+      if(revision!==authRevision)return;
+      const previous=$('#qaDataset').value||sessionStorage.getItem('qaIndex');
+      scopeSets=new Map(values);datasets=scopesFor('data.qa');
+      if(!scopesFor('data.search').some(d=>d.indexVersionId===searchIndex)){
+        searchIndex=(scopesFor('data.search').find(d=>d.isActiveIndex)||scopesFor('data.search')[0])?.indexVersionId||'';
+      }
+      $('#qaDataset').innerHTML=option('','选择已授权问答范围')+datasets.map(d=>option(d.indexVersionId,
+        d.datasetName+' / '+d.versionName+' / '+(d.isActiveIndex?'当前索引':'授权冻结索引')+' '+d.indexVersionId.slice(0,8))).join('');
+      const fallback=datasets.find(d=>d.isActiveIndex)||datasets[0];
+      $('#qaDataset').value=datasets.some(d=>d.indexVersionId===previous)?previous:previous===''?'':fallback?.indexVersionId||'';
+      if(previous&&previous!==$('#qaDataset').value)invalidateQaResult();
+      syncMode();notifyScope();
     };
-    const results = await Promise.allSettled([health(),scopes(),token && !ingestLoaded ? loadIngestSpaces().then(()=>{if(revision===authRevision){ingestLoaded=true;$('#qaIngestProgress').textContent='已加载当前账号可访问的真实数据版本；可查看上传、发布与索引任务。';}}) : Promise.resolve()]);
-    results.forEach(r=>{if(r.status==='rejected' && r.reason.name!=='AbortError') toast(r.reason.message);});
+    const indexing=async()=>{
+      if(!token||!window.mdsIdentity.has('dataset.index.build')){updateIndexingTasks([]);return;}
+      const response=await request('/indexing');const tasks=await response.json();
+      if(revision===authRevision)updateIndexingTasks(tasks);
+    };
+    const ingestion=token&&window.mdsIdentity.has('data.catalog.read')&&window.mdsIdentity.has('dataset.upload')&&!ingestLoaded&&!ingestWork?
+      loadIngestSpaces().then(()=>{if(revision===authRevision){
+        ingestLoaded=true;
+        const progress=$('#qaIngestProgress');
+        if(progress.textContent==='登录后可操作真实数据版本。')progress.textContent='已加载当前账号可维护的数据版本。';
+      }}):Promise.resolve();
+    const results=await Promise.allSettled([health(),scopes(),indexing(),ingestion]);
+    if(revision===authRevision)results.forEach(result=>{if(result.status==='rejected'&&result.reason.name!=='AbortError')toast(result.reason.message);});
   }
   function updateIndexingTasks(tasks){
     $('#qaIndexing').innerHTML=(tasks||[]).slice(0,5).map(t=>`<div class="compact"><div><b>${esc(t.datasetName)} / ${esc(t.versionName)}</b><p>${esc(t.status)} · ${esc(t.stage)}${t.error?' · '+esc(t.error):''}</p><p>任务 ${esc(t.taskId||t.task_id||'')}</p></div></div>`).join('');
@@ -379,8 +468,9 @@
       +(facts.length>6?`\n已读取 ${facts.length} 项，此处展示前 6 项。`:'');
   }
   async function previewEvidence(button,source,scope,revision) {
+    if(revision!==authRevision||!button.isConnected)return;
     const card=button.closest('article'),figure=card.querySelector('figure');
-    if(!figure.hidden){releasePreviews(figure);figure.replaceChildren();figure.hidden=true;button.textContent='预览证据';return;}
+    if(!figure.hidden){clearSources(figure);figure.hidden=true;button.textContent='预览证据';return;}
     const rendered=source.provenance?.renderedRegion,registered=source.provenance?.registeredImage;
     const descriptor=rendered||registered,identity=descriptor?.identity;
     if(!scope||!identity||['datasetId','versionId','indexVersionId'].some(key=>String(scope[key])!==identity[key])||String(source.asset_id)!==identity.assetId)throw new Error('证据与当前冻结范围不匹配，请重新提问');
@@ -401,14 +491,16 @@
       if(checksum!==descriptor.outputSha256||checksum!==response.headers.get('X-Evidence-Sha256'))throw new Error('证据图像完整性校验未通过');
       if(revision!==authRevision||!button.isConnected)return;
       const image=document.createElement('img'),caption=document.createElement('figcaption'),url=URL.createObjectURL(blob);
-      previewUrls.set(url,image);image.src=url;image.alt=`${source.original_format} · ${evidenceLocation(source)}`;
+      sourceUrls.set(url,image);image.src=url;image.alt=`${source.original_format} · ${evidenceLocation(source)}`;
       caption.textContent=`${evidenceKind(source)} · ${evidenceLocation(source)}`;figure.dataset.evidenceSha256=checksum;figure.replaceChildren(image,caption);figure.hidden=false;button.textContent='收起证据';
     }finally{button.disabled=false;if(figure.hidden)button.textContent='预览证据';}
   }
   async function renderSources(target, sources, scope, revision = authRevision) {
-    releasePreviews(target);
+    if(revision!==authRevision)return;
+    releaseSourceUrls(target);
     const files = new Map();
-    if (scope) {
+    const canPreview=canUseScope(scope,'data.preview'),canDownload=canUseScope(scope,'data.raw.download');
+    if (scope&&canPreview) {
       const ids = [...new Set(sources.flatMap(s=>sourceReferences(s).map(r=>r.assetId)))];
       for(let offset=0;offset<ids.length;offset+=500){
         const rows=await(await request(`/source-files/${scope.datasetId}/${scope.versionId}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ids.slice(offset,offset+500))})).json();
@@ -418,9 +510,10 @@
     }
     if(revision!==authRevision) return;
     target.innerHTML=sources.map((s,i)=>{
-      const refs=sourceReferences(s),locator=evidenceLocation(s),preview=!!(s.provenance?.renderedRegion||s.provenance?.registeredImage);
+      const refs=sourceReferences(s),locator=evidenceLocation(s),preview=canPreview&&!!(s.provenance?.renderedRegion||s.provenance?.registeredImage);
       const downloads=refs.map(ref=>{
-        const file=files.get(ref.assetId), label=file?.logicalPath||ref.logicalPath||ref.assetId;
+        const file=files.get(ref.assetId)||(canDownload?{available:true,logicalPath:ref.logicalPath}:null), label=file?.logicalPath||ref.logicalPath||ref.assetId;
+        if(!canDownload)return `<p>${esc(label)} · 未获原件下载授权</p>`;
         return file?.available?`<button class="btn link" type="button" data-source="${esc(ref.assetId)}">${ref.role==='metadata_verification'?'下载核验元数据':'下载来源'} · ${esc(label)}</button>`:`<p>${esc(label)}：${esc(file?.reason||'来源暂不可用')}</p>`;
       }).join('');
       const temporal=(s.provenance?.temporalMetadata||[]).slice(0,3).map(record=>{
@@ -431,15 +524,15 @@
       }).join('');
       return `<article class="compact" data-evidence-id="${esc(s.evidence_id||'')}"><div><b>来源 ${i+1} · ${esc(s.logical_path||s.source_type)}</b><p class="source-preview">${esc(evidenceSummary(s))}</p><div class="evidence-meta">${s.original_format?`<span>${esc(s.original_format)}</span>`:''}${evidenceKind(s)?`<span>${esc(evidenceKind(s))}</span>`:''}${locator?`<span>定位 ${esc(locator)}</span>`:''}${s.time_range?`<span>${esc(JSON.stringify(s.time_range))}</span>`:''}${Object.keys(s.units||{}).length?`<span>单位 ${esc(JSON.stringify(s.units))}</span>`:''}${(s.quality_flags||[]).map(f=>`<span>${esc(f)}</span>`).join('')}</div>${temporal}${preview?`<button class="btn link" type="button" data-evidence-preview="${i}">预览证据</button><figure class="evidence-image" hidden></figure>`:''}${downloads}</div></article>`;
     }).join('');
-    target.querySelectorAll('[data-evidence-preview]').forEach(button=>button.onclick=()=>previewEvidence(button,sources[Number(button.dataset.evidencePreview)],scope,revision).catch(error=>{if(error.name!=='AbortError')toast(error.message);}));
+    target.querySelectorAll('[data-evidence-preview]').forEach(button=>button.onclick=()=>previewEvidence(button,sources[Number(button.dataset.evidencePreview)],scope,revision).catch(error=>{if(revision===authRevision&&error.name!=='AbortError')toast(error.message);}));
     target.querySelectorAll('[data-source]').forEach(b=>b.onclick=async()=>{
       try{
-        if(revision!==authRevision) throw new Error('账号已变化，请重新检索');
+        if(revision!==authRevision||!b.isConnected) return;
         const response=await request(`/assets/${scope.datasetId}/${scope.versionId}/${b.dataset.source}`);
-        const blob=await response.blob(); if(revision!==authRevision) return;
-        const url=URL.createObjectURL(blob), a=document.createElement('a');a.href=url;
-        a.download=(files.get(b.dataset.source)?.logicalPath||'source').split('/').pop();document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);
-      }catch(e){if(e.name!=='AbortError')toast(e.message);}
+        const blob=await response.blob(); if(revision!==authRevision||!b.isConnected) return;
+        const url=URL.createObjectURL(blob), a=document.createElement('a');sourceUrls.set(url,b);a.href=url;
+        a.download=(files.get(b.dataset.source)?.logicalPath||'source').split('/').pop();document.body.append(a);a.click();a.remove();setTimeout(()=>{URL.revokeObjectURL(url);sourceUrls.delete(url);},10000);
+      }catch(e){if(revision===authRevision&&b.isConnected&&e.name!=='AbortError')toast(e.message);}
     });
   }
   function renderAnswer(target,answer) {
@@ -465,18 +558,21 @@
     if(images.length>2||images.some(f=>f.size>10*1024*1024)){
       $('#qaProgress').textContent='输入无效：最多上传2张图片，每张不超过10 MB';
       delete $('#qaProgress').dataset.request;
-      $('#qaAnswer').textContent='';$('#qaSources').replaceChildren();$('#qaMeta').textContent='';$('#qaNotice').hidden=true;
+      clearSources($('#qaSources'));clearQaMeta();
+      $('#qaAnswer').textContent='';$('#qaNotice').replaceChildren();$('#qaNotice').hidden=true;
       return toast('最多上传2张图片，每张不超过10 MB');
     }
     body.delete('images');images.forEach(f=>body.append('images',f));
-    const scope=selectedDataset()?{...selectedDataset()}:null;
-    const use=body.get('inputMode')!=='user_data_only' && $('#qaUseSearch').checked && scope;
+    const userOnly=body.get('inputMode')==='user_data_only';
+    const scope=!userOnly&&selectedDataset()?{...selectedDataset()}:null;
+    if(!userOnly&&!scope)return toast('请选择当前获授权的数据范围。');
+    const use=!userOnly&&$('#qaUseSearch').checked;
     body.set('retrievalType','auto');body.set('retrievalMode',use?'search_service':'none');body.set('useSearchService',use?'true':'false');
-    if(use) ['datasetId','versionId','indexVersionId'].forEach(k=>body.set(k,scope[k]));
+    ['datasetId','versionId','indexVersionId'].forEach(k=>scope?body.set(k,scope[k]):body.delete(k));
     body.set('maxTokens','512');
     $('#qaProgress').dataset.request=JSON.stringify({question:body.get('question'),inputMode:body.get('inputMode'),retrievalMode:body.get('retrievalMode'),retrievalType:body.get('retrievalType'),imageCount:images.length,
-      ...(use?{datasetId:scope.datasetId,versionId:scope.versionId,indexVersionId:scope.indexVersionId}:{})});
-    releasePreviews($('#qaSources'));clearQaMeta();$('#qaProgress').textContent='正在寻找依据并生成回答…';$('#qaAnswer').textContent='';$('#qaSources').replaceChildren();$('#qaNotice').hidden=true;
+      ...(scope?{datasetId:scope.datasetId,versionId:scope.versionId,indexVersionId:scope.indexVersionId}:{})});
+    clearSources($('#qaSources'));clearQaMeta();$('#qaProgress').textContent='正在寻找依据并生成回答…';$('#qaAnswer').textContent='';$('#qaNotice').replaceChildren();$('#qaNotice').hidden=true;
     const current=()=>sequence===qaSequence && revision===authRevision;
     try{
       const response=await request('',{method:'POST',body,signal:qaAbort.signal});const result=await response.json(); if(!current())return;
@@ -484,7 +580,7 @@
       $('#qaProgress').textContent=result.meta?.generation_status==='validation_failed'?'模型回答未通过证据校验':result.meta?.generation_status==='output_limit'?'回答达到长度上限':result.meta?.generation_status==='not_requested'?'本次未生成回答':result.meta?.generation_status==='partial'?'本次回答尚未完成':result.meta?.generation_status==='source_values_verified'?'已核对来源字段':result.meta?.generation_status==='source_interpretation_unverified'?'模型解释尚待完整核验':'回答完成';
       $('#qaMeta').dataset.traceId=result.meta?.trace_id||'';$('#qaMeta').dataset.retrievalStatus=result.meta?.retrieval_status||'';
       $('#qaMeta').dataset.generationStatus=result.meta?.generation_status||'';$('#qaMeta').dataset.httpStatus=String(response.status);
-      $('#qaMeta').textContent=`${result.model} · ${(result.processing_time_ms/1000).toFixed(1)}秒 · 图片 ${result.meta?.image_count||0} 张${use?` · ${scope.datasetName} / ${scope.versionName}`:''}`;
+      $('#qaMeta').textContent=`${result.model} · ${(result.processing_time_ms/1000).toFixed(1)}秒 · 图片 ${result.meta?.image_count||0} 张${scope?` · ${scope.datasetName} / ${scope.versionName}`:''}`;
       const container=document.createElement('div');
       await renderSources(container,result.sources||[],use?scope:null,revision);
       if(current())$('#qaSources').replaceChildren(...container.childNodes);
@@ -497,7 +593,10 @@
   async function downloadBusiness(path,name){
     const revision=authRevision;const response=await authorizedFetch(base()+path);const blob=await response.blob();
     if(revision!==authRevision)throw new DOMException('账号已变化','AbortError');
-    const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+    saveBusinessBlob(blob,name);
+  }
+  function saveBusinessBlob(blob,name){
+    const url=URL.createObjectURL(blob);downloadUrls.add(url);const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>{URL.revokeObjectURL(url);downloadUrls.delete(url);},1000);
   }
   async function openIngestion(datasetId) {
     if(!token)throw new Error('请先登录数据空间');
@@ -506,9 +605,11 @@
     if(datasetId){const d=await requestMm('/datasets/'+datasetId);$('#qaIngestSpace').value=d.spaceId;await loadIngestDatasets(datasetId);}
     $('#qaIngestForm').scrollIntoView({block:'start',behavior:'smooth'});
   }
-  window.dataSpaceSession={request,requestBusiness,downloadBusiness,openIngestion,openProductScope,refresh,updateIndexingTasks,renderSources,selectIndex,
+  window.dataSpaceSession={request,requestBusiness,downloadBusiness,saveBusinessBlob,openIngestion,openProductScope,refresh,updateIndexingTasks,renderSources,clearSources,selectIndex,
+    datasetsFor:scopesFor,scopeFor,canUseScope,has:operation=>window.mdsIdentity.has(operation),
     get authenticated(){return !!token;},get revision(){return authRevision;},
     get datasets(){return datasets;},get scope(){const d=selectedDataset();return d?{...d}:null;}};
+  window.addEventListener('dataspace-identity',event=>{resetSessionView(event.detail.reason);if(token)void refresh();});
   document.addEventListener('DOMContentLoaded',()=>{
     ['qaSourceTimezone','qaSourceTimeColumn','qaSourceEntities','qaSourceUnits','qaAssetMappings'].forEach(id=>$('#'+id).addEventListener('input',()=>{mappingEditRevision++;}));
     $('#qaSaveMapping').onclick=()=>saveMapping().then(()=>toast('映射已保存；安全回填后生效')).catch(e=>toast(e.message));
@@ -516,21 +617,18 @@
     $('#qaIngestSpace').onchange=()=>loadIngestDatasets().catch(e=>toast(e.message));
     $('#qaIngestDataset').onchange=()=>loadIngestVersions().catch(e=>toast(e.message));
     $('#qaIngestVersion').onchange=()=>loadIngestVersions($('#qaIngestVersion').value).catch(e=>toast(e.message));
+    $('#qaNewDataset').addEventListener('input',()=>window.mdsIdentityUi?.applyCapabilities());
     $('#qaIngestForm').onsubmit=submitIngest;$('#qaBackfill').onclick=backfillIngest;
-    $('#qaRefresh').onclick=refresh;$('#qaLogout').onclick=clearSession;$('#qaForm').onsubmit=submit;
+    $('#qaRefresh').onclick=refresh;$('#qaLogout').onclick=()=>window.mdsIdentity.logout();$('#qaForm').onsubmit=submit;
     const saved=JSON.parse(sessionStorage.getItem('qaDraft')||'null');
     if(saved&&token){$('#qaForm').elements.question.value=saved.question||'';$('#qaContext').value=saved.context||'';$('#qaInputMode').value=saved.inputMode||'hybrid';$('#qaUseSearch').checked=saved.useSearch!==false;if(saved.taskType)$('#qaForm').elements.taskType.value=saved.taskType;if(saved.hadFiles)$('#qaProgress').textContent='本地图片需要重新选择。';}
     const saveDraft=()=>sessionStorage.setItem('qaDraft',JSON.stringify({question:$('#qaForm').elements.question.value,context:$('#qaContext').value,inputMode:$('#qaInputMode').value,useSearch:$('#qaUseSearch').checked,taskType:$('#qaForm').elements.taskType.value,hadFiles:$('#qaImages').files.length>0}));
     $('#qaForm').addEventListener('input',saveDraft);
     $('#qaClearImages').onclick=()=>{$('#qaImages').value='';saveDraft();$('#qaProgress').textContent='已清除本次图片附件。';};
     $('#qaLogin').onsubmit=async event=>{
-      event.preventDefault();const form=event.currentTarget;
-      try{
-        const response=await fetch(authBase()+'/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(formData(form))});
-        const r=await response.json();if(!response.ok)throw new Error(r.message||'登录失败');
-        authRevision++;authAbort.abort();authAbort=new AbortController();token=r.token;account=r.user?.username||form.elements.userName.value;
-        sessionStorage.setItem('qaToken',token);sessionStorage.setItem('qaAccount',account);form.reset();$('#qaProgress').textContent='等待提问';showAccount();await refresh();
-      }catch(e){if(e.name!=='AbortError')toast(e.message);}
+      event.preventDefault();const form=event.currentTarget,credentials=formData(form);
+      try{const result=await window.mdsIdentity.login(credentials);form.reset();if(result.activationRequired)toast('请设置新密码完成账号激活。');}
+      catch(error){if(error.name!=='AbortError')toast(error.message);}
     };
     showAccount();syncMode();refresh();
   });

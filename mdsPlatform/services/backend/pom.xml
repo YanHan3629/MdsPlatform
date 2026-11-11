@@ -136,6 +136,9 @@
                 <includes>
                     <include>**/*</include>
                 </includes>
+                <excludes>
+                    <exclude>static/data-space/identity.js</exclude>
+                </excludes>
             </resource>
             <resource>
                 <directory>src/main/java</directory>
@@ -149,6 +152,25 @@
                 <includes>
                     <include>**/*</include>
                 </includes>
+            </resource>
+            <resource>
+                <directory>../business-worker</directory>
+                <targetPath>workers/controlled-view</targetPath>
+                <filtering>false</filtering>
+                <includes>
+                    <include>collaboration_view.py</include>
+                    <include>collaboration_job.py</include>
+                    <include>scope_ownership.py</include>
+                    <include>scoped_xlsx.py</include>
+                    <include>enterprise_view.py</include>
+                    <include>enterprise_collaboration.py</include>
+                </includes>
+            </resource>
+            <resource>
+                <directory>../index-builder</directory>
+                <targetPath>workers/native-index</targetPath>
+                <filtering>false</filtering>
+                <includes><include>**/*.py</include></includes>
             </resource>
         </resources>
         

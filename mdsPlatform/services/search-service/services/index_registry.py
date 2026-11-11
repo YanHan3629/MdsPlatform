@@ -1,3 +1,4 @@
+from core.worker_authority import require_scope
 from dataclasses import dataclass
 from collections import OrderedDict
 from threading import Lock
@@ -74,6 +75,7 @@ class IndexRegistry:
         return f"{dataset_id}:{version_id}:{index_version_id}"
 
     def get(self, dataset_id: str, version_id: str, index_version_id: str) -> Optional[LoadedIndex]:
+        require_scope(dataset_id,version_id,index_version_id)
         key = self.build_key(dataset_id, version_id, index_version_id)
         with self._guard:
             value = self._cache.get(key)
@@ -82,6 +84,7 @@ class IndexRegistry:
             return value
 
     def ensure_loaded(self, dataset_id: str, version_id: str, index_version_id: str) -> LoadedIndex:
+        require_scope(dataset_id,version_id,index_version_id)
         with self.operation():
             return self._ensure_loaded(dataset_id, version_id, index_version_id)
 
@@ -129,6 +132,7 @@ class IndexRegistry:
             return wrapped
 
     def ensure_preloaded(self, dataset_id: str, version_id: str, index_version_id: str) -> LoadedIndex:
+        require_scope(dataset_id,version_id,index_version_id)
         """Complete the publication gate even if a query already loaded metadata."""
         with self.operation():
             return self._ensure_preloaded(dataset_id, version_id, index_version_id)
@@ -146,6 +150,7 @@ class IndexRegistry:
         return loaded
 
     def ensure_capabilities(self, dataset_id: str, version_id: str, index_version_id: str) -> LoadedCapabilities:
+        require_scope(dataset_id,version_id,index_version_id)
         key = self.build_key(dataset_id, version_id, index_version_id)
         with self._guard:
             cached = self._capabilities_cache.get(key)

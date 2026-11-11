@@ -42,6 +42,11 @@ import java.util.stream.Collectors;
 @Slf4j
 @Service
 public class JobService {
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.fwdrobo.sirius.security.JobResourceAuthority jobResourceAuthority;
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.fwdrobo.sirius.security.JobExecutionDefinitionService definitions;
+    @org.springframework.beans.factory.annotation.Autowired private org.springframework.jdbc.core.JdbcTemplate jdbc;
     private static final int MAX_TOTAL_INPUT_PATHS = 2000;
     private static final int MAX_REPO_INPUT_PATHS = 100;
 
@@ -82,6 +87,7 @@ public class JobService {
      */
     @Transactional
     public UUID createJob(JobRequest req, UUID userId) {
+        if(userId!=null)definitions.preflightRequest(req);
         TrialLimitService.JobResourceLimits limits = trialLimitService.parseAndValidateJobResources(req.params());
         trialLimitService.checkTrialJobResourceLimit(limits);
         JsonNode jobParamsJson = JsonbTypeHandler.toJsonNode(req.params());
@@ -99,6 +105,7 @@ public class JobService {
      */
     @Transactional
     public UUID updateJob(UUID jobId, JobRequest req, UUID userId) {
+        definitions.validateUpdate(jobId,req);definitions.preflightRequest(req);
         TrialLimitService.JobResourceLimits limits = trialLimitService.parseAndValidateJobResources(req.params());
         trialLimitService.checkTrialJobResourceLimit(limits);
         JsonNode jobParamsJson = JsonbTypeHandler.toJsonNode(req.params());
@@ -122,8 +129,11 @@ public class JobService {
     private UUID insertDeduplicatedInputs(JobRequest req, UUID jobId) {
         List<JobRequest.Input> inputs = req.inputs();
         Map<UUID, HashSet<String>> map = new HashMap<>();
+        Map<UUID,UUID> pins=new HashMap<>();Set<UUID> repoWide=new HashSet<>();
         int totalPaths = 0;
         for (JobRequest.Input input : inputs) {
+            if(pins.containsKey(input.repoId())&&!java.util.Objects.equals(pins.get(input.repoId()),input.commitId()))throw ExceptionUtils.badRequest("JOB_INPUT_PIN_CONFLICT");
+            pins.put(input.repoId(),input.commitId());if(input.paths().isEmpty())repoWide.add(input.repoId());
             HashSet<String> logicalPaths = map.computeIfAbsent(input.repoId(), k -> new HashSet<>());
             for (String path : input.paths()) {
                 String logicalPath = PathUtils.normalizePath(path);
@@ -140,8 +150,9 @@ public class JobService {
         }
         for (var entry : map.entrySet()) {
             UUID repoId = entry.getKey();
-            List<String> input = new ArrayList<>(entry.getValue());
+            List<String> input = repoWide.contains(repoId)?new ArrayList<>():new ArrayList<>(entry.getValue());
             jobInputMapper.insert(jobId, repoId, "{}");
+            jdbc.update("UPDATE job_input SET input_commit_id=? WHERE job_id=? AND input_repo_id=?",pins.get(repoId),jobId,repoId);
             if (input.isEmpty()) {
                 // Mapper SQL persists sentinel '*ALL*' when logicalPaths is empty.
                 log.debug("insertDeduplicatedInputs: repoId={} has empty paths, persist as *ALL*", repoId);
@@ -175,10 +186,12 @@ public class JobService {
 
         List<UUID> repoIds = inputFiles.stream().map(JobInputFile::getRepoId).distinct().toList();
         List<ArtifactRepo> repos = artifactRepoMapper.selectArtifactsByIds(repoIds);
+        Map<UUID,UUID> pins=new HashMap<>();for(var pin:jdbc.queryForList("SELECT input_repo_id,input_commit_id FROM job_input WHERE job_id=?",jobId))pins.put((UUID)pin.get("input_repo_id"),(UUID)pin.get("input_commit_id"));
         List<JobResponse.Input> inputs = repos.stream()
                 .map(repo -> new JobResponse.Input(
                         repo.getRepoId(),
                         repo.getRepoName(),
+                        pins.get(repo.getRepoId()),
                         map.get(repo.getRepoId())
                 )).toList();
         log.debug("getJobResponseById: jobId={}, repos={}, repoWideInputs={}", jobId, inputs.size(), repoWideInputCount);
@@ -234,68 +247,36 @@ public class JobService {
      * @param filePath 文件相对路径（相对于 job/{jobId}/）
      * @return FileStream 文件流对象
      */
-    public FileStream downloadShellScriptStream(UUID jobId, String filePath) throws Exception {
-        log.info("downloadShellScriptStream: jobId={}, filePath={}", jobId, filePath);
-
-        //构建 MinIO 中的对象 key
-        String objectKey = String.format("job/%s/%s", jobId, filePath);
-
-        try {
-            //获取对象的元信息
-            StatObjectResponse stat = minioService.statObject(objectKey);
-            //获取文件流
-            InputStream inputStream = minioService.getObject(objectKey);
-            //构建并返回 FileStream
-            String contentType = stat.contentType();
-            if (contentType == null || contentType.isBlank()) {
-                // 根据文件扩展名推断 content type
-                if (filePath.endsWith(".sh")) {
-                    contentType = "text/x-shellscript";
-                } else if (filePath.endsWith(".txt")) {
-                    contentType = "text/plain";
-                } else {
-                    contentType = "application/octet-stream";
-                }
-            }
-            FileStream fileStream = new FileStream(
-                    filePath,
-                    contentType,
-                    objectKey,
-                    stat.size(),
-                    inputStream
-            );
-            log.info("downloadShellScriptStream success: jobId={}, filePath={}, objectKey={}, size={}",
-                    jobId, filePath, objectKey, stat.size());
-            return fileStream;
-        } catch (ErrorResponseException e) {
-            String code = e.errorResponse() == null ? "" : e.errorResponse().code();
-            if ("NoSuchKey".equals(code) || "NoSuchObject".equals(code)) {
-                throw ExceptionUtils.notFound("文件不存在: " + filePath);
-            }
-            throw e;
-        } catch (Exception e) {
-            log.error("downloadShellScriptStream failed: jobId={}, filePath={}, objectKey={}",
-                    jobId, filePath, objectKey, e);
-            throw ExceptionUtils.internalError("获取文件流失败: " + e.getMessage());
+    public FileStream downloadShellScriptStream(UUID jobId,String filePath)throws Exception {
+        if(!com.fwdrobo.sirius.security.JobExecutionDefinitionService.entrypoint(filePath))
+            throw ExceptionUtils.forbidden("入口接口仅提供任务执行脚本");
+        String content,key;
+        var attrs=org.springframework.web.context.request.RequestContextHolder.getRequestAttributes();
+        if(attrs instanceof org.springframework.web.context.request.ServletRequestAttributes web
+            &&web.getRequest().getAttribute("ds.jobIoClaims") instanceof io.jsonwebtoken.Claims){
+            var definition=definitions.worker(web.getRequest());
+            if(!jobId.toString().equals(definition.body().path("ioScope").path("jobId").asText()))
+                throw ExceptionUtils.forbidden("EXECUTION_JOB_MISMATCH");
+            content=definition.script();key="execution/"+definition.body().path("ioScope").path("runId").asText()+"/"+definition.scriptSha();
+        }else{
+            jobResourceAuthority.require(jobId,null,"data.raw.download");
+            Job current=getJobById(jobId);if(current==null)throw ExceptionUtils.notFound("Job不存在");
+            content=current.getCmd();if(content==null||content.isBlank())throw ExceptionUtils.notFound("任务执行脚本不存在");
+            key="job/"+jobId+"/current/"+com.fwdrobo.sirius.security.JobExecutionDefinitionService.sha(content);
         }
+        byte[] bytes=content.getBytes(StandardCharsets.UTF_8);
+        return new FileStream("command.sh","text/x-shellscript",key,bytes.length,new ByteArrayInputStream(bytes));
     }
 
     /**
      * 分页列出设备
      */
     public PageRes<JobResponse> listPage(int page, int size, String jobName, String jobCategory, String image) {
-        List<Job> items;
-        // 计算总记录数
-        long total = jobMapper.countByFilters(jobName, jobCategory, image);
-        if (total == 0) {
-            // 无记录，直接赋为空页
-            items = List.of();
-        } else {
-            // 获取分页数据
-            int offset = Math.max(0, (page - 1) * size);
-            items = jobMapper.selectPageByFilters(jobName, jobCategory, image, offset, size);
-            items = items != null ? items : List.of();  // 强保护，防止返回 null
-        }
+        if (page < 1 || size < 1 || size > 100) throw ExceptionUtils.badRequest("INVALID_JOB_PAGE");
+        List<UUID> visible = jobResourceAuthority.visibleIds(jobName, jobCategory, image, "job.read");
+        long total = visible.size();
+        long offset = (long) (page - 1) * size;
+        List<Job> items = visible.stream().skip(offset).limit(size).map(jobMapper::findById).toList();
 
         Map<UUID, List<UUID>> inputRepoIds = items.stream().collect(
                 Collectors.toMap(Job::getJobId, job -> toUuidList(job.getInputRepoIds(), job.getJobId(), "inputRepoIds"))
@@ -329,7 +310,7 @@ public class JobService {
                 .toList();
 
         // 计算总页数
-        int totalPages = (int) (total + size - 1);
+        int totalPages = (int) ((total + size - 1) / size);
         if (totalPages > 0 && page > totalPages) {
             throw ExceptionUtils.notFound("页数超过上限");
         }
@@ -367,6 +348,7 @@ public class JobService {
         if (job == null) {
             return null;
         }
+        jobResourceAuthority.require(job.getJobId(), null, "job.read");
         UserInfo createdBy = new UserInfo(job.getCreatedBy(), userService.resolveUsername(job.getCreatedBy()));
         return new JobResponse(
                 job.getJobId(),
@@ -380,7 +362,7 @@ public class JobService {
                 job.getUpdatedAt(),
                 job.getOutputRepoIds(),
                 inputs,
-                latestRun != null ? latestRun.getRunStatus() : null
+                latestRun != null && jobResourceAuthority.canInspectRun(job.getJobId(),latestRun.getRunId(),"job.read") ? latestRun.getRunStatus() : null
         );
     }
 }

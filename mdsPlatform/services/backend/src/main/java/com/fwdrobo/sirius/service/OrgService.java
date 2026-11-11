@@ -24,13 +24,23 @@ public class OrgService {
 
     private final OrgMapper orgMapper;
     private final UserService userService;
+    private final com.fwdrobo.sirius.security.AuthorizationService authorization;
+    private final com.fwdrobo.sirius.security.IdentitySessionService sessions;
+    private final com.fwdrobo.sirius.security.AuthorizationAuditService audit;
+    private final org.springframework.jdbc.core.JdbcTemplate jdbc;
 
-    public OrgService(OrgMapper orgMapper, UserService userService) {
+    public OrgService(OrgMapper orgMapper, UserService userService,
+            com.fwdrobo.sirius.security.AuthorizationService authorization,
+            com.fwdrobo.sirius.security.IdentitySessionService sessions,
+            com.fwdrobo.sirius.security.AuthorizationAuditService audit,org.springframework.jdbc.core.JdbcTemplate jdbc) {
+        this.authorization=authorization;this.sessions=sessions;this.audit=audit;this.jdbc=jdbc;
         this.orgMapper = orgMapper;
         this.userService = userService;
     }
 
     public Org get(UUID orgId) {
+        var actor=authorization.actor();
+        if(!actor.platformAdmin()&&!actor.orgId().equals(orgId))throw ExceptionUtils.notFound("ENTERPRISE_NOT_AVAILABLE");
         Org org = orgMapper.selectById(orgId);
         if (org == null) {
             throw ExceptionUtils.badRequest("org不存在");
@@ -40,6 +50,8 @@ public class OrgService {
 
     @Transactional
     public UUID create(OrgReq orgReq) {
+        authorization.lockIdentityMutation();authorization.requirePlatformManagement("identity.enterprise.manage");
+        validateRequest(orgReq);
         Org exists = orgMapper.selectByName(orgReq.getOrgName());
         if (exists != null) {
             throw ExceptionUtils.badRequest("orgName已存在");
@@ -51,11 +63,15 @@ public class OrgService {
         org.setCreatedAt(OffsetDateTime.now());
         org.setCreatedBy(SecurityUtils.getUserId());
 
-        return orgMapper.insert(org);
+        UUID id=orgMapper.insert(org);
+        enterpriseEvent(id,"ENTERPRISE_CREATED",orgReq.getOrgStatus());return id;
     }
 
     @Transactional
     public void update(UUID orgId, OrgReq orgReq) {
+        authorization.lockIdentityMutation();authorization.requirePlatformManagement("identity.enterprise.manage");
+        validateRequest(orgReq);checkVersion(orgId,orgReq.getExpectedVersion());
+        var actor=authorization.actor();
         Org org = orgMapper.selectById(orgId);
         if (org == null) {
             throw ExceptionUtils.badRequest("权限不存在");
@@ -70,19 +86,49 @@ public class OrgService {
         org.setUpdatedAt(OffsetDateTime.now());
         org.setUpdatedBy(SecurityUtils.getUserId());
         orgMapper.update(org);
+        jdbc.update("UPDATE org SET permission_version=permission_version+1 WHERE org_id=?",orgId);
+        revokeEnterprise(orgId);
+        audit.record(actor.userId(),actor.orgId(),"identity.enterprise.manage","ENTERPRISE",orgId.toString(),"SUCCESS",
+            "ENTERPRISE_UPDATED",java.util.Map.of(),null,java.util.Map.of("state",orgReq.getOrgStatus()));
     }
 
     @Transactional
-    public void delete(UUID orgId) {
-        if (orgId == null) return;
-
-        orgMapper.deleteById(orgId);
+    public void delete(UUID orgId) { delete(orgId,null); }
+    @Transactional
+    public void delete(UUID orgId,Long expectedVersion) {
+        authorization.lockIdentityMutation();authorization.requirePlatformManagement("identity.enterprise.manage");checkVersion(orgId,expectedVersion);
+        var actor=authorization.actor();
+        jdbc.update("UPDATE org SET org_status=0,permission_version=permission_version+1 WHERE org_id=?",orgId);
+        revokeEnterprise(orgId);
+        audit.record(actor.userId(),actor.orgId(),"identity.enterprise.manage","ENTERPRISE",orgId.toString(),"SUCCESS",
+            "ENTERPRISE_DISABLED_HISTORY_RETAINED",java.util.Map.of(),null,java.util.Map.of("state",0));
+    }
+    private void checkVersion(UUID id,Long expected) {
+        var rows=jdbc.queryForList("SELECT permission_version FROM org WHERE org_id=?",Long.class,id);
+        if(rows.size()!=1)throw ExceptionUtils.notFound("ENTERPRISE_NOT_AVAILABLE");
+        if(expected==null)throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.PRECONDITION_REQUIRED,"EXPECTED_VERSION_REQUIRED");
+        if(!expected.equals(rows.get(0)))throw ExceptionUtils.conflict("ENTERPRISE_VERSION_CONFLICT");
+    }
+    private void validateRequest(OrgReq req) {
+        if(req==null||req.getOrgName()==null||req.getOrgName().isBlank()||req.getOrgName().length()>128||
+            req.getOrgStatus()==null||!java.util.Set.of(0,1).contains(req.getOrgStatus()))throw ExceptionUtils.badRequest("ENTERPRISE_FIELDS_INVALID");
+    }
+    private void revokeEnterprise(UUID id) {
+        for(UUID uid:jdbc.queryForList("SELECT user_id FROM fwd_user WHERE org_id=? AND account_state<>'CLOSED'",UUID.class,id))
+            sessions.revokeAll(uid,"ENTERPRISE_POLICY_CHANGED");
+        jdbc.update("UPDATE ds_auth_initialization SET policy_version=policy_version+1,updated_at=now() WHERE singleton");
+    }
+    private void enterpriseEvent(UUID id,String reason,Integer state) {
+        var actor=authorization.actor();
+        audit.record(actor.userId(),actor.orgId(),"identity.enterprise.manage","ENTERPRISE",id.toString(),"SUCCESS",reason,
+            java.util.Map.of(),null,java.util.Map.of("state",state));
     }
 
     /**
      * 分页查询可用组织列表。
      */
     public PageRes<OrgResponse> listPage(int page, int size) {
+        authorization.requirePlatformManagement("identity.enterprise.manage");
         long total = orgMapper.countByStatus(ACTIVE_ORG_STATUS);
         if (total == 0) {
             return new PageRes<>(0, 0, page, size, List.of());
@@ -112,6 +158,7 @@ public class OrgService {
         response.setOrgName(org.getOrgName());
         response.setOrgStatus(org.getOrgStatus());
         response.setLicenseType(org.getLicenseType());
+        response.setPermissionVersion(org.getPermissionVersion());
         response.setCreatedAt(org.getCreatedAt());
         response.setUpdatedAt(org.getUpdatedAt());
         response.setCreatedBy(toUserInfo(org.getCreatedBy()));
@@ -130,6 +177,8 @@ public class OrgService {
     }
 
     public List<Org> getAllOrgs() {
-        return orgMapper.selectAll(ACTIVE_ORG_STATUS);
+        var actor=authorization.actor();
+        if(actor.platformAdmin())return orgMapper.selectAll(ACTIVE_ORG_STATUS);
+        return java.util.List.of(get(actor.orgId()));
     }
 }

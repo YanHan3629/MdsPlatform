@@ -54,9 +54,13 @@ def messages(question,catalogue):
     calculation_content=[]
     if any(node.get('recordView') for node in catalogue.facts.values()):
         system=system.replace('comparisons 才能使用 equal','comparisons 才能使用 record_value_equal')
-        system+=' 当前记录已完整扫描并按同类型键唯一定位。被问的数值字段均应选中；只作定位的键不选。问题要求一致性比较时，将下方程序已计算的 record_value_equal 放入 comparisons。不要仅列字段而遗漏已计算的比较；不要重算或改写原值。'
+        record_sets=any(source.get('provenance',{}).get('recordLookupMode')=='SINGLE_EXPLICIT_CSV_SET' for source in catalogue.sources)
+        if record_sets:
+            system+=' 当前单个CSV已完整扫描，条件对应多条记录；每个来源是其中一条真实记录的独立精读，不能声称记录唯一。必须选中每条记录的全部被问字段，包括字符串、null、空字符串、false和0；只作定位的键不选。不得只挑第一条或遗漏另一条；不能把多条不同原值改写成一个值。不能完成全部匹配记录时设 unanswered=true。'
+        else:
+            system+=' 当前记录已完整扫描并按同类型键唯一定位。被问的数值字段均应选中；只作定位的键不选。问题要求一致性比较时，将下方程序已计算的 record_value_equal 放入 comparisons。不要仅列字段而遗漏已计算的比较；不要重算或改写原值。'
         paths=sorted(source['logical_path'] for source in catalogue.sources)
-        if all(paths==sorted(source.get('provenance',{}).get('requiredRelationSourcePaths',[])) for source in catalogue.sources):
+        if not record_sets and all(paths==sorted(source.get('provenance',{}).get('requiredRelationSourcePaths',[])) for source in catalogue.sources):
             from services.record_claim_view import calculate,calculation_context
             calculations=calculate(catalogue,question)
             if any(item['operation']=='record_group_value_equal' for item in calculations):
@@ -100,6 +104,23 @@ def bounded_grammar(catalogue,question):
         for subset in itertools.combinations(pairs,count):options.append(literal(json.dumps(list(subset),ensure_ascii=False,separators=(',',':'))))
     return {'grammar':'root ::= '+' '.join(parts)+'\nboolean ::= "true" | "false"\ncomparison ::= '+' | '.join(options)}
 
+def _single_sentence_requested(question,nodes,comparisons):
+    if not nodes or comparisons or not re.search(r'(?:^|[。？！?!，,\n])\s*请?用一句话回答(?:[，,]\s*不要外推)?[。！!]?\s*$',question):
+        return False
+    if not all(node['evidenceNature']=='source_record' and isinstance(node['value'],str) for node in nodes):
+        return False
+    first=nodes[0]
+    if first['identity']['originalFormat'] in {'JSON','JSONL'}:
+        location=first['locator']
+        record_pointer,separator,_=location.get('jsonPointer','').rpartition('/')
+        return bool(separator) and all(node['identity']==first['identity']
+            and node['locator'].get('jsonlLine')==location.get('jsonlLine')
+            and node['locator'].get('jsonPointer','').rpartition('/')[:2]==(record_pointer,separator)
+            for node in nodes)
+    return len({node['field'] for node in nodes})==1 and all(
+        node['identity']['originalFormat']=='CSV' and node.get('recordView',{}).get('typeFactId')
+        for node in nodes)
+
 def finish(content,catalogue,calls,*,question='',read_receipts=None,truncated=False):
     require(not truncated,'CLAIM_PROTOCOL_OUTPUT_LIMIT')
     draft=json.loads(content,object_pairs_hook=_unique)
@@ -122,7 +143,9 @@ def finish(content,catalogue,calls,*,question='',read_receipts=None,truncated=Fa
     if any(source.get('provenance',{}).get('recordReadVersion') for source in catalogue.sources):
         from services.record_claim_view import calculate,verify_calculations_transmitted
         verify_calculations_transmitted(calculate(catalogue,question),draft['comparisons'],calls)
-    result=render(catalogue,[identifier for identifier,selected in draft['selections'].items() if selected],draft['comparisons'])
+    fact_ids=[identifier for identifier,selected in draft['selections'].items() if selected]
+    single_sentence=_single_sentence_requested(question,[catalogue.facts[identifier] for identifier in fact_ids],draft['comparisons'])
+    result=render(catalogue,fact_ids,draft['comparisons'],single_sentence=single_sentence)
     for interpretation in draft['interpretations']:
         for identifier in interpretation['factIds']:catalogue.links(identifier)
     result.update(protocolVersion=VERSION,modelDraft=draft,
@@ -136,5 +159,5 @@ def finish(content,catalogue,calls,*,question='',read_receipts=None,truncated=Fa
         missing=[pair for pair in comparison_pairs(catalogue,question) if pair not in draft['comparisons']]
         result['missingRecordComparisons']=missing
         if missing:result['status']='PARTIAL'
-    result['finalClaimCheck']=verify_presentation(result,catalogue)
+    result['finalClaimCheck']=verify_presentation(result,catalogue,single_sentence=single_sentence)
     return result

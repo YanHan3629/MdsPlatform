@@ -1,9 +1,14 @@
 package com.fwdrobo.sirius.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fwdrobo.sirius.security.IdentitySessionService;
+import com.fwdrobo.sirius.util.ExceptionUtils;
+import io.jsonwebtoken.Claims;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -20,10 +25,12 @@ public class MmIndexOutboxService {
 
     private final JdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
+    private final IdentitySessionService sessions;
 
-    public MmIndexOutboxService(JdbcTemplate jdbc, ObjectMapper objectMapper) {
+    public MmIndexOutboxService(JdbcTemplate jdbc, ObjectMapper objectMapper, IdentitySessionService sessions) {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
+        this.sessions = sessions;
     }
 
     public static String idempotencyKey(UUID orgId, UUID versionId, UUID rawCommitId) {
@@ -39,6 +46,15 @@ public class MmIndexOutboxService {
 
     @Transactional
     public UUID enqueueSnapshot(UUID orgId, UUID datasetId, UUID versionId, UUID rawCommitId, UUID createdBy) {
+        if (!(RequestContextHolder.getRequestAttributes() instanceof ServletRequestAttributes request)
+                || !(request.getRequest().getAttribute("ds.accessClaims") instanceof Claims claims)) {
+            throw ExceptionUtils.unauthorized("INDEX_ORIGIN_SESSION_REQUIRED");
+        }
+        var actor = sessions.authenticateAccess(claims);
+        if (!actor.userId().equals(createdBy) || !actor.orgId().equals(orgId)) {
+            throw ExceptionUtils.unauthorized("INDEX_ORIGIN_IDENTITY_MISMATCH");
+        }
+        UUID sessionId = UUID.fromString(claims.get("sid", String.class));
         String rawConfig = jdbc.queryForObject("SELECT COALESCE(meta->'indexConfig','{}'::jsonb)::text FROM mm_dataset_version WHERE version_id=?",String.class,versionId);
         Map<String,Object> config;
         boolean activateOnReady;
@@ -71,17 +87,18 @@ public class MmIndexOutboxService {
                     ON CONFLICT (org_id,idempotency_key) DO NOTHING
                     """, eventId, orgId, "DATASET_VERSION", versionId, "DATASET_SNAPSHOT_READY", key, payload);
             jdbc.update("""
-                    INSERT INTO mm_ingest_task(task_id,org_id,dataset_id,dataset_version_id,raw_commit_id,idempotency_key,created_by,meta)
-                    VALUES (?,?,?,?,?,?,?,?::jsonb)
+                    INSERT INTO mm_ingest_task(task_id,org_id,dataset_id,dataset_version_id,raw_commit_id,idempotency_key,created_by,origin_session_id,meta)
+                    VALUES (?,?,?,?,?,?,?,?,?::jsonb)
                     ON CONFLICT (org_id,idempotency_key) DO NOTHING
-                    """, taskId, orgId, datasetId, versionId, rawCommitId, key, createdBy, payload);
-            // An explicit backfill request is also the recovery path after all
-            // automatic attempts were exhausted. READY/in-flight work remains untouched.
+                    """, taskId, orgId, datasetId, versionId, rawCommitId, key, createdBy, sessionId, payload);
+            // An explicit request can recover failed work or pre-upgrade queued work
+            // without transferring a live task to another session.
             jdbc.update("""
-                    UPDATE mm_ingest_task SET task_status='RETRY',stage='REQUEUED',attempt_count=0,
+                    UPDATE mm_ingest_task SET created_by=?,origin_session_id=?,task_status='RETRY',stage='REQUEUED',attempt_count=0,
                       next_attempt_at=now(),lease_until=NULL,index_version_id=NULL,error_message=NULL,completed_at=NULL
-                    WHERE org_id=? AND idempotency_key=? AND task_status='FAILED'
-                    """, orgId, key);
+                    WHERE org_id=? AND idempotency_key=? AND
+                      (task_status='FAILED' OR (task_status IN ('QUEUED','RETRY') AND origin_session_id IS NULL))
+                    """, createdBy, sessionId, orgId, key);
             UUID persisted = jdbc.queryForObject(
                     "SELECT task_id FROM mm_ingest_task WHERE org_id=? AND idempotency_key=?", UUID.class, orgId, key);
             return persisted == null ? taskId : persisted;

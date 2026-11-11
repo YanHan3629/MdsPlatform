@@ -3,16 +3,17 @@ package com.fwdrobo.sirius.service;
 import com.fwdrobo.sirius.dto.mm.MmBuildIndexReq;
 import com.fwdrobo.sirius.container.ContainerInspector;
 import com.fwdrobo.sirius.docker.entity.DockerHostResolver;
+import com.fwdrobo.sirius.security.IdentitySessionService;
 import com.fwdrobo.sirius.security.JwtAuthFilter;
-import com.fwdrobo.sirius.security.JwtService;
+import io.jsonwebtoken.JwtException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
-import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 import java.util.Map;
@@ -28,17 +29,17 @@ public class MmIngestTaskWorker {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate tx;
     private final MmIndexService indexes;
-    private final JwtService jwtService;
+    private final IdentitySessionService sessions;
     private final ContainerInspector containerInspector;
     private final DockerHostResolver dockerHostResolver;
 
     public MmIngestTaskWorker(JdbcTemplate jdbc, TransactionTemplate tx, MmIndexService indexes,
-                              JwtService jwtService, ContainerInspector containerInspector,
+                              IdentitySessionService sessions, ContainerInspector containerInspector,
                               DockerHostResolver dockerHostResolver) {
         this.jdbc = jdbc;
         this.tx = tx;
         this.indexes = indexes;
-        this.jwtService = jwtService;
+        this.sessions = sessions;
         this.containerInspector = containerInspector;
         this.dockerHostResolver = dockerHostResolver;
     }
@@ -90,7 +91,8 @@ public class MmIngestTaskWorker {
                       AND COALESCE(meta->>'builderVersion','') <> ?
                     """, MmIndexOutboxService.BUILDER_VERSION, MmIndexOutboxService.BUILDER_VERSION);
             List<Map<String, Object>> rows = jdbc.queryForList("""
-                    SELECT task_id,org_id,dataset_id,dataset_version_id,created_by,attempt_count,max_attempts,meta::text AS task_meta
+                    SELECT task_id,org_id,dataset_id,dataset_version_id,created_by,origin_session_id,
+                           attempt_count,max_attempts,meta::text AS task_meta
                     FROM mm_ingest_task
                     WHERE task_status IN ('QUEUED','RETRY') AND next_attempt_at <= now()
                       AND NOT EXISTS (
@@ -113,11 +115,10 @@ public class MmIngestTaskWorker {
         UUID orgId = (UUID) task.get("org_id");
         UUID userId = (UUID) task.get("created_by");
         try {
-            WorkerCredential credential = issueWorkerCredential(orgId, userId);
-            var principal = new JwtAuthFilter.UserPrincipal(
-                    credential.userId(), credential.userName(), List.of("ROLE_SYSTEM"), orgId);
+            var origin = sessions.restoreIndexOrigin(userId, orgId, (UUID) task.get("origin_session_id"));
+            var principal = new JwtAuthFilter.UserPrincipal(userId, origin.getSubject(), List.of(), orgId);
             SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(
-                    principal, null, List.of(new SimpleGrantedAuthority("ROLE_SYSTEM"))));
+                    principal, null, List.of()));
             var taskMeta = new com.fasterxml.jackson.databind.ObjectMapper().readTree(String.valueOf(task.get("task_meta")));
             if(taskMeta.has("activateOnReady")&&!taskMeta.get("activateOnReady").isBoolean())throw new IllegalStateException("invalid persisted index activation policy");
             Map<String,Object> indexConfig = new com.fasterxml.jackson.databind.ObjectMapper().convertValue(taskMeta.path("indexConfig"),Map.class);
@@ -125,7 +126,7 @@ public class MmIngestTaskWorker {
                     (UUID) task.get("dataset_id"), (UUID) task.get("dataset_version_id"),taskId,
                     new MmBuildIndexReq(MmIndexOutboxService.BUILDER_VERSION
                             .replace("professional-indexes-", "professional-multispace-"),
-                            "MULTI_SPACE", false,indexConfig == null ? Map.of() : indexConfig,taskMeta.path("activateOnReady").asBoolean(true)), credential.token());
+                            "MULTI_SPACE", false,indexConfig == null ? Map.of() : indexConfig,taskMeta.path("activateOnReady").asBoolean(true)), origin);
             jdbc.update("""
                     UPDATE mm_ingest_task SET task_status='WAITING_INDEX',stage='BUILDING',lease_until=NULL,
                       index_version_id=? WHERE task_id=?
@@ -133,6 +134,21 @@ public class MmIngestTaskWorker {
             jdbc.update("UPDATE mm_outbox_event SET event_status='PROCESSED',processed_at=now() WHERE org_id=? AND aggregate_id=? AND event_status='PENDING'",
                     orgId, task.get("dataset_version_id"));
         } catch (Exception exception) {
+            String denial = null;
+            if (exception instanceof JwtException) {
+                denial = exception.getMessage();
+            } else if (exception instanceof ResponseStatusException denied
+                    && (denied.getStatusCode().value()==401 || denied.getStatusCode().value()==403
+                        || denied.getStatusCode().value()==404)) {
+                denial = denied.getReason();
+            }
+            if (denial != null) {
+                jdbc.update("""
+                        UPDATE mm_ingest_task SET task_status='FAILED',stage='INDEX_AUTHORITY_DENIED',
+                          lease_until=NULL,completed_at=now(),error_message=? WHERE task_id=?
+                        """, abbreviate(denial), taskId);
+                return;
+            }
             int nextAttempt = ((Number) task.get("attempt_count")).intValue() + 1;
             int maxAttempts = ((Number) task.get("max_attempts")).intValue();
             String status = nextAttempt >= maxAttempts ? "FAILED" : "RETRY";
@@ -185,32 +201,4 @@ public class MmIngestTaskWorker {
         return text.substring(0, Math.min(text.length(), 4000));
     }
 
-    private WorkerCredential issueWorkerCredential(UUID orgId, UUID requestedUserId) {
-        List<Map<String, Object>> rows;
-        if (requestedUserId != null) {
-            rows = jdbc.queryForList("""
-                    SELECT user_id,user_name,token_version FROM fwd_user
-                    WHERE org_id=? AND user_id=? AND status_code=1 LIMIT 1
-                    """, orgId, requestedUserId);
-        } else {
-            rows = List.of();
-        }
-        if (rows.isEmpty()) {
-            rows = jdbc.queryForList("""
-                    SELECT user_id,user_name,token_version FROM fwd_user
-                    WHERE org_id=? AND status_code=1 ORDER BY created_at,user_id LIMIT 1
-                    """, orgId);
-        }
-        if (rows.isEmpty()) {
-            throw new IllegalStateException("no active organization user available for scoped indexing job");
-        }
-        Map<String, Object> user = rows.get(0);
-        Number version = (Number) user.get("token_version");
-        String userName = String.valueOf(user.get("user_name"));
-        String token = jwtService.generateAccessToken(userName, List.of("SYSTEM"),
-                version == null ? 0 : version.intValue());
-        return new WorkerCredential((UUID) user.get("user_id"), userName, token);
-    }
-
-    private record WorkerCredential(UUID userId, String userName, String token) {}
 }

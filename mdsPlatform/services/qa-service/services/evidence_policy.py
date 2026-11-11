@@ -39,8 +39,12 @@ def format_intent(question):
         source = source_scope or bool(re.search(r"依据|根据|基于|参考|结合|来源|资料|文件|优先|只用|仅用|只看|仅看", clause))
         if not source:
             continue
-        # A filename identifies a source; its suffix is not another requested
-        # format and cannot cancel an explicit, conflicting format constraint.
+        # A page image is a representation of the named PDF, not a new
+        # raster-only source restriction. Keep explicit conflicting formats.
+        named_pdf_page=bool(re.search(
+            r'(?:只|仅)?(?:看|读|阅读|依据|参考|使用)\s*[\w./-]+\.pdf(?:\s*的)?\s*第\s*[0-9一二三四五六七八九十百]+\s*页',
+            clause,re.I))
+        # A filename cannot cancel an explicit, conflicting format constraint.
         clause=re.sub(r'[\w.-]+\.(?:jsonl?|csv|xlsx|txt|pdf|png|jpe?g|webp|svg|obj|stp|step)\b',' ',clause,flags=re.I)
         # In "PNG 图片", 图片 describes the stated carrier; it must not
         # silently widen a strict PNG request to JPG/SVG/WEBP as well.
@@ -48,6 +52,8 @@ def format_intent(question):
         clause=re.sub(r'(?<![A-Za-z0-9])(OBJ|STEP|STP)\s*(?:三维|3D)?模型',r'\1',clause,flags=re.I)
         explicit=bool(re.search(r'(?<![A-Za-z0-9_-])(?:JSONL|JSON|CSV|XLSX|TXT|PDF|PNG|JPG|JPEG|WEBP|SVG|OBJ|STEP|STP)(?![A-Za-z0-9_-])',clause,re.I))
         separate_category=bool(re.search(r'(?:和|与|及|、|结合|或)\s*(?:图片|图像|表格|三维模型)|(?:图片|图像|表格|三维模型)\s*(?:和|与|及|、|或)',clause))
+        if named_pdf_page and not explicit and not separate_category:
+            clause=re.sub(r'图片|图像',' ',clause,flags=re.I)+' PDF'
         if explicit and not separate_category:clause=re.sub(r'图片|图像|表格|三维模型|3D模型',' ',clause,flags=re.I)
         # Match whole format names: JSONL must not be mistaken for JSON, nor
         # should a format fragment inside a business identifier restrict sources.
@@ -344,6 +350,8 @@ def _engineering_visual(item):
 
 
 def identity(item):
+    if item.get('provenance',{}).get('documentImageOnly') and item.get('nativeBundle'):
+        return ('native-document-page',item['assetId'],item['nativeBundle']['representationId'])
     if (item.get('provenance',{}).get('documentRowContext') or item.get('provenance',{}).get('documentHeaderForRows')) and item.get('nativeBundle'):
         bundle=item['nativeBundle'];frozen=bundle['identity']
         return ('native-document-row-column',tuple(frozen[key] for key in ('datasetId','versionId','indexVersionId','rawCommitId','assetId','sourceSha256')),
@@ -382,6 +390,8 @@ def identity(item):
 def redundancy(left, right):
     if identity(left) == identity(right):
         return 1.0
+    if any(item.get('provenance',{}).get('documentImageOnly') for item in (left,right)):
+        return 0.0
     if any(item.get('provenance',{}).get('recordReadVersion') for item in (left,right)):
         return 0.0  # Retain the explicit relation's witnesses; give no diversity/complement bonus below.
     if any(item.get('provenance',{}).get('textReadVersion') for item in (left,right)):

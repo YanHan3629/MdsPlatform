@@ -14,6 +14,7 @@ import com.fwdrobo.sirius.service.JobRunService;
 import com.fwdrobo.sirius.service.JobService;
 import com.fwdrobo.sirius.util.SecurityUtils;
 import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
@@ -42,10 +43,16 @@ import java.util.UUID;
 @RequestMapping("/api/jobs")
 @Validated
 public class JobController {
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.fwdrobo.sirius.security.JobResourceAuthority jobResourceAuthority;
     private final JobService jobService;
     private final JobRunService jobRunService;
     private final ContainerService containerService;
     private final FileController fileController;
+    @org.springframework.beans.factory.annotation.Value("${app.job-script-path:/app/script/command.sh}")
+    private String commandScriptPath;
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.fwdrobo.sirius.security.JobExecutionDefinitionService definitions;
     DockerHostResolver resolver;
 
     public JobController(JobService jobService, JobRunService jobRunService, ContainerService containerService, FileController fileController, DockerHostResolver resolver) {
@@ -102,6 +109,7 @@ public class JobController {
     @GetMapping("/{jobId}/run/{runId}")
     public RunResponse getJobRunById(@PathVariable @Valid UUID jobId, @PathVariable @Valid UUID runId) {
         log.debug("start to run job, jobId:{}, runId: {}", jobId, runId);
+        jobResourceAuthority.require(jobId,runId,"job.read");
         return jobRunService.getJobRunById(runId);
     }
 
@@ -120,11 +128,14 @@ public class JobController {
 
     @GetMapping("/{jobId}/run/{runId}/logs")
     public String logs(@PathVariable @Valid String jobId, @PathVariable @Valid UUID runId) throws Exception {
-        return containerService.logs(runId);
+        jobResourceAuthority.require(UUID.fromString(jobId), runId, "job.log.read");
+        String content = containerService.logs(runId);
+        return com.fwdrobo.sirius.util.JobResponseSanitizer.text(content);
     }
 
     @PostMapping("/{jobId}/run/{runId}/stop")
     public JobRun stop(@PathVariable @Valid UUID jobId, @PathVariable @Valid UUID runId, @RequestParam(defaultValue = "false") boolean purge) throws Exception {
+        jobResourceAuthority.require(jobId,runId,"job.cancel");
         return containerService.stopJob(runId, purge);
     }
 
@@ -132,18 +143,24 @@ public class JobController {
     public void downloadJobFile(
             @PathVariable @Valid UUID jobId,
             @RequestParam @Valid String filePath,
-            HttpServletResponse response) throws Exception {
+            HttpServletResponse response,HttpServletRequest request) throws Exception {
+        if(!com.fwdrobo.sirius.security.JobExecutionDefinitionService.entrypoint(request))
+            throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.BAD_REQUEST,"JOB_ENTRYPOINT_PATH_REQUIRED");
         log.debug("start download job file: jobId={}, filePath={}", jobId, filePath);
         FileStream stream = jobService.downloadShellScriptStream(jobId, filePath);
         fileController.writeFileStreamToResponse(response, stream);
     }
 
     @GetMapping(value = "/internal/script/command", produces = MediaType.TEXT_PLAIN_VALUE)
-    public ResponseEntity<String> getCommand() throws Exception {
-        String pathStr = "/app/script/command.sh";
-        Path p = Path.of(pathStr);
-        String content = Files.readString(p, StandardCharsets.UTF_8);
-        return ResponseEntity.ok(content);
+    public ResponseEntity<String> getCommand(HttpServletRequest request)throws Exception {
+        if(request.getAttribute("ds.jobIoClaims") instanceof io.jsonwebtoken.Claims){
+            var definition=definitions.worker(request);
+            return ResponseEntity.ok().header("X-Execution-Definition-SHA256",definition.hash())
+                .header("X-Bootstrap-SHA256",definition.bootstrapSha()).body(definition.bootstrap());
+        }
+        return ResponseEntity.ok(definitions.currentBootstrap());
     }
 
+    @GetMapping("/{jobId}/io-manifest")
+    public Object ioManifest(@PathVariable UUID jobId,HttpServletRequest request){return definitions.workerManifest(jobId,request);}
 }

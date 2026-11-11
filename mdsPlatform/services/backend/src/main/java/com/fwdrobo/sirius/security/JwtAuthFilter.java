@@ -1,150 +1,122 @@
 package com.fwdrobo.sirius.security;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fwdrobo.sirius.entity.FwdUser;
-import com.fwdrobo.sirius.entity.permission.Role;
-import com.fwdrobo.sirius.service.RoleService;
-import com.fwdrobo.sirius.service.UserService;
+import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.JwtException;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
-import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpHeaders;
-import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
-import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
-
+import org.springframework.web.server.ResponseStatusException;
 import java.io.IOException;
-import java.util.List;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.UUID;
-import java.util.stream.Collectors;
+import java.security.Principal;
+import java.util.*;
 
-@Slf4j
+/** Authenticate immutable actor/session identity; never derive privilege from a type name. */
 @Component
 public class JwtAuthFilter extends OncePerRequestFilter {
-
-    private static final String JWT_EXCEPTION_ATTR = "jwt_exception";
-    private final JwtService jwtService;
-    private final UserService userService;
-    private final RoleService roleService;
-    private final AuthenticationEntryPoint authenticationEntryPoint;
-    private final JobIoScope jobIoScope;
-
-    public JwtAuthFilter(
-            JwtService jwtService,
-            UserService userService,
-            RoleService roleService,
-            RestAuthenticationEntryPoint restAuthenticationEntryPoint,
-            JobIoScope jobIoScope) {
-        this.jwtService = jwtService;
-        this.userService = userService;
-        this.roleService = roleService;
-        this.authenticationEntryPoint = restAuthenticationEntryPoint;
-        this.jobIoScope = jobIoScope;
+    @org.springframework.beans.factory.annotation.Autowired
+    private ServiceScopeService serviceScopes;
+    @org.springframework.beans.factory.annotation.Autowired
+    private IndexCacheScopeService indexCacheScopes;
+    @org.springframework.beans.factory.annotation.Autowired private QualityJobAuthority qualityJobs;
+    private final JwtService jwt;private final IdentitySessionService sessions;private final JobIoScope jobScope;private final ObjectMapper mapper;private final WorkerEvidenceScopeService evidenceScope;
+    public JwtAuthFilter(JwtService jwt,IdentitySessionService sessions,JobIoScope jobScope,ObjectMapper mapper,WorkerEvidenceScopeService evidenceScope) {
+        this.jwt=jwt;this.sessions=sessions;this.jobScope=jobScope;this.mapper=mapper;this.evidenceScope=evidenceScope;
     }
-
-    public record UserPrincipal(UUID userId, String userName, List<String> roles, UUID orgId) {}
-
-    @Override
-    protected boolean shouldNotFilter(HttpServletRequest request) {
-        String uri = request.getRequestURI();
-        return uri != null && uri.startsWith("/api/mm/internal/");
+    public record UserPrincipal(UUID userId,String userName,List<String> roles,UUID orgId,UUID serviceId) implements Principal {
+        public UserPrincipal(UUID userId,String userName,List<String> roles,UUID orgId){this(userId,userName,roles,orgId,null);}
+        @Override public String getName(){return userName;}
     }
-
-    @Override
-    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
-            throws ServletException, IOException {
-
-        String auth = request.getHeader(HttpHeaders.AUTHORIZATION);
-        if (auth != null && auth.startsWith("Bearer ")) {
-            String token = auth.substring("Bearer ".length()).trim();
-
+    private void authenticateIndexCache(HttpServletRequest request,HttpServletResponse response,Claims claims){
+        var scope=indexCacheScopes.authenticate(request,claims);var actor=scope.actor();
+        var authorities=java.util.List.of(new SimpleGrantedAuthority("OP_"+scope.operation()));
+        var principal=new UserPrincipal(actor.userId(),actor.username(),authorities.stream().map(SimpleGrantedAuthority::getAuthority).toList(),actor.orgId());
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(principal,null,authorities));
+        request.setAttribute("ds.actor",actor);
+        request.setAttribute("ds.liveAuthentication",(Runnable)()->indexCacheScopes.authenticate(request,claims));
+        response.setHeader("X-Identity-Permission-Version",Long.toString(actor.permissionVersion()));
+    }
+    private void authenticateService(HttpServletRequest request,HttpServletResponse response,Claims claims){
+        AuthorizationService.Actor actor;
+        if("QUALITY_WORKER".equals(claims.get("service_kind")))actor=qualityJobs.authenticate(request,claims).actor();
+        else actor=serviceScopes.authenticate(request,claims).actor();
+        var authorities=actor.operations().stream().sorted().map(c->new SimpleGrantedAuthority("OP_"+c)).toList();
+        var principal=new UserPrincipal(null,actor.username(),authorities.stream().map(SimpleGrantedAuthority::getAuthority).toList(),actor.orgId(),actor.serviceId());
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(principal,null,authorities));
+        request.setAttribute("ds.actor",actor);
+        request.setAttribute("ds.liveAuthentication",(Runnable)()->{
+            if("QUALITY_WORKER".equals(claims.get("service_kind")))qualityJobs.authenticate(request,claims);
+            else serviceScopes.authenticate(request,claims);
+        });
+        response.setHeader("X-Identity-Permission-Version",Long.toString(actor.permissionVersion()));
+    }
+    private void reject(HttpServletResponse response,int status,String code) throws IOException {
+        SecurityContextHolder.clearContext();response.setStatus(status);response.setCharacterEncoding("UTF-8");
+        response.setContentType("application/json");response.setHeader("Cache-Control","no-store, private");
+        mapper.writeValue(response.getOutputStream(),Map.of("success",false,"errorType",code,"status",status));
+    }
+    @Override protected void doFilterInternal(HttpServletRequest request,HttpServletResponse response,FilterChain chain)
+            throws ServletException,IOException {
+        response.setHeader("Cache-Control","no-store, private");response.setHeader("Pragma","no-cache");
+        String header=request.getHeader(HttpHeaders.AUTHORIZATION);
+        if(header!=null&&!header.isBlank()) {
+            if(!header.startsWith("Bearer ")||header.substring(7).isBlank()){reject(response,401,"ACCESS_TOKEN_REQUIRED");return;}
             try {
-                var claims = jwtService.parseClaims(token, null);
-                String tokenType = claims.get("token_type", String.class);
-                boolean jobIo = JwtService.TokenType.JOB_IO.name().equals(tokenType);
-                if (!jobIo && !JwtService.TokenType.ACCESS.name().equals(tokenType)) {
-                    rejectInvalidToken(request, response, new JwtException("access token type required"));
-                    return;
+                Claims claims=jwt.parseClaims(header.substring(7).trim(),null);String type=claims.get("token_type",String.class);
+                // Activation is a separate short-lived credential accepted only
+                // by the explicit activation operation, never normal business APIs.
+                if("INDEX_CACHE_IO".equals(type)){
+                    authenticateIndexCache(request,response,claims);
+                } else if("SERVICE_IO".equals(type)){
+                    authenticateService(request,response,claims);
+                } else if("ACTIVATION".equals(type)&&request.getRequestURI().equals("/api/auth/activate")) {
+                    request.setAttribute("ds.activationToken",header.substring(7).trim());
+                } else {
+                boolean job="JOB_IO".equals(type),evidence="EVIDENCE_IO".equals(type);
+                if(!job&&!evidence&&!"ACCESS".equals(type)){reject(response,401,"INTERACTIVE_ACCESS_TOKEN_REQUIRED");return;}
+                WorkerEvidenceScopeService.Scope scoped=evidence?evidenceScope.authenticate(request,claims):null;
+                AuthorizationService.Actor actor=evidence?scoped.actor():sessions.authenticateAccess(claims);
+                if(!job&&!evidence)request.setAttribute("ds.accessClaims",claims);
+                if(job) {
+                    FwdUser u=new FwdUser();u.setUserId(actor.userId());u.setUserName(actor.username());u.setOrgId(actor.orgId());
+                    // Legacy JobIoScope's online field is mapped from the already
+                    // DB-verified ACTIVE account, not used as account validity.
+                    u.setStatusCode(1);u.setTokenVersion(actor.tokenVersion());
+                    if(!jobScope.permits(request,claims,u)){reject(response,403,"JOB_IO_SCOPE_DENIED");return;}
+                    request.setAttribute("ds.jobIoClaims",claims);
                 }
-                String username = claims.getSubject();
-                Integer tokenVersion = jwtService.extractTokenVersion(claims);
-
-                Optional<FwdUser> userOpt = userService.findByUsername(username);
-                if (userOpt.isEmpty()) {
-                    log.debug("JWT validation failed: user '{}' not found", username);
-                    rejectInvalidToken(request, response, new JwtException("user not found"));
-                    return;
+                var authorities=actor.operations().stream().sorted().map(c->new SimpleGrantedAuthority("OP_"+c)).toList();
+                var principal=new UserPrincipal(actor.userId(),actor.username(),authorities.stream().map(SimpleGrantedAuthority::getAuthority).toList(),actor.orgId());
+                SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(principal,null,authorities));
+                request.setAttribute("ds.actor",actor);response.setHeader("X-Identity-Permission-Version",Long.toString(actor.permissionVersion()));
+                request.setAttribute("ds.liveAuthentication",(Runnable)()->{
+                    if(claims.getExpiration()==null||!claims.getExpiration().after(new Date()))
+                        throw new ResponseStatusException(org.springframework.http.HttpStatus.UNAUTHORIZED,"ACCESS_TOKEN_EXPIRED");
+                    if(evidence)evidenceScope.revalidate(scoped,claims,request);
+                    var live=sessions.authenticateAccess(claims);
+                    if(!actor.userId().equals(live.userId())||!actor.orgId().equals(live.orgId())||
+                            actor.tokenVersion()!=live.tokenVersion()||!actor.username().equals(live.username()))
+                        throw new ResponseStatusException(org.springframework.http.HttpStatus.UNAUTHORIZED,"REQUEST_IDENTITY_REVOKED_OR_CHANGED");
+                    if(job){
+                        FwdUser current=new FwdUser();current.setUserId(live.userId());current.setUserName(live.username());current.setOrgId(live.orgId());current.setStatusCode(1);current.setTokenVersion(live.tokenVersion());
+                        if(!jobScope.permits(request,claims,current))throw new ResponseStatusException(org.springframework.http.HttpStatus.FORBIDDEN,"JOB_IO_SCOPE_DENIED");
+                    }
+                });
                 }
-
-                FwdUser user = userOpt.orElseThrow();
-
-                if (!Objects.equals(user.getTokenVersion(), tokenVersion)) {
-                    log.debug("JWT validation failed: user '{}' token version mismatch (token: {}, user: {})",
-                            username, tokenVersion, user.getTokenVersion());
-                    rejectInvalidToken(request, response, new JwtException("token version mismatch"));
-                    return;
-                }
-
-                if (jobIo && !jobIoScope.permits(request, claims, user)) {
-                    SecurityContextHolder.clearContext();
-                    // Avoid /error dispatch changing this explicit denial to 401.
-                    response.setStatus(HttpServletResponse.SC_FORBIDDEN);
-                    response.setCharacterEncoding("UTF-8");
-                    response.setContentType("application/json");
-                    response.getWriter().write("{\"error\":\"JOB_IO_SCOPE_DENIED\",\"message\":\"任务凭据不允许访问该资源或运行已结束\"}");
-                    return;
-                }
-
-                List<Role> userRoles = roleService.getRolesByUserId(user.getUserId());
-                var roles = userRoles.stream()
-                        .map(Role::getRoleCode)
-                        .filter(Objects::nonNull)
-                        .distinct()
-                        .toList();
-
-                List<SimpleGrantedAuthority> authorities = roles.stream()
-                        .filter(Objects::nonNull)
-                        .map(role -> role.startsWith("ROLE_") ? role : "ROLE_" + role)
-                        .map(SimpleGrantedAuthority::new)
-                        .collect(Collectors.toList());
-
-                if (authorities.isEmpty()) {
-                    authorities = List.of(new SimpleGrantedAuthority("ROLE_USER"));
-                }
-
-                List<String> roleCodes = authorities.stream()
-                        .map(a -> a == null ? null : a.getAuthority())
-                        .filter(Objects::nonNull)
-                        .toList();
-
-                var principal = new UserPrincipal(user.getUserId(), user.getUserName(), roleCodes, user.getOrgId());
-                var authentication = new UsernamePasswordAuthenticationToken(principal, null, authorities);
-                SecurityContextHolder.getContext().setAuthentication(authentication);
-
-            } catch (JwtException e) {
-                log.debug("JWT parse failed: {} - {}", e.getClass().getSimpleName(), e.getMessage());
-                rejectInvalidToken(request, response, e);
-                return;
-            }
+            } catch(JwtException|IllegalArgumentException invalid) {reject(response,401,"ACCESS_TOKEN_INVALID_OR_REVOKED");return;}
+            catch(ResponseStatusException denied) {
+                reject(response,denied.getStatusCode().value(),denied.getStatusCode().value()==503?"AUTHORIZATION_NOT_READY":"ACCESS_TOKEN_INVALID_OR_REVOKED");return;
+            } catch(DataAccessException unavailable) {reject(response,503,"AUTHORITY_UNAVAILABLE");return;}
         }
-
-        chain.doFilter(request, response);
-    }
-
-    private void rejectInvalidToken(HttpServletRequest request, HttpServletResponse response, JwtException exception)
-            throws IOException, ServletException {
-        SecurityContextHolder.clearContext();
-        request.setAttribute(JWT_EXCEPTION_ATTR, exception);
-        AuthenticationException authException = new BadCredentialsException("access token validation failed", exception);
-        authenticationEntryPoint.commence(request, response, authException);
+        chain.doFilter(request,response);
     }
 }

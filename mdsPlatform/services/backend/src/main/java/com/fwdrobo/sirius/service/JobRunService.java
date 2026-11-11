@@ -13,6 +13,8 @@ import java.util.UUID;
 
 @Service
 public class JobRunService {
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.fwdrobo.sirius.security.JobResourceAuthority jobResourceAuthority;
 
     private final JobRunMapper jobRunMapper;
     private final UserService userService;
@@ -30,18 +32,12 @@ public class JobRunService {
     }
 
     public PageRes<RunResponse> listPage(int page, int size, String jobId, String dockerStatus, String containerStatus, String containerId, String containerName) {
-        List<JobRun> items;
-        // 计算总记录数
-        long total = jobRunMapper.countByFilters(jobId, dockerStatus, containerStatus, containerId, containerName);
-        if (total == 0) {
-            // 无记录，直接赋为空页
-            items = List.of();
-        } else {
-            // 获取分页数据
-            int offset = Math.max(0, (page - 1) * size);
-            items = jobRunMapper.selectPageByFilters(jobId, dockerStatus, containerStatus, containerId, containerName, offset, size);
-            items = items != null ? items : List.of();  // 强保护，防止返回 null
-        }
+        if(page<1||size<1||size>1000)throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.BAD_REQUEST,"INVALID_PAGINATION");
+        List<UUID> visible=jobResourceAuthority.visibleRunIds(UUID.fromString(jobId),dockerStatus,containerStatus,containerId,containerName);
+        long total=visible.size();
+        long offset=(long)(page-1)*size;
+        List<JobRun> items=offset>=total?List.of():visible.subList((int)offset,(int)Math.min(total,offset+size))
+                .stream().map(id->jobRunMapper.selectByRunId(id).orElseThrow(()->ExceptionUtils.notFound("JobRun不存在"))).toList();
         List<RunResponse> responses = items.stream().map(this::toResponse).toList();
 
         // 计算总页数
@@ -57,6 +53,7 @@ public class JobRunService {
         if (jobRun == null) {
             return null;
         }
+        jobResourceAuthority.require(jobRun.getJobId(), jobRun.getRunId(), "job.read");
         UserInfo createdBy = new UserInfo(jobRun.getCreatedBy(), userService.resolveUsername(jobRun.getCreatedBy()));
         return new RunResponse(
                 jobRun.getRunId(),

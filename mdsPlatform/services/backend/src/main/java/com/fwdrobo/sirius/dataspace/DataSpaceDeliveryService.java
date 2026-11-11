@@ -28,6 +28,7 @@ public class DataSpaceDeliveryService {
     private final JdbcTemplate jdbc;private final TransactionTemplate tx;private final DataSpaceContractService contracts;
     private final PersistentDataSpaceService business;private final FileService files;private final DataSpaceReceiverClient receiver;
     private final ObjectMapper json;private final DatasetAccessService access;private final long receiptCommitDelay;
+    @org.springframework.beans.factory.annotation.Autowired private ControlledDeliveryReadScope deliveryReads;
     private final AtomicBoolean busy=new AtomicBoolean();
     private final ExecutorService worker=Executors.newSingleThreadExecutor(r->{var t=new Thread(r,"dataspace-delivery");t.setDaemon(true);return t;});
     private final ScheduledExecutorService heartbeat=Executors.newSingleThreadScheduledExecutor(r->{var t=new Thread(r,"dataspace-delivery-lease");t.setDaemon(true);return t;});
@@ -64,6 +65,8 @@ public class DataSpaceDeliveryService {
     });}
     private boolean leased(Map<String,Object> task){return Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM ds_delivery_task WHERE task_id=? AND lease_token=? AND lease_until>now() AND status='RUNNING')",Boolean.class,task.get("task_id"),task.get("lease_token")));}
     private void live(Map<String,Object> task){
+        if (!contracts.deliveryAuthorityCurrent((UUID)task.get("contract_id"),((Number)task.get("contract_revision")).intValue()))
+            throw new IllegalStateException("delivery service or scoped authority is no longer valid");
         if(!leased(task)||!contracts.isAvailable((UUID)task.get("contract_id"))||!Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM ds_contract WHERE contract_id=? AND revision=? AND status='CONFIRMED' AND valid_from<=now() AND now()<valid_to AND revoked_at IS NULL)",Boolean.class,task.get("contract_id"),task.get("contract_revision"))))throw new IllegalStateException("delivery lease or live grant is no longer valid");
     }
     private Map<String,Object> manifest(Map<String,Object> task)throws Exception{
@@ -73,8 +76,13 @@ public class DataSpaceDeliveryService {
         if(!summary.get("manifestDigest").equals(c.get("manifest_digest").toString().trim()))throw new IllegalStateException("frozen raw manifest no longer matches product version");
         if(((Number)summary.get("sizeBytes")).longValue()>1024L*1024*1024||((Number)summary.get("fileCount")).longValue()>20000)throw new IllegalStateException("snapshot exceeds configured local receiver limits (1GiB, 20000 files)");
         var manifest=map("formatVersion",1,"deliveryKey",task.get("delivery_key"),"contractId",task.get("contract_id"),"contractRevision",task.get("contract_revision"),"productVersionId",c.get("product_version_id"),"consumerOrgId",c.get("consumer_org_id"),"endpointId",c.get("endpoint_id"),
-            "scopeType","FULL_VERSION","datasetId",c.get("dataset_id"),"versionId",c.get("version_id"),"indexVersionId",c.get("index_version_id"),"rawCommitId",c.get("raw_commit_id"),"manifestDigest",summary.get("manifestDigest"),"purpose",c.get("purpose"),
+            "scopeType",c.get("scope_type"),"datasetId",c.get("dataset_id"),"versionId",c.get("version_id"),"indexVersionId",c.get("index_version_id"),"rawCommitId",c.get("raw_commit_id"),"manifestDigest",summary.get("manifestDigest"),"purpose",c.get("purpose"),
             "sourceNotice","Files are read from the published raw snapshot; source units, null semantics and provenance remain in the original files. Index weights, credentials and internal configuration are excluded.","files",summary.get("files"));
+        if ("CONTROLLED_VIEW".equals(c.get("scope_type"))) {
+            var binding=jdbc.queryForMap("SELECT view_id,view_authorization_version FROM ds_contract_controlled_revision WHERE contract_id=? AND revision=?",task.get("contract_id"),task.get("contract_revision"));
+            manifest.put("viewId",binding.get("view_id"));
+            manifest.put("viewAuthorizationVersion",binding.get("view_authorization_version"));
+        }
         String digest=receiver.digest(manifest);int changed=jdbc.update("UPDATE ds_delivery_task SET package_manifest=?::jsonb,package_manifest_digest=?,manifest_digest=?,updated_at=now() WHERE task_id=? AND lease_token=? AND status='RUNNING' AND lease_until>now() AND package_manifest IS NULL",encode(manifest),digest,summary.get("manifestDigest"),task.get("task_id"),task.get("lease_token"));
         if(changed!=1)throw new IllegalStateException("delivery manifest lease lost");
         // JSONB has its own key order. Canonicalize using a sorted-key encoding for receipts.
@@ -89,7 +97,16 @@ public class DataSpaceDeliveryService {
             for(var file:identities){
                 live(task);String logical=file.get("logicalPath").toString();ZipEntry entry=new ZipEntry("files"+logical);entry.setTime(0);zip.putNextEntry(entry);
                 var source=files.downloadContent(repo,commit,logical);MessageDigest digest=MessageDigest.getInstance("SHA-256");long count=0,expected=((Number)file.get("sizeBytes")).longValue();
-                try(var in=source.inputStream()){byte[] bytes=new byte[1024*1024];for(int n;(n=in.read(bytes))!=-1;){count+=n;if(count>expected)throw new IllegalStateException("source size changed within published snapshot");zip.write(bytes,0,n);digest.update(bytes,0,n);}}
+                try(var in=source.inputStream()) {
+                    byte[] bytes=new byte[1024*1024];
+                    for(int n;(n=in.read(bytes))!=-1;){
+                        live(task);
+                        count+=n;
+                        if(count>expected)throw new IllegalStateException("source size changed within published snapshot");
+                        zip.write(bytes,0,n);
+                        digest.update(bytes,0,n);
+                    }
+                }
                 zip.closeEntry();if(count!=expected||!HexFormat.of().formatHex(digest.digest()).equals(file.get("sha256")))throw new IllegalStateException("source content does not match published SHA-256");
             }
             complete=true;return path;
@@ -97,11 +114,18 @@ public class DataSpaceDeliveryService {
     }
     private void execute(Map<String,Object> task){
         ScheduledFuture<?> renew=heartbeat.scheduleAtFixedRate(()->{try{jdbc.update("UPDATE ds_delivery_task SET lease_until=now()+interval '120 seconds',updated_at=now() WHERE task_id=? AND lease_token=? AND status='RUNNING' AND lease_until>now()",task.get("task_id"),task.get("lease_token"));}catch(Exception ignored){}},20,20,TimeUnit.SECONDS);
-        try{
+        try(var read=deliveryReads.open((UUID)task.get("contract_id"),
+                ((Number)task.get("contract_revision")).intValue(),()->live(task))){
             live(task);var manifest=manifest(task);UUID key=(UUID)task.get("delivery_key");
             var endpoint=jdbc.queryForMap("SELECT receiver_public_key,receiver_identity FROM ds_receiver_endpoint WHERE endpoint_id=?",UUID.fromString(manifest.get("endpointId").toString()));
             var envelope=receiver.receipt(key);boolean reconciled=envelope!=null;
-            if(envelope==null){Path zip=archive(task,manifest);try{live(task);envelope=receiver.send(key,zip);}finally{Files.deleteIfExists(zip);}}
+            if(envelope==null){
+                Path zip=archive(task,manifest);
+                try {
+                    live(task);
+                    envelope=receiver.send(key,zip,()->live(task));
+                } finally {Files.deleteIfExists(zip);}
+            }
             var receipt=receiver.verify(envelope,manifest,endpoint.get("receiver_public_key").toString(),endpoint.get("receiver_identity").toString());
             // Explicit local fault-test setting, default zero; never driven by API input.
             if(receiptCommitDelay>0)Thread.sleep(receiptCommitDelay);
@@ -234,7 +258,7 @@ public class DataSpaceDeliveryService {
         jdbc.queryForMap("SELECT contract_id FROM ds_contract WHERE contract_id=? FOR UPDATE",task.get("contract_id"));
         jdbc.queryForMap("SELECT task_id FROM ds_delivery_task WHERE task_id=? FOR UPDATE",task.get("task_id"));
         if(!leased(task))return;
-        int attempt=((Number)task.get("attempt_count")).intValue(),max=((Number)task.get("max_attempts")).intValue();boolean blocked=!contracts.isAvailable((UUID)task.get("contract_id"));
+        int attempt=((Number)task.get("attempt_count")).intValue(),max=((Number)task.get("max_attempts")).intValue();boolean blocked=!contracts.isAvailable((UUID)task.get("contract_id"))||!contracts.deliveryAuthorityCurrent((UUID)task.get("contract_id"),((Number)task.get("contract_revision")).intValue());
         String next=attempt>=max?"FAILED":blocked?"BLOCKED":"RETRY";String detail=(error instanceof IllegalStateException||error instanceof java.security.GeneralSecurityException)?String.valueOf(error.getMessage()):"源快照读取或接收端传输/核验失败，未计为已交付";String message=error.getClass().getSimpleName()+": "+detail;if(message.length()>1000)message=message.substring(0,1000);
         jdbc.update("UPDATE ds_delivery_attempt SET status='FAILED',error_message=?,finished_at=now() WHERE task_id=? AND attempt_number=? AND status='RUNNING'",message,task.get("task_id"),attempt);
         jdbc.update("UPDATE ds_delivery_task SET status=?,last_error=?,lease_token=null,lease_until=null,next_attempt_at=now()+(?*interval '1 second'),updated_at=now() WHERE task_id=? AND lease_token=?",next,message,Math.min(300,10*(1<<Math.min(5,attempt))),task.get("task_id"),task.get("lease_token"));
@@ -242,17 +266,49 @@ public class DataSpaceDeliveryService {
     });}catch(Exception ignored){System.err.println("delivery failure persistence deferred to lease recovery");}}
     private void audit(Map<String,Object> task,String action,Object details){jdbc.update("INSERT INTO ds_audit_event(org_id,action,object_type,object_id,details) SELECT DISTINCT x.org_id,?,'DELIVERY_TASK',?,?::jsonb FROM ds_contract c CROSS JOIN LATERAL(VALUES(c.provider_org_id),(c.consumer_org_id)) x(org_id) WHERE c.contract_id=?",action,task.get("task_id"),encode(details),task.get("contract_id"));}
     private Map<String,Object> authorizedTask(UUID task,boolean content){
-        UUID org=access.actorOrg();var rows=jdbc.queryForList("SELECT t.*,c.provider_org_id,c.consumer_org_id,c.revision AS current_revision,(c.status='CONFIRMED' AND c.revoked_at IS NULL AND c.valid_from<=now() AND now()<c.valid_to) AS live_contract,v.dataset_id,v.version_id,v.index_version_id FROM ds_delivery_task t JOIN ds_contract c ON c.contract_id=t.contract_id JOIN ds_product_version v ON v.product_version_id=c.product_version_id WHERE t.task_id=?",task);
+        UUID org=access.actorOrg();
+        var rows=jdbc.queryForList("""
+            SELECT t.*,c.provider_org_id,c.consumer_org_id,c.revision AS current_revision,c.scope_type,
+              (c.status='CONFIRMED' AND c.revoked_at IS NULL AND c.valid_from<=now() AND now()<c.valid_to) AS live_contract,
+              v.dataset_id,v.version_id,v.index_version_id
+            FROM ds_delivery_task t JOIN ds_contract c ON c.contract_id=t.contract_id
+            JOIN ds_product_version v ON v.product_version_id=c.product_version_id
+            WHERE t.task_id=? AND (c.provider_org_id=? OR c.consumer_org_id=?)
+            """,task,org,org);
         if(rows.isEmpty())throw new ResponseStatusException(HttpStatus.NOT_FOUND,"交付不存在");var row=rows.get(0);
-        if(!org.equals(row.get("provider_org_id"))&&!org.equals(row.get("consumer_org_id")))throw new ResponseStatusException(HttpStatus.FORBIDDEN,"交付不属于当前组织");
-        if(content){access.requireVersionRead((UUID)row.get("dataset_id"),(UUID)row.get("version_id"),(UUID)row.get("index_version_id"));if((!Boolean.TRUE.equals(row.get("live_contract"))||!row.get("contract_revision").equals(row.get("current_revision")))&&!access.ownsDataset((UUID)row.get("dataset_id")))throw new ResponseStatusException(HttpStatus.FORBIDDEN,"该交付的合约已失效或修订已变更，旧入口不能继续下载");}
+        if(content){
+            UUID dataset=(UUID)row.get("dataset_id"), version=(UUID)row.get("version_id"), index=(UUID)row.get("index_version_id");
+            if ("CONTROLLED_VIEW".equals(row.get("scope_type"))) {
+                contracts.requireControlledPackage((UUID)row.get("contract_id"),((Number)row.get("contract_revision")).intValue(),
+                    dataset,version,index,org.equals(row.get("consumer_org_id")));
+            } else {
+                access.requireVersionRead(dataset,version,index);
+                if(!Boolean.TRUE.equals(row.get("live_contract"))||!row.get("contract_revision").equals(row.get("current_revision"))||
+                    !contracts.isAvailable((UUID)row.get("contract_id")))
+                    throw new ResponseStatusException(HttpStatus.FORBIDDEN,"该交付的合约已失效或修订已变更，旧入口不能继续下载");
+            }
+        }
         return row;
     }
-    public Map<String,Object> manifestForUser(UUID task){var row=authorizedTask(task,true);if(row.get("package_manifest")==null)throw new ResponseStatusException(HttpStatus.CONFLICT,"交付清单尚未生成");return decode(row.get("package_manifest"));}
+    boolean canOpenPackage(UUID task){
+        try(var ignored=access.fixedOperation("delivery.package.download","CONTROLLED_DELIVERY")){
+            return "DELIVERED".equals(authorizedTask(task,true).get("status"));
+        }catch(ResponseStatusException denied){
+            if(denied.getStatusCode().value()==403||denied.getStatusCode().value()==404)return false;
+            throw denied;
+        }
+    }
+    private Map<String,Object> authorizePackageOutput(UUID task){
+        var row=authorizedTask(task,true);
+        contracts.trackPackageOutput((UUID)row.get("contract_id"),((Number)row.get("contract_revision")).intValue(),
+            "CONTROLLED_VIEW".equals(row.get("scope_type")));
+        return row;
+    }
+    public Map<String,Object> manifestForUser(UUID task){var row=authorizePackageOutput(task);if(row.get("package_manifest")==null)throw new ResponseStatusException(HttpStatus.CONFLICT,"交付清单尚未生成");return decode(row.get("package_manifest"));}
     public Map<String,Object> receiptForUser(UUID task){var row=authorizedTask(task,false);var receipts=jdbc.queryForList("SELECT r.verification,e.receiver_public_key FROM ds_receipt r JOIN ds_receiver_endpoint e ON e.endpoint_id=r.endpoint_id WHERE r.delivery_key=?",row.get("delivery_key"));if(receipts.isEmpty())throw new ResponseStatusException(HttpStatus.NOT_FOUND,"尚无独立核验回执");var result=decode(receipts.get(0).get("verification"));result.put("receiverPublicKey",receipts.get(0).get("receiver_public_key"));return result;}
     public List<Map<String,Object>> attempts(UUID task){authorizedTask(task,false);return jdbc.queryForList("SELECT attempt_number AS \"attemptNumber\",status,error_message AS error,started_at AS \"startedAt\",finished_at AS \"finishedAt\" FROM ds_delivery_attempt WHERE task_id=? ORDER BY attempt_number",task);}
     public DataSpaceReceiverClient.PackageStream openPackage(UUID task)throws Exception{
-        var row=authorizedTask(task,true);if(!"DELIVERED".equals(row.get("status")))throw new ResponseStatusException(HttpStatus.CONFLICT,"交付尚未完成独立接收验证");
+        var row=authorizePackageOutput(task);if(!"DELIVERED".equals(row.get("status")))throw new ResponseStatusException(HttpStatus.CONFLICT,"交付尚未完成独立接收验证");
         var manifest=decode(row.get("package_manifest"));var endpoint=jdbc.queryForMap("SELECT receiver_identity,receiver_public_key FROM ds_receiver_endpoint WHERE endpoint_id=?",UUID.fromString(manifest.get("endpointId").toString()));
         receiver.verify(receiptForUser(task),manifest,endpoint.get("receiver_public_key").toString(),endpoint.get("receiver_identity").toString());return receiver.openPackage((UUID)row.get("delivery_key"));
     }

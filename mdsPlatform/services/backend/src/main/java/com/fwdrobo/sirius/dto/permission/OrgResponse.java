@@ -17,6 +17,7 @@ public class OrgResponse {
     private String orgName;
     private Integer orgStatus;
     private String licenseType;
+    private Long permissionVersion;
     private OffsetDateTime createdAt;
     private UserInfo createdBy;
     private OffsetDateTime updatedAt;

@@ -18,10 +18,13 @@ import javax.imageio.ImageIO;
 @Service
 public class QaEvidenceRenderClient {
     private final ObjectMapper json;
+    private final com.fwdrobo.sirius.security.WorkerEvidenceScopeService evidenceScope;
+    private final com.fwdrobo.sirius.security.InteractiveRequestActivity activity;
     private final String base,internalToken;
     private final HttpClient http=HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
     public QaEvidenceRenderClient(ObjectMapper json,@Value("${mm.evidence-worker.base-url:http://evidence-worker:18083}") String base,
-            @Value("${mm.internal.token:}") String internalToken){this.json=json;this.base=base;this.internalToken=internalToken;}
+            @Value("${mm.internal.token:}") String internalToken,com.fwdrobo.sirius.security.WorkerEvidenceScopeService evidenceScope,
+            com.fwdrobo.sirius.security.InteractiveRequestActivity activity){this.json=json;this.base=base;this.internalToken=internalToken;this.evidenceScope=evidenceScope;this.activity=activity;}
     public record Rendered(byte[] bytes,JsonNode metadata){}
     private ResponseStatusException failure(HttpStatus status,String code){return new ResponseStatusException(status,code+": 区域证据暂不可用，请核对范围或稍后重试");}
     private boolean sameJson(JsonNode left,JsonNode right){
@@ -37,15 +40,23 @@ public class QaEvidenceRenderClient {
     }
     public Rendered render(JsonNode identity,JsonNode plan,byte[] source)throws Exception{
         if(internalToken.isBlank())throw failure(HttpStatus.SERVICE_UNAVAILABLE,"EVIDENCE_RENDER_NOT_CONFIGURED");
+        String bearer=evidenceScope.bearer(UUID.fromString(identity.path("datasetId").asText()),UUID.fromString(identity.path("versionId").asText()),UUID.fromString(identity.path("indexVersionId").asText()));
+        try(var task=activity.begin(com.fwdrobo.sirius.security.InteractiveRequestActivity.Kind.RENDER_REQUEST)){
+            var rendered=renderTracked(identity,plan,source,bearer,task);task.succeeded();return rendered;
+        }
+    }
+    private Rendered renderTracked(JsonNode identity,JsonNode plan,byte[] source,String bearer,
+            com.fwdrobo.sirius.security.InteractiveRequestActivity.Ticket task)throws Exception{
         var payload=json.createObjectNode().put("recipeVersion",plan.path("recipeVersion").asText());payload.set("identity",identity.deepCopy());payload.set("parameters",plan.path("parameters").deepCopy());payload.put("sourceBase64",Base64.getEncoder().encodeToString(source));
         var request=HttpRequest.newBuilder(URI.create(base+"/internal/v1/evidence/render")).timeout(Duration.ofSeconds(90))
             .header("Content-Type","application/json").header("X-MM-Internal-Token",internalToken)
+            .header("Authorization",bearer)
             .POST(HttpRequest.BodyPublishers.ofByteArray(json.writeValueAsBytes(payload))).build();
         HttpResponse<java.io.InputStream> response;
-        try{response=http.send(request,HttpResponse.BodyHandlers.ofInputStream());}
+        try{task.dispatched();response=http.send(request,HttpResponse.BodyHandlers.ofInputStream());}
         catch(java.net.http.HttpTimeoutException error){throw failure(HttpStatus.GATEWAY_TIMEOUT,"EVIDENCE_RENDER_TIMEOUT");}
         catch(java.io.IOException error){throw failure(HttpStatus.SERVICE_UNAVAILABLE,"EVIDENCE_RENDER_SERVICE_UNAVAILABLE");}
-        byte[] body;try(var stream=response.body()){body=stream.readNBytes(24*1024*1024+1);}
+        byte[] body;try(var stream=response.body()){body=stream.readNBytes(24*1024*1024+1);}task.acknowledged();
         if(body.length>24*1024*1024)throw failure(HttpStatus.PAYLOAD_TOO_LARGE,"EVIDENCE_RENDER_RESPONSE_LIMIT");
         if(body.length==0)throw failure(HttpStatus.SERVICE_UNAVAILABLE,"EVIDENCE_RENDER_SERVICE_UNAVAILABLE");
         JsonNode result;try{result=json.reader().with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION).with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(body);}

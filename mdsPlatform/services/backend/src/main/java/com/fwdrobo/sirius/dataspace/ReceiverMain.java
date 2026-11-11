@@ -43,7 +43,7 @@ public final class ReceiverMain {
             atomic(pub,factory.generatePublic(new java.security.spec.RSAPublicKeySpec(rsa.getModulus(),rsa.getPublicExponent())).getEncoded());
         }
         publicKey=factory.generatePublic(new X509EncodedKeySpec(Files.readAllBytes(pub)));identity="local-receiver:sha256:"+hash(publicKey.getEncoded());
-        HttpServer server=HttpServer.create(new InetSocketAddress("0.0.0.0",18082),16);
+        HttpServer server=HttpServer.create(new InetSocketAddress(System.getenv().getOrDefault("DS_RECEIVER_BIND","0.0.0.0"),18082),16);
         server.createContext("/",ReceiverMain::handle);server.setExecutor(Executors.newFixedThreadPool(4));server.start();
         System.out.println("local verified receiver ready "+identity);
     }
@@ -108,7 +108,15 @@ public final class ReceiverMain {
                 Path config=ROOT.resolve("endpoints").resolve(endpoint+".json");if(!Files.exists(config)||!consumer.equals(read(config).get("consumerOrgId")))throw new IllegalArgumentException("consumer endpoint mismatch");
                 for(String field:List.of("contractId","productVersionId","datasetId","versionId","indexVersionId","rawCommitId"))uuid(manifest.get(field));
                 if(!(manifest.get("contractRevision") instanceof Number revision)||revision.intValue()<1)throw new IllegalArgumentException("invalid contract revision");
-                if(!"FULL_VERSION".equals(manifest.get("scopeType")))throw new IllegalArgumentException("unsupported authorization scope");
+                if ("CONTROLLED_VIEW".equals(manifest.get("scopeType"))) {
+                    uuid(manifest.get("viewId"));
+                    Object authorityVersion=manifest.get("viewAuthorizationVersion");
+                    if (!(authorityVersion instanceof Integer || authorityVersion instanceof Long) || ((Number)authorityVersion).longValue()<1)
+                        throw new IllegalArgumentException("invalid view authorization version");
+                } else if (!"FULL_VERSION".equals(manifest.get("scopeType")) ||
+                           manifest.containsKey("viewId") || manifest.containsKey("viewAuthorizationVersion")) {
+                    throw new IllegalArgumentException("unsupported authorization scope");
+                }
                 if(!(manifest.get("files") instanceof List<?> files)||files.isEmpty()||files.size()>20000)throw new IllegalArgumentException("invalid complete manifest");
                 Map<String,Map<String,Object>> expected=new TreeMap<>();
                 for(Object raw:files){

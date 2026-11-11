@@ -2,3 +2,33 @@
 
 /* 产业链首页业务树增强 */
 .shell{grid-template-columns:342px 1fr}.sidebar{overflow:auto;padding-bottom:24px}.api-box{position:static;margin-top:16px}.business-panel{margin:18px 0 14px;padding:14px;border:1px solid var(--line);border-radius:18px;background:linear-gradient(180deg,#ffffff,#f8fbff)}.business-title{font-size:12px;color:var(--muted);font-weight:900;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px}.tree-root{display:flex;align-items:flex-start;gap:7px;padding:8px 6px 10px;border-radius:12px;background:#eef7ff}.tree-root b{font-size:15px}.tree-root small{display:block;color:var(--muted);font-size:11px;margin-top:1px}.business-tree{position:relative;margin-left:8px;padding-left:12px;border-left:1px dashed #a8c0dd}.tree-node{width:100%;display:flex;align-items:center;gap:6px;border:0;background:transparent;text-align:left;padding:6px 6px;border-radius:10px;color:var(--ink);cursor:pointer;font:inherit}.tree-node:hover,.tree-node.active{background:#eaf2ff}.tree-node.active .name{color:var(--brand);font-weight:900}.branch{color:#7b8ba3;margin-left:-15px}.caret{font-size:11px;color:#111827}.check{display:inline-grid;place-items:center;width:15px;height:15px;border-radius:4px;background:#37c783;color:#fff;font-size:11px;font-weight:900}.folder{font-size:14px}.level{display:inline-grid;place-items:center;width:20px;height:16px;border-radius:4px;background:#e4f4ff;color:#3b8dbc;font-size:10px;font-weight:900}.name{white-space:nowrap}.product .meta{grid-template-columns:repeat(4,1fr)}.compact p,.event p,td p{margin:3px 0 0;color:var(--muted);font-size:12px}@media (max-width:1100px){.shell{grid-template-columns:1fr}.sidebar{position:relative;height:auto}.business-tree{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;border-left:0;margin-left:0;padding-left:0}.tree-node{padding:7px}.api-box{position:static}}
+
+/* Identity panels share the existing cards, forms, spacing and palette. */
+.identity-dialog{width:min(620px,90vw);border:1px solid var(--line,#dce5e8);border-radius:14px;padding:24px;background:var(--card,#fff);color:var(--text,#203b42)}
+.identity-dialog::backdrop{background:rgba(20,43,50,.32)}
+.identity-operations{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.identity-operations span{border:1px solid var(--line,#dce5e8);border-radius:8px;padding:5px 9px;font-size:13px}
+.identity-operation-picker{border:1px solid var(--line,#dce5e8);border-radius:10px;padding:14px}
+.identity-operation-picker .identity-operation-group{margin:8px 0 18px}
+.identity-operation-picker label{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:14px}
+.identity-operation-picker input[type=checkbox]{width:auto}
+[aria-disabled=true]{opacity:.6}
+
+/* Keep identity selectors inside their cards when labels contain long identifiers. */
+#identityManagement select,#identityManagement input:not([type=checkbox]),#identityManagement textarea{width:100%;min-width:0;max-width:100%}
+#identityManagement .form-grid label{min-width:0}
+
+.view-export-controls{display:flex;flex-wrap:wrap;gap:12px;align-items:end}.view-export-controls label{display:grid;gap:6px;flex:1 1 280px;min-width:0}.view-export-controls select{width:100%;min-width:0;max-width:100%}
+
+
+.enterprise-mapping-dialog { width:min(1100px,calc(100vw - 40px)); max-height:90vh; overflow:auto; border:1px solid var(--line,#d9ded8); border-radius:18px; padding:24px; color:var(--ink,#28372e); background:var(--paper,#f7f8f4); }
+.enterprise-mapping-dialog::backdrop { background:rgba(25,38,31,.35); }
+.enterprise-mapping-dialog .grid.two { align-items:start; }
+.enterprise-mapping-dialog .form-grid textarea { min-height:76px; }
+.enterprise-mapping-review { display:grid; gap:10px; }
+.enterprise-mapping-review>div { display:grid; grid-template-columns:110px 1fr; gap:12px; overflow-wrap:anywhere; }
+@media(max-width:720px) { .enterprise-mapping-dialog { width:calc(100vw - 20px); padding:14px; } .enterprise-mapping-review>div { grid-template-columns:1fr; gap:4px; } }
+
+.resource-grants-dialog{width:min(1120px,94vw);max-height:90vh;overflow:auto;border:1px solid var(--border,#dce2ea);border-radius:18px;padding:24px;background:var(--surface,#fff);color:inherit}.resource-grants-dialog::backdrop{background:rgba(16,24,40,.42)}.resource-grant-operations{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}.resource-grant-operations label{display:flex;align-items:flex-start;gap:8px}.resource-grant-operations input[type=checkbox]{width:auto;height:auto;margin-top:4px}.resource-grant-row{padding:12px;border-bottom:1px solid var(--border,#dce2ea);overflow-wrap:anywhere}.resource-grant-row p{margin:7px 0}.resource-grants-dialog input[type=checkbox]{width:auto}@media(max-width:720px){.resource-grants-dialog{padding:16px}.resource-grant-operations{grid-template-columns:1fr}}
+
+.resource-grants-dialog .grid.two{align-items:start}.resource-grants-dialog .grid>section,.resource-grants-dialog .form-grid label{min-width:0}.resource-grants-dialog fieldset{min-inline-size:0}.resource-grants-dialog select,.resource-grants-dialog textarea,.resource-grants-dialog input:not([type=checkbox]){width:100%;min-width:0;max-width:100%}

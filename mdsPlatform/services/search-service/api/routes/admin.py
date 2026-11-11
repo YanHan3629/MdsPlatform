@@ -2,6 +2,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 from uuid import UUID
 from services.index_registry import registry
+from core.worker_authority import require_scope
 
 router = APIRouter()
 
@@ -14,6 +15,7 @@ class PreloadReq(BaseModel):
 
 @router.post("/indexes/preload")
 def preload(req: PreloadReq):
+    require_scope(str(req.datasetId),str(req.versionId),str(req.indexVersionId))
     key = registry.build_key(str(req.datasetId), str(req.versionId), str(req.indexVersionId))
     registry.ensure_preloaded(str(req.datasetId), str(req.versionId), str(req.indexVersionId))
     return {"success": True, "cacheKey": key}

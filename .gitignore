@@ -58,3 +58,9 @@ upload_summary_*.json
 **/test-results/
 **/playwright-report/
 **/coverage/
+
+# HPC acceptance helpers and test-only documentation stay local.
+/deploy/hpc/*probe*
+/deploy/hpc/test_*.py
+/deploy/hpc/独立目录启动验收.md
+**/src/test/

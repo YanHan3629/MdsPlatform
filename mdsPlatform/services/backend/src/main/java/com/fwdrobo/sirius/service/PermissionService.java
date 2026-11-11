@@ -20,12 +20,15 @@ import java.util.*;
 public class PermissionService {
 
     private final PermissionMapper permissionMapper;
+    private final com.fwdrobo.sirius.security.AuthorizationService authorization;
 
-    public PermissionService(PermissionMapper permissionMapper) {
+    public PermissionService(PermissionMapper permissionMapper,com.fwdrobo.sirius.security.AuthorizationService authorization) {
+        this.authorization=authorization;
         this.permissionMapper = permissionMapper;
     }
 
     public Permission get(UUID perId) {
+        authorization.requirePlatformManagement("identity.type.manage");
         Permission permission = permissionMapper.selectById(perId);
         if (permission == null) {
             throw ExceptionUtils.notFound("权限不存在");
@@ -34,6 +37,7 @@ public class PermissionService {
     }
 
     public Permission getByCode(String perCode) {
+        authorization.requirePlatformManagement("identity.type.manage");
         Permission permission = permissionMapper.selectByCode(perCode);
         if (permission == null) {
             throw ExceptionUtils.notFound("权限不存在");
@@ -42,6 +46,7 @@ public class PermissionService {
     }
 
     public java.util.List<Permission> list(String category) {
+        authorization.requirePlatformManagement("identity.type.manage");
         return permissionMapper.selectAll(category);
     }
 
@@ -49,6 +54,7 @@ public class PermissionService {
      * 按权限ID集合批量查询权限。
      */
     public List<Permission> listByIds(List<UUID> permissionIds) {
+        authorization.requirePlatformManagement("identity.type.manage");
         if (permissionIds == null || permissionIds.isEmpty()) {
             return List.of();
         }
@@ -56,76 +62,27 @@ public class PermissionService {
     }
 
     public java.util.List<Permission> listChildren(UUID parentId) {
+        authorization.requirePlatformManagement("identity.type.manage");
         if (parentId == null) {
             throw ExceptionUtils.badRequest("parentId不能为空");
         }
         return permissionMapper.selectByParentId(parentId);
     }
 
-    @Transactional
-    public UUID create(PermissionReq perReq) {
-        validate(perReq);
-
-        Permission exists = permissionMapper.selectByCode(perReq.getPerCode());
-        if (exists != null) {
-            throw ExceptionUtils.conflict("perCode已存在");
-        }
-        Permission per = toPermission(perReq);
-        per.setCreatedBy(SecurityUtils.getUserId());
-        per.setCreatedAt(OffsetDateTime.now());
-
-        return permissionMapper.insert(per);
+    public UUID create(PermissionReq req) {
+        authorization.requirePlatformManagement("identity.type.manage");
+        throw ExceptionUtils.badRequest("SYSTEM_OPERATION_CATALOG_IS_FIXED");
     }
-
-    @Transactional
-    public void update(UUID perId, PermissionReq perReq) {
-        if (perReq == null || perId == null) {
-            throw ExceptionUtils.badRequest("perId不能为空");
-        }
-
-        Permission db = permissionMapper.selectById(perId);
-        if (db == null) {
-            throw ExceptionUtils.notFound("权限不存在");
-        }
-
-        // 内置保护
-        if (Boolean.TRUE.equals(db.getIsBuiltin())
-                && perReq.getPerCode() != null
-                && !perReq.getPerCode().equals(db.getPerCode())) {
-            throw ExceptionUtils.conflict("系统内置权限不允许修改 per_code");
-        }
-
-        if (perReq.getPerCode() != null
-                && !perReq.getPerCode().equals(db.getPerCode())) {
-
-            Permission exists = permissionMapper.selectByCode(perReq.getPerCode());
-            if (exists != null) {
-                throw ExceptionUtils.conflict("perCode已存在");
-            }
-        }
-
-        Permission permission = toPermission(perReq);
-        permission.setPerId(perId);
-        permission.setUpdatedBy(SecurityUtils.getUserId());
-        permission.setUpdatedAt(OffsetDateTime.now());
-        permissionMapper.update(permission);
+    public void update(UUID id,PermissionReq req) {
+        authorization.requirePlatformManagement("identity.type.manage");
+        throw ExceptionUtils.badRequest("SYSTEM_OPERATION_CATALOG_IS_FIXED");
     }
-
-    @Transactional
-    public void delete(UUID perId) {
-        if (perId == null) return;
-
-        Permission db = permissionMapper.selectById(perId);
-        if (db == null) return;
-
-        if (Boolean.TRUE.equals(db.getIsBuiltin())) {
-            throw ExceptionUtils.conflict("系统内置权限不允许删除");
-        }
-
-        permissionMapper.deleteById(perId);
+    public void delete(UUID id) {
+        authorization.requirePlatformManagement("identity.type.manage");
+        throw ExceptionUtils.badRequest("SYSTEM_OPERATION_CATALOG_IS_FIXED");
     }
-
     public List<PermissionTree> getPermissionTree() {
+        authorization.requirePlatformManagement("identity.type.manage");
 
         // 一次性查出所有权限
         List<Permission> all = permissionMapper.selectAll(null);

@@ -558,6 +558,9 @@ class QaService:
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
     ) -> QAResponse:
+        from core.worker_authority import current_guard
+        current_guard().require_qa_mode(input_mode,dataset_id,version_id,index_version_id,
+            use_search_service,retrieval_mode,retrieval_type,query_plan)
         question = (question or "").strip()
         if not question:
             raise ValueError("question 不能为空")

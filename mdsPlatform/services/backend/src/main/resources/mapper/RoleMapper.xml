@@ -11,6 +11,10 @@
         <result column="role_code" property="roleCode"/>
         <result column="role_name" property="roleName"/>
         <result column="is_builtin" property="isBuiltin" javaType="java.lang.Boolean"/>
+        <result column="type_version" property="typeVersion" javaType="java.lang.Long"/>
+        <result column="type_state" property="typeState"/>
+        <result column="type_scope" property="typeScope"/>
+        <result column="read_only_profile" property="readOnlyProfile" javaType="java.lang.Boolean"/>
         <result column="created_at" property="createdAt" javaType="java.time.OffsetDateTime"/>
         <result column="created_by" property="createdBy" javaType="java.util.UUID"/>
         <result column="updated_at" property="updatedAt" javaType="java.time.OffsetDateTime"/>
@@ -18,7 +22,7 @@
     </resultMap>
 
     <sql id="BaseColumns">
-        role_id, org_id, role_code, role_name, is_builtin, created_at, created_by, updated_at, updated_by
+        role_id, org_id, role_code, role_name, is_builtin, type_version, type_state, type_scope, read_only_profile, created_at, created_by, updated_at, updated_by
     </sql>
 
     <select id="selectById" resultMap="RoleMap">
@@ -87,7 +91,7 @@
 
     <select id="selectRolesByUserId" resultMap="RoleMap">
         SELECT
-            r.role_id, org_id, role_code, role_name, is_builtin, r.created_at, r.created_by, r.updated_at, r.updated_by
+            r.role_id, org_id, role_code, role_name, is_builtin, type_version, type_state, type_scope, read_only_profile, r.created_at, r.created_by, r.updated_at, r.updated_by
         FROM user_role ur join role r on ur.role_id = r.role_id
         WHERE ur.user_id = #{userId}
     </select>

@@ -16,13 +16,21 @@ import java.util.UUID;
 @Component
 public class JobIoScope {
     private final JobRunMapper runs;
+    @org.springframework.beans.factory.annotation.Autowired
+    private IndexJobAuthority indexAuthority;
+    @org.springframework.beans.factory.annotation.Autowired private ControlledViewPreviewAuthority previews;
+    @org.springframework.beans.factory.annotation.Autowired
+    private JobExecutionDefinitionService definitions;
 
     public JobIoScope(JobRunMapper runs) { this.runs = runs; }
 
     public boolean permits(HttpServletRequest request, Claims claims, FwdUser user) {
         try {
             Map<?, ?> scope = claims.get("job_io_scope", Map.class);
-            if (scope == null || !Objects.equals(user.getStatusCode(), 1)) return false;
+            if (scope == null || !Objects.equals(user.getStatusCode(), 1)||!definitions.current(claims)) return false;
+            if("INDEX_BUILD".equals(scope.get("jobKind")))return indexAuthority.permits(request,claims);
+            if(ControlledViewPreviewAuthority.KIND.equals(scope.get("jobKind")))return previews.permits(request,claims);
+            if(scope.containsKey("jobKind"))return false;
             UUID jobId = id(scope, "jobId"), runId = id(scope, "runId");
             if (!user.getUserId().equals(id(scope, "userId")) || !user.getOrgId().equals(id(scope, "orgId"))) return false;
             JobRun run = runs.selectByRunId(runId).orElse(null);
@@ -35,14 +43,20 @@ public class JobIoScope {
             String context = request.getContextPath();
             if (context != null && !context.isEmpty()) uri = uri.substring(context.length());
             if ("GET".equals(request.getMethod())) {
+                var definition=definitions.read(runId).body();
+                if(definition.has("ioManifest")){
+                    if(uri.equals("/api/jobs/"+jobId+"/io-manifest"))return true;
+                    for(var item:definition.path("declaredInputs")){String path=files(UUID.fromString(item.path("repoId").asText()),UUID.fromString(item.path("commitId").asText()));if(uri.equals(path)||uri.equals(path+"/content"))return true;}
+                }
                 if (uri.equals(input) || uri.equals(input + "/content")
-                        || uri.equals("/api/jobs/" + jobId + "/entrypoint/content")
+                        || (uri.equals("/api/jobs/" + jobId + "/entrypoint/content")&&JobExecutionDefinitionService.entrypoint(request))
                         || uri.equals("/api/jobs/internal/script/command")) return true;
                 Object previous = scope.get("previousIndexCommitId");
                 if (previous == null) return false;
                 String previousFiles = files(id(scope, "outputRepoId"), id(scope, "previousIndexCommitId"));
                 return uri.equals(previousFiles) || uri.equals(previousFiles + "/content");
             }
+            if("PUT".equals(request.getMethod())&&definitions.read(runId).body().has("ioManifest"))for(var item:definitions.read(runId).body().path("declaredOutputs"))if(uri.equals(files(UUID.fromString(item.path("repoId").asText()),UUID.fromString(item.path("commitId").asText()))))return true;
             return "PUT".equals(request.getMethod()) && uri.equals(output);
         } catch (IllegalArgumentException | NullPointerException | ClassCastException exception) {
             return false;

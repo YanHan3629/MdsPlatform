@@ -1,3 +1,4 @@
+from core.worker_authority import current_guard, AuthorityError
 import requests
 
 from core.config import settings
@@ -11,33 +12,28 @@ class SearchServiceClient:
 
     def __init__(self, bearer_token=None):
         self.backend_base_url = settings.backend_base_url.rstrip("/")
-        self.backend_headers = {}
-        token = bearer_token or ""
-        if token:
-            self.backend_headers["Authorization"] = f"Bearer {token}"
+        self._expected_token=bearer_token
         self.base_url = settings.search_service_base_url.rstrip("/")
-        self.search_headers = {"X-MM-Internal-Token": settings.mm_internal_token}
         self.timeout = settings.request_timeout_seconds
+
+    @property
+    def backend_headers(self):
+        guard=current_guard()
+        if self._expected_token and guard.headers["Authorization"]!="Bearer "+self._expected_token:
+            raise AuthorityError(403,"WORKER_CREDENTIAL_MISMATCH")
+        return guard.headers
+    @property
+    def search_headers(self):return self.backend_headers
 
     def backend_multimodal_search(self, dataset_id, version_id, index_version_id, query: str, top_k: int = 8) -> list:
         """调用后端 /api/mm/search/text-to-image（多模态：返回 previewUrl 图片 + captions/tags/categories）。
 
         需配置 BACKEND_BEARER_TOKEN；返回条目结构与 MmTextToImageResp 一致。
         """
-        url = f"{self.backend_base_url}{settings.backend_search_path}"
-        payload = {
-            "datasetId": str(dataset_id),
-            "versionId": str(version_id),
-            "indexVersionId": str(index_version_id),
-            "query": query,
-            "topK": top_k,
-        }
-        resp = requests.post(url, json=payload, headers=self.backend_headers or None, timeout=self.timeout)
-        resp.raise_for_status()
-        return resp.json().get("items", []) or []
+        return self.text_to_image(dataset_id,version_id,index_version_id,query,top_k)
 
     def download_preview(self, url: str) -> bytes:
-        resp = requests.get(url, timeout=30)
+        resp = requests.get(current_guard().safe_backend_url(url),headers=self.backend_headers,timeout=30,allow_redirects=False)
         resp.raise_for_status()
         return resp.content
 

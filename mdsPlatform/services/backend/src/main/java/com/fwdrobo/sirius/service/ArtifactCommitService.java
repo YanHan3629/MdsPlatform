@@ -40,6 +40,10 @@ public class ArtifactCommitService {
     private final ManifestService manifestService;
     private final UserService userService;
     private final DatasetAccessService datasetAccess;
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.springframework.jdbc.core.JdbcTemplate jdbc;
+    @org.springframework.beans.factory.annotation.Autowired
+    private ArtifactUploadService uploadProtocol;
 
     public ArtifactCommitService(
             ArtifactRepoMapper artifactRepoMapper, 
@@ -60,6 +64,7 @@ public class ArtifactCommitService {
      */
     @Transactional
     public ArtifactCommitResponse createCommit(UUID repoId, @Valid CreateCommitReq request) {
+        datasetAccess.requireArtifact(repoId,null,true);
         log.info("开始创建 commit: repoId={}, commitSource={}", repoId, request.getCommitSource());
         
         // 确认 repo 存在
@@ -112,6 +117,54 @@ public class ArtifactCommitService {
     }
 
     /**
+     * Index output is a new physical snapshot. Ordinary raw drafts keep their
+     * existing parent inheritance through createCommit.
+     */
+    @Transactional
+    public ArtifactCommitResponse createEmptyIndexDraft(UUID repoId,UUID datasetId,UUID indexId) {
+        datasetAccess.requireArtifact(repoId,null,true);
+        jdbc.execute("SELECT pg_advisory_xact_lock(805014630400001::bigint)");
+        if(jdbc.queryForList("SELECT repo_id FROM artifact_repo WHERE repo_id=? FOR UPDATE",repoId).isEmpty())
+            throw ExceptionUtils.notFound("index repository 不存在");
+        if(!Boolean.TRUE.equals(jdbc.queryForObject(
+            "SELECT EXISTS(SELECT 1 FROM mm_dataset WHERE dataset_id=? AND index_repo_id=?)",
+            Boolean.class,datasetId,repoId)))throw ExceptionUtils.badRequest("INDEX_OUTPUT_REPOSITORY_MISMATCH");
+        ArtifactCommit previousDraft=artifactCommitMapper.selectDraftByRepoId(repoId);
+        if(previousDraft!=null) {
+            // Only an explicitly managed, failed execution may release the draft
+            // slot. Keep every file, manifest and receipt for later inspection.
+            boolean terminal=Boolean.TRUE.equals(jdbc.queryForObject("""
+                SELECT EXISTS(SELECT 1 FROM mm_index_version i
+                  JOIN artifact_commit c ON c.repo_id=i.index_repo_id AND c.commit_id=i.index_commit_id
+                  JOIN job_run j ON j.run_id=i.build_run_id AND j.job_id=i.build_job_id
+                  WHERE i.dataset_id=? AND i.index_repo_id=? AND i.index_commit_id=? AND i.index_status='FAILED'
+                    AND c.meta->>'managedIndexOutput'='true'
+                    AND c.meta->>'indexVersionId'=i.index_version_id::text
+                    AND (j.run_status IN('FAILED','CANCELED','SUCCEEDED')
+                      OR EXISTS(SELECT 1 FROM ds_index_callback_receipt r WHERE r.run_id=j.run_id AND r.callback_kind='FAILED')))
+                AND NOT EXISTS(SELECT 1 FROM mm_index_version WHERE index_repo_id=? AND index_commit_id=? AND index_status<>'FAILED')
+                AND NOT EXISTS(SELECT 1 FROM artifact_upload_attempt WHERE commit_id=? AND state='PREPARED')
+                """,Boolean.class,datasetId,repoId,previousDraft.getCommitId(),repoId,previousDraft.getCommitId(),previousDraft.getCommitId()));
+            if(!terminal)throw ExceptionUtils.conflict("索引仓库仍有未结束或非托管的草稿，请先处理当前任务");
+            int retired=jdbc.update("""
+                UPDATE artifact_commit SET commit_status='DEPRECATED'
+                WHERE repo_id=? AND commit_id=? AND commit_status='DRAFT'
+                """,repoId,previousDraft.getCommitId());
+            if(retired!=1)throw ExceptionUtils.conflict("索引草稿状态已改变，请重试");
+        }
+        ArtifactCommit commit=new ArtifactCommit();
+        commit.setCommitId(UUID.randomUUID());commit.setRepoId(repoId);
+        commit.setCommitStatus(CommitStatus.DRAFT);commit.setCommitSource("INDEX_BUILD");
+        commit.setCreatedBy(SecurityUtils.getUserId());commit.setComment("isolated index execution output");
+        var meta=MAPPER.createObjectNode();meta.put("managedIndexOutput",true);
+        meta.put("datasetId",datasetId.toString());meta.put("indexVersionId",indexId.toString());commit.setMeta(meta);
+        artifactCommitMapper.insert(commit);
+        try { manifestService.initDraft(repoId,commit.getCommitId(),null); }
+        catch(Exception failure){throw ExceptionUtils.internalError("INDEX_OUTPUT_MANIFEST_INITIALIZATION_FAILED");}
+        return toResponse(artifactCommitMapper.selectByRepoAndCommit(repoId,commit.getCommitId()));
+    }
+
+    /**
      * 查询 repo 下所有 commits
      */
     public List<ArtifactCommitResponse> listCommits(UUID repoId) {
@@ -133,55 +186,28 @@ public class ArtifactCommitService {
      * 分页查询 repo 下的 commits（支持按状态、来源过滤和排序）
      */
     public PageRes<ArtifactCommitResponse> listCommitsPaged(ListCommitsQuery query) {
-        log.info("分页查询 commit 列表: repoId={}, page={}, size={}, sortBy={}, sortOrder={}, commitStatus={}, commitSource={}", 
-            query.getRepoId(), query.getPageOrDefault(), query.getSizeOrDefault(), 
-            query.getSortByOrDefault(), query.getSortOrderOrDefault(),
-            query.getCommitStatusOrNull(), query.getCommitSourceOrNull());
-        
-        ensureRepoExists(query.getRepoId());
-
-        // 查询总数
-        long totalCount = artifactCommitMapper.countByRepoId(query);
-        log.debug("查询到 commit 总数: repoId={}, totalCount={}", query.getRepoId(), totalCount);
-
-        // 如果没有数据，直接返回空结果
-        if (totalCount == 0) {
-            return new PageRes<>(0, 0, query.getPageOrDefault(), query.getSizeOrDefault(), List.of());
+        List<ArtifactCommit> visible = catalogueCommits(query);
+        int page = query.getPageOrDefault();
+        int size = query.getSizeOrDefault();
+        long total = visible.size();
+        if (total == 0) {
+            return new PageRes<>(0, 0, page, size, List.of());
         }
-
-        // 计算总页数
-        int totalPages = (int) Math.ceil((double) totalCount / query.getSizeOrDefault());
-
-        // 检查页码是否越界（1-based）
-        if (query.getPageOrDefault() > totalPages) {
-            log.warn("请求的页码超出范围: page={}, totalPages={}, totalCount={}",
-                    query.getPageOrDefault(), totalPages, totalCount);
-            throw ExceptionUtils.badRequest(
-                String.format("页码超出范围：请求第 %d 页，但总共只有 %d 页", 
-                    query.getPageOrDefault(), totalPages)
-            );
-        } else if (query.getPageOrDefault() < 1) {
-            log.warn("请求的页码小于1: page={}", query.getPageOrDefault());
-            throw ExceptionUtils.badRequest("页码必须大于等于 1");
+        int totalPages = (int) ((total + size - 1) / size);
+        if (page > totalPages) {
+            throw ExceptionUtils.badRequest(String.format("页码超出范围：请求第 %d 页，但总共只有 %d 页", page, totalPages));
         }
+        long offset = (page - 1L) * size;
+        List<ArtifactCommitResponse> items = visible.stream().skip(offset).limit(size).map(this::toResponse).toList();
+        return new PageRes<>(total, totalPages, page, size, items);
+    }
 
-        // 分页查询数据
-        List<ArtifactCommitResponse> commits = artifactCommitMapper
-            .selectByRepoIdPaged(query)
-            .stream()
-            .map(this::toResponse)
-            .collect(Collectors.toList());
-
-        log.info("成功查询 commit 列表: repoId={}, page={}, size={}, totalCount={}, totalPages={}", 
-            query.getRepoId(), query.getPageOrDefault(), query.getSizeOrDefault(), totalCount, totalPages);
-
-        return new PageRes<>(
-            totalCount,
-            totalPages,
-            query.getPageOrDefault(),
-            query.getSizeOrDefault(),
-            commits
-        );
+    private List<ArtifactCommit> catalogueCommits(ListCommitsQuery query) {
+        UUID repoId = query.getRepoId();
+        datasetAccess.requireArtifact(repoId, null, false);
+        return artifactCommitMapper.selectCatalogueCandidates(query).stream()
+                .filter(commit -> datasetAccess.canReadArtifact(repoId, commit.getCommitId()))
+                .toList();
     }
 
     /**
@@ -212,6 +238,7 @@ public class ArtifactCommitService {
      */
     @Transactional
     public ArtifactCommitResponse publishCommit(UUID repoId, UUID commitId, String comment) {
+        try(var operation=datasetAccess.beginCommitPublication(repoId,commitId)) {
         log.info("发布 commit: repoId={}, commitId={}, comment={}", repoId, commitId, comment);
 
         ensureRepoExists(repoId);
@@ -232,7 +259,10 @@ public class ArtifactCommitService {
             throw ExceptionUtils.badRequest("comment is required when publishing a commit");
         }
 
+        // Recheck current authority immediately before the immutable state change.
+        datasetAccess.requireArtifact(repoId,commitId,true);
         // 更新数据库中的 commit 状态
+        uploadProtocol.requirePublishable(repoId,commitId);
         int updated = artifactCommitMapper.publishDraft(repoId, commitId, SecurityUtils.getUserId(), comment);
         if (updated <= 0) {
             log.debug("发布 commit 失败: repoId={}, commitId={}", repoId, commitId);
@@ -247,6 +277,7 @@ public class ArtifactCommitService {
 
         log.info("成功发布 commit: repoId={}, commitId={}", repoId, commitId);
         return toResponse(published);
+        }
     }
 
     /**
@@ -258,7 +289,6 @@ public class ArtifactCommitService {
         ensureRepoExists(repoId);
 
         ArtifactCommit commit = artifactCommitMapper.selectLatestPublishedByRepoId(repoId);
-        log.debug("查询结果: repoId={}, commit={}", repoId, commit);
 
         if (commit == null) {
             log.debug("repo 下没有已发布的 commit: repoId={}", repoId);
@@ -267,6 +297,13 @@ public class ArtifactCommitService {
         
         log.info("成功获取最新已发布 commit (HEAD): repoId={}, commitId={}", repoId, commit.getCommitId());
         return toResponse(commit);
+    }
+
+    public ArtifactCommitResponse getReadableHead(UUID repoId) {
+        ListCommitsQuery query = ListCommitsQuery.builder().repoId(repoId).commitStatus("PUBLISHED")
+                .sortBy("publishedAt").sortOrder("DESC").build();
+        return catalogueCommits(query).stream().findFirst().map(this::toResponse)
+                .orElseThrow(() -> ExceptionUtils.notFound("未找到可访问的已发布提交"));
     }
 
     /**
@@ -278,11 +315,10 @@ public class ArtifactCommitService {
         ensureRepoExists(repoId);
 
         ArtifactCommit commit = artifactCommitMapper.selectDraftByRepoId(repoId);
-        log.debug("查询结果: repoId={}, commit={}", repoId, commit);
 
-        if (commit == null) {
+        if (commit == null || !datasetAccess.canReadArtifact(repoId, commit.getCommitId())) {
             log.debug("repo 下没有 DRAFT 状态的 commit: repoId={}", repoId);
-            throw ExceptionUtils.notFound("no draft commit in repo: " + repoId);
+            throw ExceptionUtils.notFound("未找到可访问的草稿提交");
         }
 
         log.info("成功获取当前 DRAFT commit: repoId={}, commitId={}", repoId, commit.getCommitId());
@@ -295,6 +331,7 @@ public class ArtifactCommitService {
      */
     @Transactional
     public ArtifactCommitResponse getOrCreateDraft(UUID repoId) {
+        datasetAccess.requireArtifact(repoId,null,true);
         log.info("获取或创建 DRAFT commit: repoId={}", repoId);
 
         ensureRepoExists(repoId);
@@ -320,27 +357,9 @@ public class ArtifactCommitService {
      * @return commit 数量
      */
     public long getCommitCount(UUID repoId, String commitStatus) {
-        log.info("获取 commit 数量: repoId={}, commitStatus={}", repoId, commitStatus);
-        
-        ensureRepoExists(repoId);
-
-        // 构建查询参数
-        ListCommitsQuery query = ListCommitsQuery.builder()
-                .repoId(repoId)
-                .commitStatus(commitStatus)
-                .page(0)
-                .size(1)
-                .build();
-
-        // 如果传入了 commitStatus，进行参数校验
-        if (commitStatus != null && !commitStatus.trim().isEmpty()) {
-            query.validate();
-        }
-
-        long count = artifactCommitMapper.countByRepoId(query);
-        log.info("查询到 commit 数量: repoId={}, commitStatus={}, count={}", repoId, commitStatus != null ? commitStatus : "ALL", count);
-        
-        return count;
+        ListCommitsQuery query = ListCommitsQuery.builder().repoId(repoId).commitStatus(commitStatus).build();
+        query.validate();
+        return catalogueCommits(query).size();
     }
 
     private void ensureRepoExists(UUID repoId) {

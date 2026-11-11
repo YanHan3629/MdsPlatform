@@ -35,6 +35,9 @@ public final class SecurityUtils {
      *
      * @return userName，若未认证则返回 null
      */
+    public static UUID getServiceSubjectId(){
+        UserPrincipal principal=currentPrincipal();return principal==null?null:principal.serviceId();
+    }
     public static String getUserName() {
         UserPrincipal principal = currentPrincipal();
         if (principal != null) {

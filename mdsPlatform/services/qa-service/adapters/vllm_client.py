@@ -30,6 +30,9 @@ class VllmClient:
     def _request(
         self, method: str, path: str, payload: Optional[dict] = None, timeout: Optional[int] = None
     ) -> dict:
+        from core.worker_authority import current_guard,AuthorityError
+        protected=payload is not None and path in {"/tokenize","/v1/chat/completions"}
+        if protected:current_guard().revalidate(force=True)
         url = self.base_url + path
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -43,6 +46,7 @@ class VllmClient:
         try:
             with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
                 result=json.loads(resp.read().decode("utf-8"))
+                if protected:current_guard().revalidate(force=True)
                 if observed:trace.end(observed,result)
                 return result
         except urllib.error.HTTPError as e:
@@ -55,6 +59,9 @@ class VllmClient:
             if observed:trace.end(observed,error=e)
             category="timeout" if isinstance(e.reason,TimeoutError) else "unavailable"
             raise VllmClientError(f"无法连接 vLLM({url}): {e.reason}",category=category) from e
+        except AuthorityError as error:
+            if observed:trace.end(observed,error=error)
+            raise
         except TraceStorageError:
             raise
         except Exception as e:

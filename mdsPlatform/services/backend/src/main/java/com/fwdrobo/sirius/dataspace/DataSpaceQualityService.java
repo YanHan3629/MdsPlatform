@@ -17,7 +17,8 @@ import static com.fwdrobo.sirius.dataspace.PersistentDataSpaceService.map;
 /** Authenticated user requests and leased service-to-service quality work. */
 @Service
 public class DataSpaceQualityService {
-    public static final String RULES_VERSION="snapshot-quality-2026-10-20.6";
+    @org.springframework.beans.factory.annotation.Autowired private com.fwdrobo.sirius.security.QualityJobAuthority qualityJobs;
+    public static final String RULES_VERSION="snapshot-quality-2026-11-07.3";
     private final JdbcTemplate jdbc;
     private final DatasetAccessService access;
     private final PersistentDataSpaceService business;
@@ -54,6 +55,7 @@ public class DataSpaceQualityService {
         if(!version.equals(existing.get("version_id"))||!Objects.equals(decode(existing.get("rule_config")),config))throw error(HttpStatus.CONFLICT,"相同幂等键对应不同版本或规则，请使用新的运行键");
         report=(UUID)existing.get("report_id");
         if(inserted>0){
+            qualityJobs.capture(report,dataset,version,body.get("serviceSubjectId"));
             jdbc.update("INSERT INTO ds_quality_job(report_id,status) VALUES (?,'QUEUED')",report);
             jdbc.update("INSERT INTO ds_audit_event(org_id,actor_user_id,action,object_type,object_id,details) VALUES (?,?,'REQUEST_QUALITY','QUALITY_REPORT',?,?::jsonb)",access.actorOrg(),SecurityUtils.getUserId(),report,encode(map("datasetId",dataset,"versionId",version,"rulesVersion",RULES_VERSION)));
         }
@@ -84,6 +86,7 @@ public class DataSpaceQualityService {
     }
     private void validateField(Object raw){
         if(!(raw instanceof Map<?,?> field))throw error(HttpStatus.BAD_REQUEST,"字段规则需要对象");
+        if (field.containsKey("projectionPresence")) throw error(HttpStatus.BAD_REQUEST, "字段位置由登记视图提供，不能由质量任务指定");
         if(field.get("nullable")!=null&&!(field.get("nullable") instanceof Boolean))throw error(HttpStatus.BAD_REQUEST,"nullable必须是真正的布尔值，不能使用字符串");
         for(String key:List.of("type","unit","timezone","sheet","nullRule","null_rule"))if(field.get(key)!=null&&!(field.get(key) instanceof String))throw error(HttpStatus.BAD_REQUEST,key+"需要字符串");
     }
@@ -106,18 +109,8 @@ public class DataSpaceQualityService {
     }
     @Transactional
     public Map<String,Object> claim(){
-        // Reclaim expired attempts. The report remains immutable after completion.
-        jdbc.update("""
-            UPDATE ds_quality_report q SET status='FAILED',blocking_count=1,completed_at=now(),coverage='{"worker":"failed after three attempts"}'::jsonb
-            FROM ds_quality_job j WHERE j.report_id=q.report_id AND j.status='RUNNING' AND j.lease_until<now() AND j.attempt_count>=3 AND q.completed_at IS NULL
-            """);
-        jdbc.update("UPDATE ds_quality_job SET status='FAILED',last_error='质量执行租约过期，已达到三次上限',updated_at=now() WHERE status='RUNNING' AND lease_until<now() AND attempt_count>=3");
-        var jobs=jdbc.queryForList("""
-            SELECT j.report_id FROM ds_quality_job j WHERE (j.status='QUEUED' AND j.next_attempt_at<=now()) OR
-              (j.status='RUNNING' AND j.lease_until<now() AND j.attempt_count<3) ORDER BY j.updated_at FOR UPDATE SKIP LOCKED LIMIT 1
-            """);
-        if(jobs.isEmpty())return Map.of();UUID id=(UUID)jobs.get(0).get("report_id"),lease=UUID.randomUUID();
-        jdbc.update("UPDATE ds_quality_job SET status='RUNNING',attempt_count=attempt_count+1,lease_token=?,lease_until=now()+interval '120 seconds',updated_at=now() WHERE report_id=?",lease,id);
+        var claimed=qualityJobs.claim();if(claimed==null)return Map.of();
+        UUID id=claimed.report(),lease=claimed.lease();
         var scope=jdbc.queryForMap("""
             SELECT q.dataset_id,q.version_id,q.manifest_digest,q.rule_config,q.rules_version,d.raw_repo_id,v.raw_commit_id FROM ds_quality_report q
             JOIN mm_dataset d ON d.dataset_id=q.dataset_id JOIN mm_dataset_version v ON v.version_id=q.version_id WHERE q.report_id=?
@@ -126,9 +119,18 @@ public class DataSpaceQualityService {
         for(var file:files.listFilesByRepoAndCommit((UUID)scope.get("raw_repo_id"),(UUID)scope.get("raw_commit_id")))
             identities.add(map("logicalPath",file.getLogicalPath(),"sizeBytes",file.getSizeBytes(),"sha256",file.getSha256()));
         identities.sort(Comparator.comparing(f->f.get("logicalPath").toString()));
-        return map("reportId",id,"leaseToken",lease,"datasetId",scope.get("dataset_id"),"versionId",scope.get("version_id"),"manifestDigest",scope.get("manifest_digest"),"rulesVersion",scope.get("rules_version"),"rules",decode(scope.get("rule_config")),"files",identities);
+        var views = jdbc.queryForList("""
+            SELECT view_id AS "viewId", btrim(rule_manifest_sha256) AS "ruleSha256", rule_version AS "ruleVersion"
+            FROM ds_controlled_view
+            WHERE dataset_id=? AND version_id=? AND state='READY'
+            """, scope.get("dataset_id"), scope.get("version_id"));
+        if (views.size() > 1) throw error(HttpStatus.CONFLICT, "质量任务对应多个登记视图");
+        var payload = new LinkedHashMap<>(map("reportId",id,"leaseToken",lease,"datasetId",scope.get("dataset_id"),"versionId",scope.get("version_id"),"manifestDigest",scope.get("manifest_digest"),"rulesVersion",scope.get("rules_version"),"rules",decode(scope.get("rule_config")),"files",identities));
+        if (!views.isEmpty()) payload.put("controlledView", views.get(0));
+        return payload;
     }
     private Map<String,Object> lease(UUID id,UUID token){
+        qualityJobs.requireJob(id,token);
         var rows=jdbc.queryForList("SELECT report_id FROM ds_quality_job WHERE report_id=? AND lease_token=? AND status='RUNNING' AND lease_until>now()",id,token);
         if(rows.isEmpty())throw error(HttpStatus.CONFLICT,"质量任务租约已过期或已由其他工作器接管");return rows.get(0);
     }
@@ -136,12 +138,15 @@ public class DataSpaceQualityService {
         lease(id,token);var scope=jdbc.queryForMap("SELECT d.raw_repo_id,v.raw_commit_id FROM ds_quality_report q JOIN mm_dataset d ON d.dataset_id=q.dataset_id JOIN mm_dataset_version v ON v.version_id=q.version_id WHERE q.report_id=?",id);
         return files.downloadContent((UUID)scope.get("raw_repo_id"),(UUID)scope.get("raw_commit_id"),path);
     }
-    public void heartbeat(UUID id,UUID token){
+    @Transactional public void heartbeat(UUID id,UUID token){
+        jdbc.execute("SELECT policy_version FROM ds_auth_initialization WHERE singleton FOR UPDATE");
+        qualityJobs.requireJob(id,token);
         int count=jdbc.update("UPDATE ds_quality_job SET lease_until=now()+interval '120 seconds',updated_at=now() WHERE report_id=? AND lease_token=? AND status='RUNNING' AND lease_until>now()",id,token);
         if(count!=1)throw error(HttpStatus.CONFLICT,"质量任务租约失效");
     }
     @Transactional
     public Map<String,Object> complete(UUID id,UUID token,Map<String,Object> body){
+        jdbc.execute("SELECT policy_version FROM ds_auth_initialization WHERE singleton FOR UPDATE");
         lease(id,token);
         var report=jdbc.queryForMap("SELECT q.* FROM ds_quality_report q JOIN ds_quality_job j ON j.report_id=q.report_id WHERE q.report_id=? FOR UPDATE OF q,j",id);
         lease(id,token);
@@ -173,14 +178,17 @@ public class DataSpaceQualityService {
         jdbc.update("UPDATE ds_quality_report SET status=?,measured_count=?,passed_count=?,blocking_count=?,coverage=?::jsonb,checks=?::jsonb,score=?,completed_at=now() WHERE report_id=?",state,measured,passed,blocking,encode(coverage),encode(checks),score,id);
         jdbc.update("UPDATE ds_quality_job SET status='COMPLETED',lease_until=null,updated_at=now() WHERE report_id=? AND lease_token=?",id,token);
         jdbc.update("INSERT INTO ds_audit_event(org_id,action,object_type,object_id,details) SELECT d.org_id,'COMPLETE_QUALITY','QUALITY_REPORT',q.report_id,?::jsonb FROM ds_quality_report q JOIN mm_dataset d ON d.dataset_id=q.dataset_id WHERE q.report_id=?",encode(map("status",state,"blockingCount",blocking,"score",score)),id);
+        qualityJobs.markFinished(id,token);
         return map("reportId",id,"status",state,"blockingCount",blocking,"score",score);
     }
     @Transactional
     public void fail(UUID id,UUID token){
+        jdbc.execute("SELECT policy_version FROM ds_auth_initialization WHERE singleton FOR UPDATE");
         lease(id,token);int attempt=jdbc.queryForObject("SELECT attempt_count FROM ds_quality_job WHERE report_id=?",Integer.class,id);
         if(attempt>=3){
             jdbc.update("UPDATE ds_quality_report SET status='FAILED',blocking_count=1,completed_at=now(),coverage=?::jsonb WHERE report_id=?",encode(map("worker","执行失败，未测量结果不计通过")),id);
             jdbc.update("UPDATE ds_quality_job SET status='FAILED',last_error='质量工作器执行失败，三次尝试已用尽',lease_until=null,updated_at=now() WHERE report_id=?",id);
         }else jdbc.update("UPDATE ds_quality_job SET status='QUEUED',last_error='质量工作器执行失败，等待重试',lease_until=null,next_attempt_at=now()+interval '30 seconds',updated_at=now() WHERE report_id=?",id);
+        qualityJobs.markFinished(id,token);
     }
 }

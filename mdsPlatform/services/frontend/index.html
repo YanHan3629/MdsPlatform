@@ -4,8 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>产业链数据空间平台</title>
-  <link rel="stylesheet" href="./styles.css" />
+  <link rel="stylesheet" href="./styles.css?v=f04-r59" />
   <link rel="stylesheet" href="./qa.css" />
+  <link rel="stylesheet" href="./controlled-views.css?v=f04-r76" />
 </head>
 <body>
   <div class="shell">
@@ -24,6 +25,8 @@
         <a href="#retrieval">多模态检索</a>
         <a href="#qa">多模态问答</a>
         <a href="#contracts">合约与推送</a>
+        <a href="#identity" id="identityAccountNav">账号与权限</a>
+        <a href="#identityManagement" id="identityManageNav" hidden>账号与类型管理</a>
       </nav>
       <section class="business-panel">
         <div class="business-title">业务链路</div>
@@ -101,10 +104,11 @@
       </section>
 
       <section id="provider" class="page">
+        <div class="card-head"><div><p class="eyebrow">Controlled sharing</p><h2>向企业分享受控范围</h2></div><button class="btn" id="controlledViewsOpenProvider" type="button" hidden>生成预览与管理分享</button></div>
         <div class="grid two">
           <section class="card form-card">
             <div class="card-head"><div><p class="eyebrow">Step 1</p><h2>当前组织与平台空间</h2></div></div>
-            <form id="spaceForm" class="form-grid">
+            <form method="post" onsubmit="return false" id="spaceForm" class="form-grid">
               <label>平台空间名称<input name="orgName" required placeholder="在当前账号组织内创建空间" /></label>
               <label class="full">说明<textarea name="description" placeholder="空间用途；创建空间不代表企业认证"></textarea></label>
               <button class="btn primary" type="submit">创建平台空间</button>
@@ -114,13 +118,13 @@
 
           <section class="card form-card">
             <div class="card-head"><div><p class="eyebrow">Step 2</p><h2>数据源接入与文件上传</h2></div></div>
-            <form id="sourceForm" class="form-grid">
+            <form method="post" onsubmit="return false" id="sourceForm" class="form-grid">
               <label>已有数据集<select name="datasetId" id="sourceDatasetSelect" required></select></label>
               <label>接入方式<select name="sourceType"><option value="EXISTING_DATASET">关联已有真实数据，不重新上传</option><option disabled>OBJECT_STORAGE · 连接器未配置</option><option disabled>API_STREAM · 连接器未配置</option><option disabled>DATABASE · 连接器未配置</option></select></label>
               <p class="full">所有权取自登录账号及真实数据集。格式、内容类型和数量由快照及解析结果确定。</p>
               <button class="btn primary" type="submit">关联已有数据集</button>
             </form>
-            <form id="uploadForm" class="upload-box">
+            <form method="post" onsubmit="return false" id="uploadForm" class="upload-box">
               <select name="sourceId" id="uploadSourceSelect"></select>
               <button class="btn" type="submit">打开真实文件 / 目录上传与版本发布</button>
             </form>
@@ -130,7 +134,7 @@
         <div class="grid three">
           <section class="card form-card">
             <p class="eyebrow">Step 3</p><h2>创建资源目录</h2>
-            <form id="catalogForm" class="stack-form">
+            <form method="post" onsubmit="return false" id="catalogForm" class="stack-form">
               <select name="sourceId" id="catalogSourceSelect" required></select>
               <input name="catalogName" required placeholder="真实数据资源目录名称" />
               <label>业务域<select name="businessCode" id="sourceBusinessSelect"></select></label>
@@ -141,7 +145,7 @@
           </section>
           <section class="card form-card">
             <p class="eyebrow">Step 4</p><h2>真实数据质量检查</h2>
-            <form id="governForm" class="stack-form">
+            <form method="post" onsubmit="return false" id="governForm" class="stack-form">
               <select name="sourceId" id="governSourceSelect" required></select>
               <p>检查已发布版本的清单、文件及解析质量；报告列出覆盖率和问题，不改写原始文件，不接受手填数量或质量分。</p>
               <label>补充质量规则（可选 JSON）<textarea name="rules" rows="3" placeholder='{"files":{"/example.csv":{"primaryKey":["id"],"fields":{"id":{"type":"string","nullable":false}}}}}'></textarea></label>
@@ -152,16 +156,16 @@
           </section>
           <section class="card form-card">
             <p class="eyebrow">Step 5-6</p><h2>索引构建与产品发布</h2>
-            <form id="indexForm" class="stack-form mini-gap">
+            <form method="post" onsubmit="return false" id="indexForm" class="stack-form mini-gap">
               <select name="datasetId" id="indexDatasetSelect" required></select>
               <p>创建或复用真实后台任务，READY来自构建、校验及预热结果。</p>
               <button class="btn" type="submit">创建 / 查看索引任务</button>
             </form>
-            <form id="publishForm" class="stack-form mini-gap">
+            <form method="post" onsubmit="return false" id="publishForm" class="stack-form mini-gap">
               <select name="datasetId" id="publishDatasetSelect" required></select>
               <select name="productId" id="publishProductSelect"><option value="">创建新产品</option></select>
               <input name="productName" required placeholder="数据产品名称" />
-              <textarea name="description" placeholder="产品内容与范围说明（留空沿用目录）"></textarea>
+              <textarea name="description" placeholder="产品摘要（公开时填写可展示内容；仅本组织可沿用目录）"></textarea>
               <input name="allowedUse" required placeholder="允许用途；仅授权完整冻结版本读取" />
               <select name="visibility"><option value="INTERNAL">仅本组织可发现</option><option value="PUBLIC">允许其他已登录组织发现摘要并申请</option></select>
               <button class="btn primary" type="submit">发布数据产品</button>
@@ -187,7 +191,7 @@
         </section>
         <section class="card form-card">
           <div class="card-head"><div><p class="eyebrow">Intent</p><h2>消费意向</h2></div></div>
-          <form id="intentForm" class="form-grid">
+          <form method="post" onsubmit="return false" id="intentForm" class="form-grid">
             <label>数据产品及冻结版本<select name="productVersionId" id="intentProductSelect" required></select></label>
             <p>消费主体由当前登录账号确定，不能填写其他企业名称代为申请。</p>
             <label>期望交付时间（北京时间 +08:00）<input name="expectedSendTime" id="expectedSendTime" type="datetime-local" required /></label>
@@ -202,17 +206,27 @@
         <div class="card">
           <div class="card-head"><div><p class="eyebrow">数据空间 · Qwen3.5</p><h2>数据空间账号与版本管理</h2></div><span id="qaHealth" class="badge muted">检查模型状态</span></div>
           <p>多模态检索与问答共享账号、组织和数据版本。检索条件与问答资料分别保存。</p>
-          <form id="qaLogin" class="filters">
+          <form method="post" onsubmit="return false" id="qaLogin" class="filters">
             <input name="userName" aria-label="数据空间账号" placeholder="数据空间账号" autocomplete="username" required />
             <input name="password" aria-label="密码" type="password" placeholder="密码" autocomplete="current-password" required />
             <button class="btn" type="submit">登录数据空间</button>
           </form>
-          <div class="filters mini-gap"><span id="qaAccount">尚未登录</span><button id="qaLogout" class="btn link" type="button" hidden>退出登录</button><button id="qaRefresh" class="btn link" type="button">刷新数据集与模型状态</button></div>
+          <div class="filters mini-gap"><span id="qaAccount">尚未登录</span><button id="qaLogout" class="btn link" type="button" hidden>退出所有会话</button><button id="qaRefresh" class="btn link" type="button">刷新数据集与模型状态</button></div>
         </div>
+        <details id="controlledViewExports" class="card mini-gap" hidden>
+          <summary>授权视图导出</summary>
+          <p>导出当前获准的独立视图，保留其行列和文件范围，并附范围与文件校验清单。</p>
+          <form method="post" onsubmit="return false" id="viewExportForm" class="view-export-controls">
+            <label>选择授权视图<select id="viewExportSelect" required><option value="">选择当前获准的视图</option></select></label>
+            <button id="viewExportDownload" class="btn primary" type="submit">下载授权视图</button>
+            <button id="viewExportRefresh" class="btn" type="button">刷新可导出范围</button>
+          </form>
+          <p id="viewExportNotice" role="status"></p>
+        </details>
         <details class="card mini-gap"><summary>上传、发布与索引任务</summary>
           <div class="card-head"><div><p class="eyebrow">真实数据版本</p><h2>上传与自动索引</h2></div></div>
-          <p>工作台、检索和问答共用此真实上传入口。选择已有空间、数据集和草稿版本，或填写新名称创建。README及数据集说明文件会排除；上传完成并发布版本后，后台自动解析、构建及预热索引。已发布版本保持不可变。</p>
-          <form id="qaIngestForm" class="form-grid">
+          <p>工作台、检索和问答共用此上传入口。可选择已有数据集。创建新数据集时，先填写名称并点击“创建数据集”，权限核对完成后再选择文件和草稿版本。README 和数据集说明文件会排除。已发布版本保持不可变。</p>
+          <form method="post" onsubmit="return false" id="qaIngestForm" class="form-grid">
             <label>空间<select id="qaIngestSpace"><option value="">登录后加载</option></select></label>
             <label>新建空间名称<input id="qaNewSpace" maxlength="128" placeholder="留空则使用所选空间" /></label>
             <label>数据集<select id="qaIngestDataset"><option value="">先选择空间</option></select></label>
@@ -238,7 +252,7 @@
           <div class="card">
             <div class="card-head"><div><p class="eyebrow">真实快照 · 条件检索</p><h2>多模态检索</h2></div></div>
             <p>按真实数据能力设置条件，返回原始命中或确定性计算结果。</p>
-            <form id="retrievalForm" class="form-grid">
+            <form method="post" onsubmit="return false" id="retrievalForm" class="form-grid">
               <label class="full">检索数据集与版本<select id="retrievalDataset"></select></label>
               <p id="retrievalCapabilityStatus" class="full" role="status">登录后加载快照能力。</p>
               <label>数据类型<select id="retrievalType"></select></label>
@@ -250,7 +264,7 @@
               <fieldset id="retrievalConditions" class="full professional-options"><legend>硬条件（不同条件同时满足）</legend><div id="retrievalConditionRows" class="full"></div><button id="retrievalAddCondition" type="button" class="btn">添加条件</button></fieldset>
               <label>最多显示结果<input id="retrievalTopK" type="number" min="1" max="50" value="8" /></label>
               <p class="full">多选值用集合条件（OR）；多条条件为 AND。统计计算覆盖完整过滤范围，不受显示条数限制。null、空字符串与未记录字段分别保留；筛选空字符串时选择“等于”并填写 ""。</p>
-              <button id="retrievalSubmit" class="btn primary" type="submit">执行检索</button>
+              <button id="retrievalSubmit" class="btn primary" type="submit" disabled>执行检索</button>
             </form>
           </div>
           <div class="card" aria-live="polite"><h2>检索结果与来源</h2><p id="retrievalProgress">等待检索</p><p id="retrievalApplied"></p><div id="retrievalResults" class="compact-list"></div></div>
@@ -260,7 +274,7 @@
         <div class="grid two mini-gap">
           <div class="card form-card">
             <h2>多模态问答</h2><p>直接提问，可补充文字或图片；系统按相关性选择依据。需要特定来源时，可在问题中说明“只依据 PDF”或“优先表格”。</p>
-            <form id="qaForm" class="form-grid">
+            <form method="post" onsubmit="return false" id="qaForm" class="form-grid">
               <label class="full">检索数据集<select id="qaDataset"><option value="">不使用数据空间检索</option></select></label>
               <p id="qaDatasetInfo" class="full">登录后加载当前组织真实的 READY 索引；演示目录不作为检索依据。</p>
 
@@ -285,13 +299,21 @@
 
       <section id="contracts" class="page">
         <section class="card"><div class="card-head"><div><p class="eyebrow">Applications</p><h2>消费申请与供给审核</h2></div></div><div id="applications" class="compact-list"></div></section>
-        <section class="card form-card"><h2>当前消费组织的受控接收端</h2><form id="receiverForm" class="filters"><input name="endpointName" required maxlength="128" placeholder="本地接收端名称" /><button class="btn" type="submit">配置本地真实接收端</button></form><p>使用独立本地服务身份及回执签名。外部 S3 / HTTP 接收器未配置，不接受任意输入地址。</p><div id="receiverConfigurations"></div></section>
+        <section class="card form-card"><h2>当前消费组织的受控接收端</h2><form method="post" onsubmit="return false" id="receiverForm" class="filters"><input name="endpointName" required maxlength="128" placeholder="本地接收端名称" /><button class="btn" type="submit">配置本地真实接收端</button></form><p>使用独立本地服务身份及回执签名。外部 S3 / HTTP 接收器未配置，不接受任意输入地址。</p><div id="receiverConfigurations"></div></section>
         <div class="grid two">
           <section class="card form-card">
             <div class="card-head"><div><p class="eyebrow">Contract</p><h2>提交技术授权条款</h2></div></div>
-            <form id="contractForm" class="form-grid">
+            <form method="post" onsubmit="return false" id="contractForm" class="form-grid">
               <input type="hidden" name="contractId" /><input type="hidden" name="revision" />
               <label>消费意向<select name="intentId" id="contractIntentSelect" required></select></label>
+              <p class="full" id="contractScope"></p>
+              <fieldset class="full" id="contractControlled" hidden disabled>
+                <legend>受控视图条款</legend>
+                <p id="contractViewWindow"></p>
+                <p>允许的动作</p><div id="contractActions" class="form-grid"></div>
+                <p>允许的用途</p><div id="contractPurposes" class="form-grid"></div>
+                <label>交付服务主体<select name="deliveryServiceSubjectId" id="contractDeliverySubject" disabled></select></label>
+              </fieldset>
               <label>发送时间（北京时间 +08:00）<input name="sendTime" id="sendTime" type="datetime-local" required /></label>
               <label>授权开始（北京时间 +08:00）<input name="validFrom" id="contractValidFrom" type="datetime-local" required /></label>
               <label>授权结束（北京时间 +08:00）<input name="validTo" id="contractValidTo" type="datetime-local" required /></label>
@@ -300,7 +322,7 @@
               <label class="full">约定用途<textarea name="purpose" placeholder="留空沿用消费申请用途"></textarea></label>
               <button class="btn primary" type="submit">提交并确认供给条款，等待消费方确认</button><button class="btn" type="button" id="contractNew">返回新建条款</button>
             </form>
-            <p>仅完整冻结版本的本地技术授权；不替代对外法律签约。双方确认且进入有效期后开放读取，后台另按发送计划交付。已实际下载到用户设备的文件无法远程收回。</p>
+            <p>条款绑定冻结版本或登记的受控视图。受控视图的消费方须在合约生效后另行取得按当前修订审阅的授权。只有约定交付的修订才生成受控交付计划。</p>
           </section>
           <section class="card">
             <div class="card-head"><div><p class="eyebrow">Delivery</p><h2>推送结果</h2></div><span class="badge">根据合约自动执行</span></div>
@@ -318,12 +340,294 @@
         </section>
         <section class="card"><h2>交付证据与条款记录</h2><pre id="deliveryDetails" style="white-space:pre-wrap;overflow-wrap:anywhere">选择任务查看清单、回执及尝试记录。</pre></section>
       </section>
+
+      <section id="identity" class="page">
+        <section class="card">
+          <div class="card-head"><div><p class="eyebrow">Account</p><h2>当前账号与企业</h2></div><button id="identityReload" class="btn" type="button">刷新身份</button></div>
+          <p id="identitySignedOut">请在上方登录后查看当前企业、账号类型和有效权限。</p>
+          <div id="identitySummary" hidden></div>
+          <div class="identity-actions"><button id="controlledViewsOpen" class="btn" type="button" hidden>企业受控视图</button><button id="resourceGrantsOpen" class="btn" type="button" hidden>资源授权与分享</button><button id="enterpriseMappingOpen" class="btn" type="button" hidden>企业与身份映射</button></div>
+          <div id="identityEffectiveOperations" class="identity-operations"></div>
+        </section>
+        <div id="identitySelfForms" class="grid two" hidden>
+          <section class="card form-card"><h2>修改自己的密码</h2>
+            <form method="post" onsubmit="return false" id="identityPasswordForm" class="form-grid">
+              <label class="full">当前密码<input name="oldPassword" type="password" autocomplete="current-password" required /></label>
+              <label class="full">新密码<input name="newPassword" type="password" minlength="8" autocomplete="new-password" required /></label>
+              <label class="full">再次输入新密码<input name="confirmPassword" type="password" minlength="8" autocomplete="new-password" required /></label>
+              <p class="full">至少 8 位，包含大写字母、小写字母、数字、符号中的任意两类。仅支持字母、数字及 -_@*#$%&。</p>
+              <button class="btn primary" type="submit">修改密码并退出所有会话</button>
+            </form>
+          </section>
+          <section class="card form-card"><h2>退出与主动注销</h2>
+            <p>退出会撤销当前账号在所有设备和标签页中的登录会话。注销后账号不能再登录，原有业务数据、合约和审计记录保留。</p>
+            <button id="identityLogout" class="btn" type="button">退出所有会话</button>
+            <form method="post" onsubmit="return false" id="identityCloseForm" class="form-grid">
+              <label class="full">确认注销请输入当前用户名<input name="confirmation" autocomplete="off" required /></label>
+              <button class="btn" type="submit">主动注销账号</button>
+            </form>
+          </section>
+        </div>
+      </section>
+      <section id="identityManagement" class="page">
+        <section class="card">
+          <div class="card-head"><div><p class="eyebrow">Identity management</p><h2 id="identityManagerHeading">账号与类型管理</h2></div><button id="identityManagementReload" class="btn" type="button">刷新管理列表</button></div>
+          <p id="identityManagementNotice">仅向平台管理员或企业成员管理者开放。</p>
+          <button id="identityBulkLogout" class="btn" type="button" hidden>强退所有非平台管理员</button>
+          <button id="controlledViewsOpenManagement" class="btn" type="button" hidden>企业受控视图</button>
+          <button id="resourceGrantsOpenManagement" class="btn" type="button" hidden>资源授权与分享</button>
+          <button id="enterpriseMappingOpenManagement" class="btn" type="button" hidden>企业与身份映射</button>
+        </section>
+        <section class="card" id="identityAuditPanel" hidden>
+          <h2>权限变更审计</h2>
+          <form id="identityAuditForm" method="post" onsubmit="return false" class="filters">
+            <label>目标 ID（可选）<input name="targetId" maxlength="160" autocomplete="off" /></label>
+            <button class="btn" type="submit">查询审计</button>
+            <button class="btn" id="identityAuditNext" type="button" disabled>下一页</button>
+          </form>
+          <p id="identityAuditStatus" aria-live="polite"></p>
+          <div id="identityAuditRows" class="compact-list"></div>
+        </section>
+        <div id="identityManagementContent" hidden>
+          <div class="grid two">
+            <section class="card form-card">
+              <div class="card-head"><h2>业务账号</h2><button id="identityNewUser" class="btn" type="button">新建账号</button></div>
+              <label>选择现有账号<select id="identityUserSelect"></select></label>
+              <p id="identityUserState"></p>
+              <form method="post" onsubmit="return false" id="identityUserForm" class="form-grid">
+                <label>用户名<input name="username" maxlength="64" required autocomplete="off" /></label>
+                <label>所属企业组织<select name="orgId" id="identityUserOrg" required></select></label>
+                <label id="identityTemporaryPassword" class="full">初始临时密码<input name="temporaryPassword" type="password" minlength="8" autocomplete="new-password" /></label>
+                <label class="full">业务主配置<select name="primaryTypeId" id="identityPrimaryType"></select></label>
+                <label class="full">附加业务岗位<select name="additionalTypes" id="identityAdditionalTypes" multiple size="5"></select></label>
+                <p class="full">初次登录及重置密码后需设置新密码。只读主配置不能与写入或导出岗位并用。</p>
+                <button class="btn primary" type="submit">保存账号与业务配置</button>
+              </form>
+              <div class="filters"><button id="identityToggleState" class="btn" type="button">停用账号</button><button id="identityForceLogout" class="btn" type="button">强制退出</button></div>
+              <form method="post" onsubmit="return false" id="identityResetForm" class="form-grid">
+                <label class="full">新的临时密码<input name="temporaryPassword" type="password" minlength="8" autocomplete="new-password" required /></label>
+                <button class="btn" type="submit">重置密码并撤销旧会话</button>
+              </form>
+              <form method="post" onsubmit="return false" id="identityDeleteForm" class="form-grid">
+                <label class="full">注销现有账号请输入其用户名<input name="confirmation" autocomplete="off" required /></label>
+                <button class="btn" type="submit">注销账号并保留业务记录</button>
+              </form>
+            </section>
+            <section class="card form-card" id="identityQualificationsPanel">
+              <h2>独立管理资格</h2><p>平台管理和企业成员管理独立于业务类型。管理资格不会自动开放企业数据。</p>
+              <form method="post" onsubmit="return false" id="identityPlatformForm" class="form-grid">
+                <label class="full">平台管理员资格<select name="active"><option value="true">授予平台管理员</option><option value="false">移除平台管理员</option></select></label>
+                <p class="full">接任者须先完成激活及真实登录。服务端会保护最后一名可登录的平台管理员。</p>
+                <button class="btn" type="submit">更新平台管理员资格</button>
+              </form>
+              <form method="post" onsubmit="return false" id="identityMemberManagerForm" class="form-grid">
+                <label class="full">企业成员管理资格<select name="active"><option value="true">授予本企业成员管理</option><option value="false">移除企业成员管理</option></select></label>
+                <label class="full">允许其分配的业务类型<select name="delegatedTypes" id="identityDelegatedTypes" multiple size="6"></select></label>
+                <button class="btn" type="submit">更新成员管理范围</button>
+              </form>
+            </section>
+          </div>
+          <section class="card form-card" id="identityTypesPanel">
+            <div class="card-head"><h2>业务类型与操作配置</h2><button id="identityNewType" class="btn" type="button">新建业务类型</button></div>
+            <label>选择业务类型<select id="identityTypeSelect"></select></label><p id="identityTypeMembers"></p>
+            <form method="post" onsubmit="return false" id="identityTypeForm" class="form-grid">
+              <label>稳定代码<input name="code" pattern="[A-Z][A-Z0-9_]{2,63}" maxlength="64" required placeholder="例如 SUPPLY_REVIEW" /></label>
+              <label>显示名称<input name="name" maxlength="64" required /></label>
+              <label>配置归属组织<select name="orgId" id="identityTypeOrg" required></select></label>
+              <label>适用级别<select name="scope"><option value="GLOBAL">全局业务类型</option><option value="ENTERPRISE">仅归属企业</option></select></label>
+              <label>状态<select name="state"><option value="ACTIVE">启用</option><option value="DISABLED">停用</option></select></label>
+              <label>完整只读配置<select name="readOnly"><option value="false">按所选业务操作</option><option value="true">只读；禁止写入、下载和导出</option></select></label>
+              <label>产业链标签<select name="industryTags" multiple size="6"><option value="MANUFACTURER">制造</option><option value="SUPPLIER">供应</option><option value="WAREHOUSE">仓储</option><option value="CARRIER">承运</option><option value="CUSTOMER">客户／渠道</option><option value="SERVICE">安装／售后</option></select></label>
+              <label>限定适用组织（留空为不额外限定）<select name="applicableOrgIds" id="identityApplicableOrgs" multiple size="6"></select></label>
+              <label class="full">说明<textarea name="description"></textarea></label>
+              <fieldset class="full identity-operation-picker"><legend>已实现的业务操作</legend><div id="identityOperationPicker"></div></fieldset>
+              <button class="btn primary" type="submit">保存业务类型</button>
+            </form>
+            <form method="post" onsubmit="return false" id="identityDeleteTypeForm" class="form-grid">
+              <label>原子迁移成员的替代类型<select name="replacementTypeId" id="identityReplacementType"></select></label>
+              <label>删除确认：输入当前类型代码<input name="confirmation" autocomplete="off" required /></label>
+              <button class="btn" type="submit">迁移成员并删除类型</button>
+            </form>
+          </section>
+        </div>
+      </section>
+
     </main>
   </div>
 
+
+  <dialog id="identityActivationDialog" class="identity-dialog">
+    <form method="post" onsubmit="return false" id="identityActivationForm" class="form-grid">
+      <h2 class="full">激活账号并设置新密码</h2>
+      <p class="full" id="identityActivationUser"></p>
+      <label class="full">新密码<input name="newPassword" type="password" minlength="8" autocomplete="new-password" required /></label>
+      <label class="full">再次输入新密码<input name="confirmPassword" type="password" minlength="8" autocomplete="new-password" required /></label>
+      <p class="full">至少 8 位且包含任意两类字符。可用符号：-_@*#$%&。完成后请用新密码重新登录。</p>
+      <button class="btn primary" type="submit">设置新密码并激活</button><button id="identityCancelActivation" class="btn" type="button">取消激活</button>
+    </form>
+  </dialog>
+
+
+  <dialog id="enterpriseMappingDialog" class="enterprise-mapping-dialog">
+    <div class="card-head"><div><p class="eyebrow">Enterprise identity</p><h2>企业与身份映射</h2></div><button id="enterpriseMappingClose" class="btn" type="button">关闭</button></div>
+    <p>业务实体与登录组织分别管理。确认映射不会转移数据、合同或授权，也不代表法人认证。</p>
+    <p id="enterpriseMappingStatus" role="status"></p>
+    <div class="grid two">
+      <section class="card form-card"><h3>校验并导入企业名录</h3>
+        <p>只接受已发布版本中的 organizations.csv；企业记录与节点记录会分别校验。导入还需要来源原件读取授权。</p>
+        <form id="enterpriseCatalogImportForm" class="form-grid">
+          <label class="full">来源数据集与版本<select id="enterpriseCatalogSource" required></select></label>
+          <label class="full">名录文件路径<input name="path" value="/corpus/structured/organizations.csv" required /></label>
+          <button id="enterpriseCatalogImport" class="btn primary" type="submit">校验并导入名录</button>
+        </form>
+        <p id="enterpriseCatalogImportResult"></p>
+        <h3>新建企业组织</h3>
+        <form id="enterpriseOrganizationForm" class="form-grid">
+          <label class="full">组织名称<input name="orgName" maxlength="128" required autocomplete="off" /></label>
+          <label class="full">使用类型<select name="licenseType"><option value="TRIAL">试用</option><option value="FORMAL">正式</option></select></label>
+          <button class="btn" type="submit">新建组织</button>
+        </form>
+      </section>
+      <section class="card form-card"><h3>配置业务实体</h3>
+        <form id="enterpriseMappingForm" class="form-grid">
+          <label class="full">登录组织<select id="enterpriseMappingOrg" required></select></label>
+          <p id="enterpriseMappingCurrent" class="full"></p>
+          <label class="full">经过校验的名录<select id="enterpriseMappingCatalog" required></select></label>
+          <label class="full">业务实体<select id="enterpriseMappingEntity" required></select></label>
+          <label class="full">映射用途<select id="enterpriseMappingKind"><option value="BUSINESS">业务组织映射</option><option value="TEST">受控测试映射</option></select></label>
+          <label class="full">确认依据与用途<textarea name="reason" minlength="6" maxlength="500" required></textarea></label>
+          <div class="identity-actions full"><button class="btn primary" type="submit">预览映射变更</button><button id="enterpriseMappingDisable" class="btn" type="button">预览停用映射</button></div>
+        </form>
+      </section>
+    </div>
+    <section id="enterpriseMappingReview" class="card" hidden>
+      <h3>核对后确认</h3>
+      <div id="enterpriseMappingReviewContent" class="enterprise-mapping-review"></div>
+      <p>确认后，受影响成员的旧会话失效，需要重新登录。行业限定类型可能需要重新分配；已撤销的授权不会自动恢复。</p>
+      <form id="enterpriseMappingConfirmForm" class="form-grid">
+        <label class="full">确认请输入目标组织名称<input name="organizationConfirmation" required autocomplete="off" /></label>
+        <label class="full"><span><input name="reviewed" type="checkbox" required /> 我已核对业务实体、来源版本和影响范围</span></label>
+        <button class="btn primary" type="submit">确认应用变更</button>
+      </form>
+    </section>
+  </dialog>
+
+
+  <dialog id="resourceGrantDialog" class="resource-grants-dialog">
+    <div class="card-head"><div><p class="eyebrow">Resource authorization</p><h2>资源授权与分享</h2></div><button id="resourceGrantClose" class="btn" type="button">关闭</button></div>
+    <p>账号业务操作与具体资源授权分别校验。管理资格不会自动开放内容；每次使用还须满足当前版本、用途、有效期及合同约束。</p>
+    <p id="resourceGrantStatus" role="status"></p>
+    <div class="grid two">
+      <section class="card form-card"><h3>配置明确授权</h3>
+        <form id="resourceGrantForm" class="form-grid">
+          <fieldset class="full"><legend>授权用途（可多选）</legend><div id="resourceGrantPurposes" class="resource-grant-operations">
+            <label><input name="purposeCodes" type="checkbox" value="GENERAL_READ" checked /><span>常规使用</span></label>
+            <label><input name="purposeCodes" type="checkbox" value="VIEW_BUILD" /><span>索引／视图构建</span></label>
+            <label><input name="purposeCodes" type="checkbox" value="CONTROLLED_DELIVERY" /><span>合同交付</span></label>
+          </div><p>每一种所选用途均覆盖下方全部业务动作，并由同一条完整授权承载。仅选择本次需要的用途；合同交付还须满足合同条款。</p></fieldset>
+          <label class="full">数据范围<select id="resourceGrantResource" required></select></label>
+          <div class="full filters"><button id="resourceGrantResourcePrevious" class="btn" type="button" disabled>上一页范围</button><span id="resourceGrantResourcePage"></span><button id="resourceGrantResourceNext" class="btn" type="button" disabled>下一页范围</button></div>
+          <p id="resourceGrantScopeNotice" class="full"></p>
+          <label class="full">接收组织<select id="resourceGrantOrg" required></select></label>
+          <label class="full">接收主体<select name="subjectKind"><option value="USER">明确成员</option><option value="ORG">该组织全部成员（含后续有效成员）</option></select></label>
+          <label id="resourceGrantMemberLabel" class="full">有效成员<select id="resourceGrantMember" required></select></label>
+          <label id="resourceGrantMemberIdLabel" class="full" hidden>接收成员 ID<input id="resourceGrantMemberId" maxlength="36" pattern="[0-9a-fA-F-]{36}" autocomplete="off" /><small>跨企业成员 ID 需由对方明确提供；此处不公开对方成员目录。</small></label>
+          <fieldset class="full"><legend>逐项选择业务动作</legend><div id="resourceGrantOperations" class="resource-grant-operations"></div></fieldset>
+          <label>开始时间（本机时区；留空立即）<input name="validFrom" type="datetime-local" /></label>
+          <label>结束时间（跨企业必填）<input name="validTo" type="datetime-local" /></label>
+          <label class="full">合同 ID（需要时填写）<input name="contractId" maxlength="36" pattern="[0-9a-fA-F-]{36}" autocomplete="off" /></label>
+          <label>合同当前修订<input name="contractRevision" type="number" min="1" step="1" value="1" /></label>
+          <p class="full">跨企业完整版本授权及交付动作需绑定相应已确认合同。受控视图固定到独立版本与索引；原始综合数据不随之开放。</p>
+          <label class="full">授权依据／撤销原因<textarea name="reason" minlength="6" maxlength="500" required></textarea></label>
+          <button class="btn primary" type="submit">预览创建授权</button>
+        </form>
+      </section>
+      <section class="card"><h3>所选数据集的授权记录</h3>
+        <p>撤销只作用于所选记录。其他授权或合同可能仍允许访问；不会删除账号、原始数据或历史记录。</p>
+        <div id="resourceGrantRows" class="compact-list"></div>
+        <div class="filters"><button id="resourceGrantListPrevious" class="btn" type="button" disabled>上一页授权</button><span id="resourceGrantListPage"></span><button id="resourceGrantListNext" class="btn" type="button" disabled>下一页授权</button></div>
+      </section>
+    </div>
+    <section id="resourceGrantReview" class="card" hidden>
+      <h3>核对后确认</h3>
+      <div id="resourceGrantReviewContent" class="enterprise-mapping-review"></div>
+      <p>确认的是当前预览内容。目标、版本、范围或权限发生变化时需重新预览；授权不会自动增加账号业务操作。</p>
+      <form id="resourceGrantConfirmForm" class="form-grid">
+        <label class="full"><span id="resourceGrantConfirmationLabel"></span><input name="confirmation" required autocomplete="off" /></label>
+        <label class="full"><span><input name="reviewed" type="checkbox" required /> 我已核对主体、资源、动作、用途、有效期及影响</span></label>
+        <button class="btn primary" type="submit">确认本次授权变更</button>
+      </form>
+    </section>
+  </dialog>
+
+
+  <dialog id="controlledViewDialog" class="resource-grants-dialog controlled-view-dialog">
+    <div class="card-head"><div><p class="eyebrow">Enterprise collaboration</p><h2>企业受控视图</h2></div><button id="cvClose" class="btn" type="button">关闭</button></div>
+    <p>先选择明确的文件与行列范围，生成并核对私有预览，再决定接收企业可执行的动作和有效期。原始综合数据保持不变。</p>
+    <p id="cvStatus" role="status" aria-live="polite"></p>
+    <ol class="cv-steps"><li>选择范围</li><li>生成私有预览</li><li>核对并批准</li><li>索引、授权与撤销</li></ol>
+    <div class="identity-actions"><button id="cvRefresh" class="btn" type="button">刷新当前记录</button><button id="cvNewDraft" class="btn" type="button">配置新的范围</button></div>
+    <section id="cvBuilder" class="card">
+      <h3>1. 选择冻结来源与接收企业</h3><p id="cvBuilderNotice"></p>
+      <form id="cvSourceSearch" class="filters"><input id="cvSourceKeyword" maxlength="100" placeholder="按数据集或版本名称筛选" aria-label="筛选来源" /><button class="btn" type="submit">查找来源</button></form>
+      <div class="form-grid"><label class="full">已获分享授权的冻结来源<select id="cvSource"></select></label></div>
+      <div class="filters"><button id="cvSourcePrevious" class="btn" type="button">上一页来源</button><span id="cvSourcePage"></span><button id="cvSourceNext" class="btn" type="button">下一页来源</button></div>
+      <form id="cvRulesForm" class="form-grid">
+        <label class="full">接收企业<select id="cvTarget" required></select></label>
+        <p class="full">企业映射本身不授予数据。切换接收企业后需要重新核对范围。</p>
+        <label class="full">范围方式<select id="cvScopeMode"><option value="MANUAL">逐文件选择行列</option><option value="ENTERPRISE_RESPONSIBILITY">按接收企业的业务责任范围生成</option></select></label>
+        <p id="cvScopeHelp" class="full"></p>
+        <div class="full"><h3 id="cvFilesTitle">2. 逐项限定业务文件</h3><p id="cvFileHelp">结构化资料请列明保留字段、主键及记录；全部记录需要单独确认。完整文件包含其全部内容和元信息。</p><div id="cvFileChoices" class="cv-file-choices"></div>
+          <div class="filters"><button id="cvFilePrevious" class="btn" type="button">上一页文件</button><span id="cvFilePage"></span><button id="cvFileNext" class="btn" type="button">下一页文件</button></div>
+        </div>
+        <div id="cvRules" class="full cv-rules"></div>
+        <label class="full">本次范围与分享依据<textarea name="reason" minlength="6" maxlength="500" required placeholder="说明这些记录、字段或完整文件可提供给所选企业的依据"></textarea></label>
+        <button id="cvGenerate" class="btn primary" type="submit">冻结范围并生成私有预览</button>
+      </form>
+    </section>
+    <section class="card"><h3>当前会话的草稿与私有预览</h3><p>展示最近 25 条当前可用草稿和最近 50 条当前登录会话的私有预览。私有预览尚不开放给接收企业。</p><div id="cvDraftRows" class="compact-list"></div><div id="cvAttemptRows" class="compact-list"></div></section>
+    <section id="cvPreviewPanel" class="card" hidden>
+      <h3>3. 核对实际私有预览</h3><p id="cvPreviewState"></p><div id="cvFrozenScope" class="enterprise-mapping-review"></div>
+      <div id="cvSelections" class="table-wrap"></div><p id="cvCopyNotice" class="cv-warning" hidden></p>
+      <div id="cvPreviewFiles" class="compact-list"></div><p id="cvReadStatus"></p><div id="cvFileDisplay"></div>
+      <form id="cvPublicationForm" class="form-grid">
+        <label class="full">视图名称<input name="name" maxlength="100" required /></label>
+        <fieldset class="full"><legend>接收企业可执行的动作</legend><div id="cvOperations" class="resource-grant-operations"></div></fieldset>
+        <label>开始时间（留空立即）<input name="validFrom" type="datetime-local" /></label><label>结束时间<input name="validTo" type="datetime-local" required /></label>
+        <details class="full"><summary>数据时间与实体分组</summary><div class="form-grid">
+          <label>数据时区<input name="timezone" maxlength="128" value="Asia/Shanghai" /></label><label>时间列（可留空）<input name="timeColumn" maxlength="128" /></label>
+          <label class="full">实体分组字段（每行一个，可留空）<textarea name="entityColumns"></textarea></label>
+        </div></details>
+        <label class="full">本次发布与授权依据<textarea name="reason" minlength="6" maxlength="500" required></textarea></label>
+        <label class="full cv-check"><input name="previewChecked" type="checkbox" required />我已核对实际预览、保留的行列、对象及完整文件副本范围</label>
+        <p id="cvPublishCapability" class="full"></p><button id="cvReview" class="btn primary" type="submit">核对本次发布与授权</button>
+      </form>
+    </section>
+    <section id="cvApprovalPanel" class="card" hidden><h3>确认本次发布</h3><div id="cvApprovalDetails" class="enterprise-mapping-review"></div>
+      <p>确认后才会复制独立冻结版本并建立索引；任务成功、预热和文件校验全部通过后才向接收企业发放所选授权。</p>
+      <form id="cvConfirmForm" class="form-grid">
+        <label class="full">请输入上方接收组织名称确认<input name="targetName" required autocomplete="off" /></label>
+        <label class="full cv-check"><input name="confirmed" type="checkbox" required />我确认当前范围、接收企业、动作、有效期及完整文件副本提示</label>
+        <button id="cvConfirm" class="btn primary" type="submit">批准发布并建立索引</button>
+      </form>
+    </section>
+    <section id="cvProgressPanel" class="card" hidden><h3>4. 发布与授权进度</h3><div id="cvProgress" class="enterprise-mapping-review"></div><p id="cvProgressNotice"></p>
+      <button id="cvStartIndex" class="btn" type="button" hidden>继续建立已批准的索引</button>
+      <form id="cvRevokeForm" class="form-grid" hidden><label class="full">撤销原因<textarea name="reason" minlength="6" maxlength="500" required></textarea></label>
+        <label class="full cv-check"><input name="confirmed" type="checkbox" required />撤销本视图的全部活跃授权；保留冻结文件、索引和历史记录</label><button class="btn" type="submit">撤销本视图授权</button></form>
+    </section>
+    <section class="card"><h3>最近可管理的发布记录</h3><p>展示最近 50 条当前获准管理的记录。策略有效与账号业务操作分别校验；拥有授权记录不表示所有成员都具备相应功能。</p><div id="cvPublicationRows" class="compact-list"></div></section>
+  </dialog>
+
   <div id="toast" class="toast"></div>
-  <script src="./app.js"></script>
-  <script src="./qa.js?v=20261024-txtscope1"></script>
-  <script src="./retrieval.js"></script>
+  <script src="./identity-session.js?v=f04-r378"></script>
+  <script src="./app.js?v=f04-r395"></script>
+  <script src="./qa.js?v=f04-r109"></script>
+  <script src="./retrieval.js?v=f04-r109"></script>
+  <script src="./view-exports.js?v=f04-r22"></script>
+  <script src="./identity.js?v=f04-r391"></script>
+  <script src="./enterprise-mapping.js?v=f04-r53"></script>
+  <script src="./resource-grants.js?v=f04-r59"></script>
+  <script src="./controlled-views.js?v=f04-r94"></script>
 </body>
 </html>

@@ -26,7 +26,6 @@ VERSION_ID = os.environ.get("VERSION_ID") or os.environ.get("versionId")
 INDEX_VERSION_ID = os.environ.get("INDEX_VERSION_ID") or os.environ.get("indexVersionId")
 BACKEND_BASE_URL = os.environ.get("BACKEND_BASE_URL", "")
 BACKEND_BEARER_TOKEN = os.environ.get("BACKEND_BEARER_TOKEN", "")
-MM_INTERNAL_TOKEN = os.environ.get("MM_INTERNAL_TOKEN", "")
 READY_PATH = os.environ.get("BACKEND_CALLBACK_READY") or os.environ.get("backendCallbackReady")
 FAILED_PATH = os.environ.get("BACKEND_CALLBACK_FAILED") or os.environ.get("backendCallbackFailed")
 OUTPUT_COMMIT_ID = os.environ.get("OUTPUT_COMMIT_ID")
@@ -222,8 +221,6 @@ def callback_ready(manifest: dict):
     headers = {"Content-Type": "application/json"}
     if BACKEND_BEARER_TOKEN:
         headers["Authorization"] = f"Bearer {BACKEND_BEARER_TOKEN}"
-    if MM_INTERNAL_TOKEN:
-        headers["X-MM-Internal-Token"] = MM_INTERNAL_TOKEN
     body = {
         "indexCommitId": OUTPUT_COMMIT_ID,
         "imageIndexPath": manifest["imageIndexPath"],
@@ -252,8 +249,6 @@ def callback_failed(message: str):
     headers = {"Content-Type": "application/json"}
     if BACKEND_BEARER_TOKEN:
         headers["Authorization"] = f"Bearer {BACKEND_BEARER_TOKEN}"
-    if MM_INTERNAL_TOKEN:
-        headers["X-MM-Internal-Token"] = MM_INTERNAL_TOKEN
     response = requests.post(url, headers=headers, json={"errorMessage": message}, timeout=60)
     response.raise_for_status()
 

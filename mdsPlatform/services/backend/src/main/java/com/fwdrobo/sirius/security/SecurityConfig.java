@@ -33,6 +33,8 @@ public class SecurityConfig {
             HttpSecurity http,
             JwtAuthFilter jwtAuthFilter,
             InternalTokenFilter internalTokenFilter,
+            AuthorizationService authorization,
+            com.fasterxml.jackson.databind.ObjectMapper objectMapper,
             RestAuthenticationEntryPoint restAuthenticationEntryPoint,
             RestAccessDeniedHandler restAccessDeniedHandler) throws Exception {
         return http
@@ -59,7 +61,7 @@ public class SecurityConfig {
                         .requestMatchers("/api/data-space/health").permitAll()
                         .requestMatchers("/api/data-space/**").authenticated()
                         // 鏀捐鐧诲綍鍜屽埛鏂版帴鍙?
-                        .requestMatchers(HttpMethod.POST, "/api/auth/login", "/api/auth/refresh").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/auth/login", "/api/auth/refresh", "/api/auth/activate").permitAll()
                         .requestMatchers("/api/mm/internal/**" ).permitAll()
 
                         // 鍏跺畠 API 鍏ㄩ儴闇€瑕佺櫥褰?
@@ -67,6 +69,7 @@ public class SecurityConfig {
                 )
                 .addFilterBefore(internalTokenFilter, UsernamePasswordAuthenticationFilter.class)
                 .addFilterAfter(jwtAuthFilter, InternalTokenFilter.class)
+                .addFilterAfter(new LiveAuthorizationOutputFilter(authorization,objectMapper),JwtAuthFilter.class)
                 .build();
     }
 

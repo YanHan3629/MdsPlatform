@@ -1,6 +1,9 @@
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 import faiss
 import pandas as pd
@@ -32,6 +35,25 @@ class ManifestLoader:
                 digest.update(block)
         if digest.hexdigest() != expected_sha256:
             raise ValueError(f"bundle checksum mismatch: {path.name}")
+
+    def _cache_registered_file(self, spec: tuple[Path, str | None, str | None]) -> None:
+        target, expected_sha256, url = spec
+        if target.is_file():
+            try:
+                self._verify_file(target, expected_sha256)
+                return
+            except ValueError:
+                pass
+        if not url:
+            raise ValueError(f"registered index file has no signed download URL: {target.name}")
+        with NamedTemporaryFile(dir=target.parent, prefix=".index-download-", delete=False) as stream:
+            temporary = Path(stream.name)
+        try:
+            self.backend.download_to(url, temporary)
+            self._verify_file(temporary, expected_sha256)
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     @staticmethod
     def _capability_registration(manifest: dict) -> tuple[dict, dict]:
@@ -109,6 +131,7 @@ class ManifestLoader:
             unified_metadata = pd.read_parquet(unified_meta_file)
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         professional_files = {}
+        transfers = {}
         signed = {item.get("path"): item.get("url") for item in bundle.get("indexFiles", [])}
         for registration in manifest.get("indexes", []):
             entries = registration.get("files", [])
@@ -120,19 +143,19 @@ class ManifestLoader:
                 if not logical_path or logical_path in professional_files:
                     continue
                 target = self._target_path(base_dir, logical_path)
-                if target.exists():
-                    try:
-                        self._verify_file(target, item.get("sha256"))
-                        professional_files[logical_path] = target
-                        continue
-                    except ValueError:
-                        target.unlink()
-                url = signed.get(logical_path)
-                if not url:
-                    raise ValueError(f"registered index file has no signed download URL: {logical_path}")
-                self.backend.download_to(url, target)
-                self._verify_file(target, item.get("sha256"))
+                checksum = item.get("sha256")
+                existing = transfers.get(target)
+                if existing and (not checksum or existing[1] != checksum):
+                    raise ValueError(f"conflicting registered index files share a cache target: {logical_path}")
+                transfers.setdefault(target, (target, checksum, signed.get(logical_path)))
                 professional_files[logical_path] = target
+        # Independent artifacts can transfer concurrently. Only verified files become visible in the cache.
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            # Each transfer inherits the same scoped authorization guard in its own context.
+            pending = [pool.submit(copy_context().run, self._cache_registered_file, spec)
+                       for spec in transfers.values()]
+            for transfer in pending:
+                transfer.result()
         # Ordinary queries prepare only their requested semantic spaces.
         # The explicit publication endpoint still prepares all spaces through
         # IndexRegistry.ensure_preloaded, including on an existing cache hit.

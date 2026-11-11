@@ -83,6 +83,8 @@ public class MmDatasetVersionService {
 
     @Transactional
     public MmDatasetVersionResp publishVersion(UUID datasetId, UUID versionId,boolean activateOnReady) {
+        try(var operation=access.fixedOperation("dataset.publish","GENERAL_READ")) {
+        access.requireDatasetWrite(datasetId);
         MmDataset dataset = mmDatasetService.getDatasetOrNotFound(datasetId);
         MmDatasetVersion version = getVersionOrNotFound(versionId);
         if (!datasetId.equals(version.getDatasetId())) {
@@ -104,9 +106,11 @@ public class MmDatasetVersionService {
         version.setPublishedAt(OffsetDateTime.now());
         version.setPublishedBy(SecurityUtils.getUserId());
         mmDatasetVersionMapper.update(version);
-        indexOutboxService.enqueueSnapshot(dataset.getOrgId(), datasetId, versionId,
-                version.getRawCommitId(), SecurityUtils.getUserId());
+        if(access.canDatasetOperation(datasetId,"dataset.index.build","VIEW_BUILD"))
+            indexOutboxService.enqueueSnapshot(dataset.getOrgId(), datasetId, versionId,
+                    version.getRawCommitId(), SecurityUtils.getUserId());
         return toResp(version);
+        }
     }
 
     /** Do not enqueue a build for an empty, in-flight or unverified upload. */

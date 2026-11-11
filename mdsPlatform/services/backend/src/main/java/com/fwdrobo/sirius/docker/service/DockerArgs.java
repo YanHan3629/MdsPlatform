@@ -191,7 +191,8 @@ public class DockerArgs {
         runArgs.addAll(jobParams);
         if (jobParams.contains("--gpus")) {
             runArgs.addAll(List.of("--net", "host"));
-            runArgs.addAll(List.of("--ipc", "host"));
+            // Task IPC remains private, including GPU tasks.
+            // No worker requires access to another task's shared memory.
         }
 
         runArgs.add(this.image);
@@ -205,9 +206,7 @@ public class DockerArgs {
                 + " && http_code=\"$(curl -sS -G -H \"$AUTHHEADER\" -o \"$out\" -w \"%{http_code}\" \"$url\" || printf '%s' '000')\""
                 + " && echo \"[boot] curl http_code=$http_code\""
                 + " && test \"$http_code\" = \"200\""
-                + " && ls -l \"$out\""
-                + " && { head -n 5 \"$out\" || true; }"
-                + " && sed -i 's/\\r$//' \"$out\""
+                + " && python3 -c 'import hashlib,pathlib,re,sys; expected=sys.argv[2]; sys.exit(0 if re.fullmatch(\"[0-9a-f]{64}\",expected) and hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()==expected else 73)' \"$out\" \"$MDS_BOOTSTRAP_SHA256\""
                 + " && chmod +x \"$out\""
                 + " && echo '[boot] running script...'"
                 + " && if command -v timeout >/dev/null 2>&1;"

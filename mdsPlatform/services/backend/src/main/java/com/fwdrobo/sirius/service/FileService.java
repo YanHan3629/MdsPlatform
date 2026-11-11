@@ -36,6 +36,13 @@ import java.util.UUID;
 @Service
 @Slf4j
 public class FileService {
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.fwdrobo.sirius.security.JobExecutionDefinitionService definitions;
+    @org.springframework.beans.factory.annotation.Autowired private com.fwdrobo.sirius.security.GenericFileOriginService origins;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    private ArtifactUploadService uploadProtocol;
+
 
     private final MinioService minioService;
     private final ArtifactCommitMapper artifactCommitMapper;
@@ -73,35 +80,7 @@ public class FileService {
             Duration expire,
             UUID deviceId
     ) throws Exception {
-        log.info("beginWrite: artifactId={}, commitId={}, path={}, contentType={}, expire={}, deviceId={}",
-                artifactId, commitId, path, contentType, expire, deviceId);
-
-        // draft 才允许写/删
-        ensureCommitStatusIs(artifactId, commitId, CommitStatus.DRAFT);
-
-        String logicalPath = PathUtils.normalizePath(path);
-        access.requireBusinessFile(artifactId,logicalPath);
-        FileResp existingFile = artifactFileMapper.selectByCommitIdAndPath(commitId, logicalPath);
-        String objectKey = existingFile == null
-                ? buildWorkspaceKey(artifactId, commitId, logicalPath, contentType)
-                : existingFile.getFileKey();
-        validateExpire(expire);
-
-        // upsert 文件元信息，再写入 manifest
-        AddOrReplaceFileResult fileResult = artifactFileMapper.addOrReplaceFile(
-                commitId,
-                logicalPath,
-                minioService.getBucket(),
-                objectKey,
-                contentType,
-                deviceId
-        );
-        UUID fileId = fileResult.getFileId();
-        manifestService.addOrReplaceFile(artifactId, commitId, logicalPath, fileId);
-
-        // 返回预签名 URL 给客户端上传
-        String url = minioService.presignPut(objectKey, expire);
-        return new PresignPutResp(objectKey, url);
+        return uploadProtocol.begin(artifactId,commitId,path,contentType,expire,deviceId);
     }
 
     /**
@@ -116,109 +95,7 @@ public class FileService {
             long size,
             UUID deviceId
     ) throws Exception {
-        log.info("uploadContent: artifactId={}, commitId={}, path={}, contentType={}, size={}, deviceId={}",
-                artifactId, commitId, path, contentType, size, deviceId);
-
-        // draft 才允许写
-        ensureCommitStatusIs(artifactId, commitId, CommitStatus.DRAFT);
-
-        String logicalPath = PathUtils.normalizePath(path);
-        access.requireBusinessFile(artifactId,logicalPath);
-        FileResp existingFile = artifactFileMapper.selectByCommitIdAndPath(commitId, logicalPath);
-        String objectKey = existingFile == null
-                ? buildWorkspaceKey(artifactId, commitId, logicalPath, contentType)
-                : existingFile.getFileKey();
-        long previousSize = normalizeSize(existingFile == null ? null : existingFile.getSizeBytes());
-        long reservedBytes = trialLimitService.reserveUploadQuota(size, previousSize);
-        boolean quotaSettled = false;
-        try {
-            // 先上传对象，失败则直接抛错
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            String etag;
-            try (DigestInputStream digestInput = new DigestInputStream(inputStream, digest)) {
-                etag = minioService.putObject(objectKey, digestInput, size, contentType);
-            }
-            String sha256 = HexFormat.of().formatHex(digest.digest());
-
-            // 上传完毕后从MinIO取元信息
-            StatObjectResponse meta = minioService.statObject(objectKey);
-            size = requireUploadedSize(meta.size(), logicalPath);
-            contentType = meta.contentType();
-            String versionId = meta.versionId();
-
-            // upsert 文件元信息，再写入 manifest（失败时做短重试，降低瞬时抖动导致的不一致）
-            UUID fileId = null;
-            UUID firstInsertedFileId = null;
-            boolean insertedEver = false;
-            Exception lastError = null;
-            for (int attempt = 1; attempt <= UPLOAD_METADATA_MAX_RETRIES; attempt++) {
-                try {
-                    AddOrReplaceFileResult fileResult = artifactFileMapper.addOrReplaceFileFull(
-                            commitId,
-                            logicalPath,
-                            minioService.getBucket(),
-                            objectKey,
-                            versionId,
-                            etag,
-                            size,
-                            contentType,
-                            deviceId,
-                            sha256
-                    );
-                    fileId = fileResult.getFileId();
-                    if (fileResult.isInserted()) {
-                        insertedEver = true;
-                        if (firstInsertedFileId == null) {
-                            firstInsertedFileId = fileId;
-                        }
-                    }
-                    manifestService.addOrReplaceFile(artifactId, commitId, logicalPath, fileId);
-                    lastError = null;
-                    break;
-                } catch (Exception e) {
-                    lastError = e;
-                    log.warn("uploadContent metadata write failed: artifactId={}, commitId={}, path={}, attempt={}/{}",
-                            artifactId, commitId, logicalPath, attempt, UPLOAD_METADATA_MAX_RETRIES, e);
-                    if (attempt < UPLOAD_METADATA_MAX_RETRIES) {
-                        sleepForRetry(attempt);
-                    }
-                }
-            }
-            if (lastError != null) {
-                log.warn("uploadContent failed, cleanup object and db: artifactId={}, commitId={}, path={}",
-                        artifactId, commitId, logicalPath, lastError);
-                // 无论是否写入 DB，都尝试清理对象，避免遗留孤儿对象。
-                try {
-                    minioService.removeObject(objectKey);
-                } catch (Exception cleanup) {
-                    log.warn("uploadContent cleanup failed: objectKey={}", objectKey, cleanup);
-                }
-                if (insertedEver && firstInsertedFileId != null) {
-                    try {
-                        artifactFileMapper.deleteByIdAndCommitId(firstInsertedFileId, commitId);
-                    } catch (Exception cleanupDb) {
-                        log.warn("uploadContent db cleanup failed: fileId={}", firstInsertedFileId, cleanupDb);
-                    }
-                }
-                throw lastError;
-            }
-
-            long normalizedSize = requireUploadedSize(size, logicalPath);
-            long sizeDelta = normalizedSize - previousSize;
-            long adjustDelta = sizeDelta - reservedBytes;
-            if (adjustDelta > 0) {
-                trialLimitService.addUsedStorageAfterSuccess(adjustDelta);
-            } else if (adjustDelta < 0) {
-                trialLimitService.reduceUsedStorageAfterSuccess(-adjustDelta);
-            }
-            quotaSettled = true;
-            return new UploadFileResp(artifactId, commitId, fileId, deviceId, logicalPath, normalizedSize, contentType);
-        } catch (Exception ex) {
-            if (!quotaSettled) {
-                trialLimitService.rollbackReservedUploadQuota(reservedBytes);
-            }
-            throw ex;
-        }
+        return uploadProtocol.upload(artifactId,commitId,path,contentType,inputStream,size,deviceId);
     }
 
     private void sleepForRetry(int attempt) {
@@ -233,23 +110,7 @@ public class FileService {
      * DELETE：draft 删除。
      */
     public void deleteFile(UUID artifactId, UUID commitId, String path) throws Exception {
-        log.info("deleteFile: artifactId={}, commitId={}, path={}", artifactId, commitId, path);
-        // 校验状态,只有状态为 draft 才能下载
-        ensureCommitStatusIs(artifactId, commitId, CommitStatus.DRAFT);
-
-        String logicalPath = PathUtils.normalizePath(path);
-        // 先改 manifest，再删除 DB/对象
-        UUID fileId = manifestService.removeFileEntry(artifactId, commitId, logicalPath);
-        if (fileId == null) {
-            return;
-        }
-        FileResp existingFile = artifactFileMapper.selectFilesByIds(List.of(fileId)).stream().findFirst().orElse(null);
-        long deletedSize = normalizeSize(existingFile == null ? null : existingFile.getSizeBytes());
-        artifactFileMapper.deleteByIdAndCommitId(fileId, commitId);
-        if (existingFile != null) {
-            minioService.removeObject(existingFile.getFileKey());
-        }
-        trialLimitService.reduceUsedStorageAfterSuccess(deletedSize);
+        uploadProtocol.delete(artifactId,commitId,path);
     }
 
     // GET: 下载
@@ -265,16 +126,11 @@ public class FileService {
         String logicalPath = PathUtils.normalizePath(path);
         FileResp file = getFile(artifactId, commitId, logicalPath);
 
-        String objectKey = file.getFileKey();
-        // 返回预签名 URL 给客户端下载
-        if (com.fwdrobo.sirius.util.SecurityUtils.getUserId()!=null && access.isForeignArtifact(artifactId)) {
-            String proxy="/api/artifacts/"+artifactId+"/commits/"+commitId+"/files/content?path="+
-                java.net.URLEncoder.encode(logicalPath,java.nio.charset.StandardCharsets.UTF_8);
-            return new PresignGetResp("",proxy);
-        }
-        String url = minioService.presignGet(objectKey, expire);
-
-        return new PresignGetResp(objectKey, url);
+        // All private downloads return through the live authorization gateway.
+        // No user receives an object-store signing key or bypass URL.
+        String proxy="/api/artifacts/"+artifactId+"/commits/"+commitId+"/files/content?path="+
+            java.net.URLEncoder.encode(logicalPath,java.nio.charset.StandardCharsets.UTF_8);
+        return new PresignGetResp("",proxy);
     }
 
     // GET: 流式转发下载
@@ -308,6 +164,7 @@ public class FileService {
         } else {
             throw ExceptionUtils.notFound("file not found: " + fileId);
         }
+        origins.requireFile(fileId);
         String logicalPath = file.getLogicalPath();
         String objectKey = file.getFileKey();
 
@@ -319,6 +176,7 @@ public class FileService {
     public ListGetResp listFiles(ListFilesQuery query) throws Exception {
         UUID artifactId = query.getRepoId();
         UUID commitId = query.getCommitId();
+        access.requireArtifact(artifactId,commitId,false);
 
         log.debug("listFiles: artifactId={}, commitId={}, globLike={}, pageIdx={}, pageSize={}",
                 artifactId, commitId, query.getGlobPattern(), query.getPageIdx(), query.getPageSize());
@@ -332,6 +190,7 @@ public class FileService {
         // 以 manifest 为索引，按 fileId 反查文件详情
         CommitManifest manifest = manifestService.getManifest(artifactId, commitId);
 
+        var executionSelection=definitions.inputPathPredicate(artifactId,commitId,manifest.getFiles().stream().map(CommitManifest.File::getPath).toList());
         // 按 glob 过滤
         PathMatcher glob;
         try {
@@ -342,9 +201,12 @@ public class FileService {
 
         // 过滤 + 按 path 排序(用于目录展示)
         List<CommitManifest.File> fileList = manifest.getFiles().stream()
+                .filter(file->executionSelection.test(file.getPath()))
                 .filter(f -> GlobUtils.matches(glob, f.getPath()))
                 .sorted(Comparator.comparing(CommitManifest.File::getPath))
                 .toList();
+
+        fileList=origins.visibleFiles(fileList);
 
         // 避免数据太多,做分页
         if (query.getPageSize() == null || query.getPageSize() <= 0) {
@@ -405,6 +267,7 @@ public class FileService {
                 .map(CommitManifest.File::getFileId)
                 .toList();
         List<FileResp> files = artifactFileMapper.selectFilesByIds(fileIds);
+        for(var file:files)origins.requireFile(file.getFileId());
         files.sort(Comparator.comparing(FileResp::getLogicalPath));
         return files;
     }
@@ -436,6 +299,8 @@ public class FileService {
         ensureCommitExists(artifactId, commitId);
 
         CommitManifest manifest = manifestService.getManifest(artifactId, commitId);
+        var selected=definitions.inputPathPredicate(artifactId,commitId,manifest.getFiles().stream().map(CommitManifest.File::getPath).toList());
+        if(!selected.test(logicalPath))throw ExceptionUtils.forbidden("JOB_INPUT_PATH_NOT_AVAILABLE");
         UUID fileId = manifest.getFiles().stream()
                 .filter(f -> f.getPath().equals(logicalPath))
                 .map(CommitManifest.File::getFileId)
@@ -446,12 +311,13 @@ public class FileService {
                 .findFirst()
                 .orElseThrow(() -> ExceptionUtils.notFound("file not found: " + logicalPath));
 
+        origins.requireFile(fileId);
         return file;
     }
 
     // 校验 commit 是否属于当前 artifact
     private void ensureCommitExists(UUID artifactId, UUID commitId) {
-        if (com.fwdrobo.sirius.util.SecurityUtils.getUserId()!=null) access.requireArtifact(artifactId,commitId,false);
+        access.requireArtifact(artifactId,commitId,false);
         String status = artifactCommitMapper.selectStatusByRepoAndId(artifactId, commitId);
         if (status == null) {
             throw ExceptionUtils.notFound("commit 不存在");
@@ -475,8 +341,7 @@ public class FileService {
      * content identity.
      */
     public FileResp confirmPresignedUpload(UUID artifactId, UUID commitId, String path) throws Exception {
-        ensureCommitStatusIs(artifactId, commitId, CommitStatus.DRAFT);
-        return calculateAndPersistContentIdentity(artifactId, commitId, path);
+        return uploadProtocol.confirm(artifactId,commitId,path);
     }
 
     /**
@@ -493,6 +358,8 @@ public class FileService {
                 && "READY".equals(existing.getUploadState())) {
             return existing;
         }
+        if ("DRAFT".equals(artifactCommitMapper.selectStatusByRepoAndId(artifactId,commitId)))
+            return uploadProtocol.confirm(artifactId,commitId,logicalPath);
         return calculateAndPersistContentIdentity(artifactId, commitId, logicalPath);
     }
 
@@ -520,6 +387,7 @@ public class FileService {
 
     // 查询 commit_status 并校验（repoId + commitId）
     private void ensureCommitStatusIs(UUID artifactId, UUID commitId, CommitStatus expected) {
+        access.requireArtifact(artifactId,commitId,true);
         String status = artifactCommitMapper.selectStatusByRepoAndId(artifactId, commitId);
         if (status == null) {
             throw ExceptionUtils.notFound("commit 不存在");

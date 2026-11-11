@@ -14,6 +14,10 @@ public class Role {
     private String roleCode;
     private String roleName;
     private Boolean isBuiltin;
+    private Long typeVersion;
+    private String typeState;
+    private String typeScope;
+    private Boolean readOnlyProfile;
     private OffsetDateTime createdAt;
     private UUID createdBy;
     private OffsetDateTime updatedAt;

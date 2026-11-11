@@ -45,8 +45,39 @@ public class DataSpaceReceiverClient {
         var response=http.send(request("/deliveries/"+key).GET().build(),HttpResponse.BodyHandlers.ofString());
         if(response.statusCode()==404)return null;if(response.statusCode()!=200)throw new IllegalStateException("receiver receipt lookup failed: HTTP "+response.statusCode());return parse(response.body());
     }
-    public Map<String,Object> send(UUID key,Path zip)throws Exception{
-        var response=http.send(request("/deliveries/"+key).timeout(Duration.ofMinutes(15)).header("Content-Type","application/zip").POST(HttpRequest.BodyPublishers.ofFile(zip)).build(),HttpResponse.BodyHandlers.ofString());
+    public Map<String,Object> send(UUID key,Path zip,Runnable authority)throws Exception {
+        authority.run();
+        return send(key,HttpRequest.BodyPublishers.ofInputStream(()->{
+            try {
+                return new java.io.FilterInputStream(java.nio.file.Files.newInputStream(zip)) {
+                    private long lastCheck;
+                    private int remaining;
+                    private void check() throws java.io.IOException {
+                        long now=System.nanoTime();
+                        if(remaining>0 && now-lastCheck<500_000_000L) return;
+                        try {authority.run();}
+                        catch(RuntimeException denied){throw new java.io.IOException("delivery authority no longer current",denied);}
+                        lastCheck=now;
+                        remaining=1024*1024;
+                    }
+                    @Override public int read() throws java.io.IOException {
+                        check();
+                        int value=in.read();
+                        if(value>=0) remaining--;
+                        return value;
+                    }
+                    @Override public int read(byte[] bytes,int offset,int length) throws java.io.IOException {
+                        check();
+                        int count=in.read(bytes,offset,Math.min(length,remaining));
+                        if(count>0) remaining-=count;
+                        return count;
+                    }
+                };
+            } catch(java.io.IOException error){throw new java.io.UncheckedIOException(error);}
+        }));
+    }
+    private Map<String,Object> send(UUID key,HttpRequest.BodyPublisher body)throws Exception {
+        var response=http.send(request("/deliveries/"+key).timeout(Duration.ofMinutes(15)).header("Content-Type","application/zip").POST(body).build(),HttpResponse.BodyHandlers.ofString());
         if(response.statusCode()!=200)throw new IllegalStateException("independent receiver rejected package: HTTP "+response.statusCode());return parse(response.body());
     }
     public Map<String,Object> verify(Map<String,Object> envelope,Map<String,Object> manifest,String publicKey,String identity)throws Exception{

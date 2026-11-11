@@ -9,4 +9,5 @@ public class OrgReq {
     private String orgName;
     private Integer orgStatus;
     private String licenseType;
+    private Long expectedVersion;
 }

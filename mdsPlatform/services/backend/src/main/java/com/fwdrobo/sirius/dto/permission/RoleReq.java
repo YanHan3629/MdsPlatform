@@ -16,4 +16,11 @@ public class RoleReq {
 
     // 前端勾选的权限
     private List<UUID> permissionIds;
+    private Long expectedVersion;
+    private String scope;
+    private String state;
+    private String description;
+    private List<String> industryTags;
+    private List<UUID> applicableOrgIds;
+    private Boolean readOnly;
 }

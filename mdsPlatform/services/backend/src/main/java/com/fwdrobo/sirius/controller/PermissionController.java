@@ -35,21 +35,18 @@ public class PermissionController {
     }
 
     @PostMapping
-    @PreAuthorize("hasRole('SUPER_ADMIN')")
     public Map<String, Object> create(@RequestBody PermissionReq req) {
         UUID perId = permissionService.create(req);
         return Map.of("message", "权限创建成功", "perId", perId);
     }
 
     @PatchMapping("/{perId}")
-    @PreAuthorize("hasRole('SUPER_ADMIN')")
     public Map<String, Object> update(@PathVariable UUID perId, @RequestBody PermissionReq req) {
         permissionService.update(perId, req);
         return Map.of("message", "权限修改成功", "perId", perId);
     }
 
     @DeleteMapping("/{perId}")
-    @PreAuthorize("hasRole('SUPER_ADMIN')")
     public Map<String, Object> delete(@PathVariable UUID perId) {
         permissionService.delete(perId);
         return Map.of("message", "权限删除成功", "perId", perId);

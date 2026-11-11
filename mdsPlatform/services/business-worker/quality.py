@@ -9,6 +9,8 @@ import hashlib
 import json
 import re
 import csv
+import uuid
+from collaboration_view import json_field_values, projection_presence
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -16,7 +18,7 @@ from zoneinfo import ZoneInfo
 from professional.contracts import ParseContext
 from professional.parsers import default_parser_registry
 
-RULES_VERSION = "snapshot-quality-2026-10-20.6"
+RULES_VERSION = "snapshot-quality-2026-11-07.3"
 IMPLEMENTATION_DIGEST=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 RULE_NAMES = ("schema", "primary_key", "references", "units", "time", "nulls")
 UNITS = {"1", "%", "mm", "cm", "m", "m2", "m²", "m3", "m³", "L", "l", "ml", "kg", "g", "t", "s", "ms", "min", "h", "d", "day", "Hz", "kHz", "rpm", "Pa", "kPa", "MPa", "bar", "N", "N·m", "Nm", "J", "kJ", "W", "kW", "Wh", "kWh", "V", "A", "mA", "Ω", "ohm", "℃", "°C", "C", "K", "件", "台", "个", "套", "元", "CNY", "RMB", "万元", "元/件", "元/台", "人", "次", "无量纲"}
@@ -99,24 +101,6 @@ def time_valid(value, granularity, timezone, declared=""):
             return zone_valid
         return True
     except (ValueError, KeyError):return False
-
-def json_field_values(document,field):
-    """Resolve declared nested paths against the original JSON, retaining locators."""
-    tokens=field.split(".")
-    def walk(value,rest,location):
-        if not rest:return [(dict(jsonPath=location),value,True,{})]
-        # A root JSON list is a table; unprefixed fields apply to each record.
-        if isinstance(value,list):
-            return [result for i,child in enumerate(value) for result in walk(child,rest,f"{location}[{i}]")]
-        token=rest[0];array=token.endswith("[]");key=token[:-2] if array else token
-        if not isinstance(value,dict) or key not in value:return [(dict(jsonPath=location,field=field),None,False,{})]
-        child=value[key];here=f"{location}.{key}"
-        if array:
-            if not isinstance(child,list):return [(dict(jsonPath=here),child,False,value)]
-            return [result for i,item in enumerate(child) for result in walk(item,rest[1:],f"{here}[{i}]")]
-        if len(rest)==1:return [(dict(jsonPath=here),child,True,value)]
-        return walk(child,rest[1:],here)
-    return walk(document,tokens,"$")
 
 def unit_result(unit,values,config):
     if not isinstance(unit,str):return False,str(unit)[:100]
@@ -213,6 +197,37 @@ def inspect_snapshot(job, root, download, progress=lambda:None):
     }
     for path,fields in catalog_schemas.items():
         if path in paths:declared_fields[path]=[dict(field=k,type=v,nullable=False) for k,v in fields.items()]
+    scope_valid = False
+    scope_doc = docs.get("/catalog/view_scope.json")
+    if "/catalog/view_scope.json" in paths:
+        required={"viewId":"string","ruleSha256":"string","policyCheckRequired":"boolean","hasOriginalByteCopies":"boolean"}
+        optional={"responsibilityRule":"string"}
+        declared_fields["/catalog/view_scope.json"]=[dict(field=k,type=v,nullable=False) for k,v in dict(required,**{k:v for k,v in optional.items() if isinstance(scope_doc,dict) and k in scope_doc}).items()]
+        scope_valid=isinstance(scope_doc,dict) and set(required)<=set(scope_doc) and set(scope_doc)<=set(required)|set(optional)
+        if scope_valid:
+            try:scope_valid=str(uuid.UUID(scope_doc["viewId"]))==scope_doc["viewId"]
+            except (ValueError,TypeError,AttributeError):scope_valid=False
+            scope_valid=scope_valid and isinstance(scope_doc.get("ruleSha256"),str) and bool(re.fullmatch(r"[0-9a-f]{64}",scope_doc["ruleSha256"])) and scope_doc.get("policyCheckRequired") is True and isinstance(scope_doc.get("hasOriginalByteCopies"),bool)
+            if "responsibilityRule" in scope_doc:scope_valid=scope_valid and scope_doc["responsibilityRule"]=="enterprise-responsibility-v4"
+        checks.append(check("/catalog/view_scope.json","controlled_view_metadata_contract",[(scope_valid,{"reason":"受控视图元数据必须符合生成器的明确协议"})],critical=True))
+    registered_view = job.get("controlledView")
+    registered_view_matches = (
+        scope_valid and isinstance(registered_view, dict)
+        and scope_doc["viewId"] == registered_view.get("viewId")
+        and scope_doc["ruleSha256"] == registered_view.get("ruleSha256")
+    )
+    view_rule = registered_view.get("ruleVersion") if registered_view_matches else None
+    assumptions_path = "/catalog/sources_and_assumptions.json"
+    assumptions = docs.get(assumptions_path)
+    if (view_rule == "COLLABORATION_VIEW_RULES_V1" and isinstance(assumptions, dict)
+            and assumptions.get("version") == view_rule):
+        # Explicit collaboration has no obligation to invent simulation metadata.
+        fields = {"sources": "array", "assumptions": "array", "version": "string"}
+        for optional in ("simulation_notice", "dataset_version"):
+            if optional in assumptions:
+                fields[optional] = "string"
+        declared_fields[assumptions_path] = [dict(field=name, type=kind, nullable=False) for name, kind in fields.items()]
+    jsonl_documents = {}
     entities=docs.get("/catalog/entities.json",[]); relations=docs.get("/catalog/relations.json",[])
     if not isinstance(entities,list):entities=[]
     if not isinstance(relations,list):relations=[]
@@ -230,9 +245,14 @@ def inspect_snapshot(job, root, download, progress=lambda:None):
         if isinstance(supplied,dict):supplied=[dict(v,field=k) for k,v in supplied.items()]
         fields=list(declared_fields[path]);source_fields={(f.get("sheet"),f["field"]):f for f in fields}
         for field in supplied:
+            if "projectionPresence" in field:
+                checks.append(check(path, "job_projection_presence_forbidden", [(False, {
+                    "field": field.get("field"), "reason": "任务规则不能自定义源记录字段位置",
+                })], critical=True))
+                continue
             key=(field.get("sheet"),field["field"]);original=source_fields.get(key)
             if original is not None:
-                conflicts=[name for name in ("type","nullable","unit","timezone","null_rule","null_values") if name in field and name in original and field[name]!=original[name]]
+                conflicts=[name for name in ("type","nullable","required","unit","timezone","null_rule","null_values") if name in field and name in original and field[name]!=original[name]]
                 if conflicts:checks.append(check(path,"published_declaration_conflict",[(False,{"field":field["field"],"conflictingConstraints":conflicts,"reason":"本次规则不能覆盖已发布源字典的约束；需显式修订源版本"})],critical=True))
             else:fields.append(field)
         if not groups and path not in docs:
@@ -258,6 +278,35 @@ def inspect_snapshot(job, root, download, progress=lambda:None):
                     if not applicable or not any(name in {column["name"] for column in item.payload["columns"]} for item in applicable):outcomes["schema"].append((False,{"field":name,"sheet":sheet,"reason":"声明的工作表或字段未在实际表头中出现"}))
                 selected=[(dict(locator,row=row["rawRow"],field=name),row["values"].get(name),name in row["values"],row["values"]) for locator,row in rows_for(path,sheet)]
                 if path in docs:selected=json_field_values(docs[path],name)
+                if "projectionPresence" in field:
+                    expected = field["projectionPresence"]
+                    is_jsonl = path.lower().endswith(".jsonl")
+                    eligible = (view_rule == "ENTERPRISE_RESPONSIBILITY_RULES_V1"
+                                and path.startswith("/corpus/") and (path in docs or is_jsonl)
+                                and field.get("required") is not True and isinstance(expected, dict)
+                                and type(expected.get("slotCount")) is int and type(expected.get("presentCount")) is int
+                                and 0 < expected["presentCount"] < expected["slotCount"])
+                    if eligible and is_jsonl:
+                        if path not in jsonl_documents:
+                            try:
+                                with valid[path].open(encoding="utf-8-sig") as stream:
+                                    jsonl_documents[path] = [json.loads(line) for line in stream if line.strip()]
+                            except (ValueError, OSError):
+                                jsonl_documents[path] = None
+                        document = jsonl_documents[path]
+                        eligible = document is not None and all(isinstance(row, dict) for row in document)
+                        if eligible:
+                            selected = json_field_values(document, name)
+                    actual_presence = projection_presence(selected) if eligible else None
+                    presence_matches = eligible and expected == actual_presence
+                    checks.append(check(path, "projected_field_presence", [(presence_matches, {
+                        "field": name, "reason": "字段位置必须与登记视图的源记录投影一致",
+                    })], critical=True, evidence={
+                        "field": name,
+                        "notApplicableSlots": expected["slotCount"] - expected["presentCount"] if presence_matches else 0,
+                    }))
+                    if presence_matches:
+                        selected = [observation for observation in selected if observation[2]]
                 for where,value,present,values in selected:
                     if not present:
                         outcomes["schema"].append((False,dict(where,reason="声明字段不存在")));continue

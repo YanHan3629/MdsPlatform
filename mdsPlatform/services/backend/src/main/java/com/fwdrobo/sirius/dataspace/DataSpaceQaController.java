@@ -48,10 +48,16 @@ public class DataSpaceQaController {
     private final RestTemplate http;
     private final String qaUrl;
     private final DatasetAccessService access;
+    private final com.fwdrobo.sirius.security.WorkerEvidenceScopeService evidenceScope;
+    private final com.fwdrobo.sirius.security.InteractiveRequestActivity activity;
 
     public DataSpaceQaController(JdbcTemplate jdbc, SearchServiceClient search,
                                  MmAssetService assets, MmSourceFileService sourceFiles, DatasetAccessService access,
-                                 @Value("${QA_SERVICE_BASE_URL:http://localhost:18081}") String qaUrl) {
+                                 @Value("${QA_SERVICE_BASE_URL:http://localhost:18081}") String qaUrl,
+                                 com.fwdrobo.sirius.security.WorkerEvidenceScopeService evidenceScope,
+                                 com.fwdrobo.sirius.security.InteractiveRequestActivity activity) {
+        this.evidenceScope=evidenceScope;
+        this.activity=activity;
         this.jdbc = jdbc;
         this.search = search;
         this.assets = assets;
@@ -90,11 +96,15 @@ public class DataSpaceQaController {
                 SELECT t.task_id AS "taskId",t.dataset_id AS "datasetId",t.dataset_version_id AS "versionId",
                        d.dataset_name AS "datasetName",v.version_name AS "versionName",
                        t.task_status AS status,t.stage,t.attempt_count AS "attemptCount",
-                       t.max_attempts AS "maxAttempts",t.error_message AS error,t.updated_at AS "updatedAt"
+                       t.max_attempts AS "maxAttempts",t.error_message AS error,t.updated_at AS "updatedAt",t.index_version_id AS "indexVersionId"
                 FROM mm_ingest_task t JOIN mm_dataset d ON d.dataset_id=t.dataset_id
-                JOIN mm_dataset_version v ON v.version_id=t.dataset_version_id
-                WHERE t.org_id=? ORDER BY t.updated_at DESC LIMIT 50
-                """, org);
+                JOIN mm_dataset_version v ON v.version_id=t.dataset_version_id AND v.dataset_id=t.dataset_id AND v.raw_commit_id=t.raw_commit_id
+                WHERE t.org_id=? AND (t.index_version_id IS NULL OR EXISTS(SELECT 1 FROM mm_index_version task_index
+                    WHERE task_index.index_version_id=t.index_version_id AND task_index.dataset_id=t.dataset_id
+                      AND task_index.dataset_version_id=t.dataset_version_id))
+                ORDER BY t.updated_at DESC
+                """, org).stream().filter(row->access.canInspectIndexTask((UUID)row.get("datasetId"),
+                    (UUID)row.get("versionId"),(UUID)row.get("indexVersionId"))).limit(50).toList();
     }
 
     @GetMapping("/query-assets/{datasetId}/{versionId}")
@@ -114,7 +124,31 @@ public class DataSpaceQaController {
     // retrieval/model call. Owner candidate selection does not activate it;
     // every explicit READY scope still passes the same live authority check.
     void validateScope(Map<String, ?> body) {
-        validatedBody(body, false);
+        validatedBody(body, true);
+    }
+
+    /** Only the declared attachment-only mode can omit a corpus scope. */
+    private Map<String,Object> validatedQaBody(Map<String,?> input){
+        Map<String,Object> body=normalizeScope(input);
+        String camel=Objects.toString(body.get("inputMode"),"").trim(),snake=Objects.toString(body.get("input_mode"),"").trim();
+        if(!camel.isBlank()&&!snake.isBlank()&&!camel.equals(snake))
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"AMBIGUOUS_QA_INPUT_MODE");
+        String mode=!snake.isBlank()?snake:!camel.isBlank()?camel:"hybrid";
+        if(!Set.of("question_only","hybrid","user_data_only").contains(mode))
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"INVALID_QA_INPUT_MODE");
+        body.remove("inputMode");body.put("input_mode",mode);
+        if(!"user_data_only".equals(mode))return validatedBody(body,true);
+        for(String[] names:SCOPE_FIELDS){
+            if(!Objects.toString(body.get(names[1]),"").isBlank())
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"USER_INPUT_CORPUS_SCOPE_NOT_ALLOWED");
+            body.remove(names[0]);body.remove(names[1]);
+        }
+        for(String name:List.of("queryPlan","query_plan"))
+            if(body.get(name)!=null&&!Objects.toString(body.get(name),"").isBlank()&&!"null".equals(body.get(name)))
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"USER_INPUT_QUERY_PLAN_NOT_ALLOWED");
+        for(String name:List.of("useSearchService","retrievalMode","retrievalType","queryPlan","query_plan"))body.remove(name);
+        body.put("use_search_service",false);body.put("retrieval_mode","none");body.put("retrieval_type","none");
+        return body;
     }
 
     private Map<String, Object> validatedBody(Map<String, ?> body, boolean required) {
@@ -190,8 +224,8 @@ public class DataSpaceQaController {
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<byte[]> askJson(@RequestBody String rawBody,
             @RequestHeader(HttpHeaders.AUTHORIZATION) String authorization) {
-        Map<String, Object> body = validatedBody(parseJson(rawBody), false);
-        var headers = headers(authorization, MediaType.APPLICATION_JSON);
+        Map<String, Object> body = validatedQaBody(parseJson(rawBody));
+        var headers = headers(body, MediaType.APPLICATION_JSON);
         return forward("/api/v1/qa", HttpMethod.POST, body, headers);
     }
 
@@ -199,16 +233,11 @@ public class DataSpaceQaController {
     public ResponseEntity<byte[]> askMultipart(@RequestParam MultiValueMap<String, String> fields,
             @RequestParam(required = false) List<MultipartFile> images,
             @RequestHeader(HttpHeaders.AUTHORIZATION) String authorization) throws Exception {
-        Map<String, Object> normalized = validatedBody(multipartFields(fields), false);
+        Map<String, Object> normalized = validatedQaBody(multipartFields(fields));
         if (images != null && images.size() > 2)
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "单次最多上传 2 张图片");
         MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
-        fields.forEach((k, values) -> values.forEach(v -> body.add(k, v)));
-        for (String[] names : SCOPE_FIELDS) {
-            body.remove(names[0]);
-            body.remove(names[1]);
-            if (normalized.containsKey(names[1])) body.add(names[1], normalized.get(names[1]));
-        }
+        normalized.forEach((key,value)->{if(value!=null)body.add(key,value);});
         if (images != null) for (MultipartFile image : images) {
             if (image.getSize() > 10 * 1024 * 1024)
                 throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "每张图片不得超过 10 MB");
@@ -221,7 +250,7 @@ public class DataSpaceQaController {
             body.add("images", new HttpEntity<>(resource, partHeaders));
         }
         return forward("/api/v1/qa", HttpMethod.POST, body,
-                headers(authorization, MediaType.MULTIPART_FORM_DATA));
+                headers(normalized, MediaType.MULTIPART_FORM_DATA));
     }
 
     @PostMapping("/search")
@@ -308,23 +337,32 @@ public class DataSpaceQaController {
                 .header(HttpHeaders.CACHE_CONTROL, "no-store").body(new org.springframework.core.io.InputStreamResource(stream.inputStream()));
     }
 
-    private static HttpHeaders headers(String authorization, MediaType type) {
+    private HttpHeaders headers(Map<String,Object> scope, MediaType type) {
         var headers = new HttpHeaders();
         headers.setContentType(type);
-        headers.set(HttpHeaders.AUTHORIZATION, authorization);
+        headers.set(HttpHeaders.AUTHORIZATION,"user_data_only".equals(scope.get("input_mode"))?evidenceScope.userInputBearer():
+                evidenceScope.bearer(UUID.fromString(scope.get("dataset_id").toString()),UUID.fromString(scope.get("version_id").toString()),UUID.fromString(scope.get("index_version_id").toString())));
+        headers.set(com.fwdrobo.sirius.security.InternalTokenFilter.HEADER,evidenceScope.internalCredential());
         return headers;
     }
 
     private ResponseEntity<byte[]> forward(String path, HttpMethod method, Object body, HttpHeaders headers) {
+        var task="/api/v1/qa".equals(path)&&method==HttpMethod.POST?
+                activity.begin(com.fwdrobo.sirius.security.InteractiveRequestActivity.Kind.QA_REQUEST):null;
         try {
+            if(task!=null)task.dispatched();
             var response = http.exchange(qaUrl + path, method, new HttpEntity<>(body, headers), byte[].class);
+            if(task!=null){task.acknowledged();if(response.getStatusCode().is2xxSuccessful())task.succeeded();}
             return ResponseEntity.status(response.getStatusCode()).contentType(MediaType.APPLICATION_JSON)
                     .header(HttpHeaders.CACHE_CONTROL, "no-store").body(response.getBody());
         } catch (HttpStatusCodeException exc) {
+            if(task!=null)task.acknowledged();
             return ResponseEntity.status(exc.getStatusCode()).contentType(MediaType.APPLICATION_JSON)
                     .body(exc.getResponseBodyAsByteArray());
         } catch (ResourceAccessException exc) {
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "问答服务尚未就绪或请求超时，请检查模型状态");
+        } finally {
+            if(task!=null)task.close();
         }
     }
 }

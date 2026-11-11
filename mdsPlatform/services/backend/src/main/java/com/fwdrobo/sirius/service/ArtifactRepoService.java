@@ -7,6 +7,8 @@ import com.fwdrobo.sirius.dto.artifact.ListArtifactReposQuery;
 import com.fwdrobo.sirius.dto.user.UserInfo;
 import com.fwdrobo.sirius.entity.artifact.ArtifactRepo;
 import com.fwdrobo.sirius.entity.artifact.ArtifactVisibility;
+import com.fwdrobo.sirius.entity.artifact.ArtifactCommit;
+import com.fwdrobo.sirius.entity.artifact.CommitStatus;
 import com.fwdrobo.sirius.mapper.ArtifactCommitMapper;
 import com.fwdrobo.sirius.mapper.ArtifactFileMapper;
 import com.fwdrobo.sirius.mapper.ArtifactRepoMapper;
@@ -18,9 +20,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
-import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -30,17 +33,20 @@ public class ArtifactRepoService {
     private final ArtifactCommitMapper artifactCommitMapper;
     private final ArtifactFileMapper artifactFileMapper;
     private final UserService userService;
+    private final DatasetAccessService datasetAccess;
 
     public ArtifactRepoService(
             ArtifactRepoMapper artifactRepoMapper,
             ArtifactCommitMapper artifactCommitMapper,
             ArtifactFileMapper artifactFileMapper,
-            UserService userService
+            UserService userService,
+            DatasetAccessService datasetAccess
     ) {
         this.artifactRepoMapper = artifactRepoMapper;
         this.artifactCommitMapper = artifactCommitMapper;
         this.artifactFileMapper = artifactFileMapper;
         this.userService = userService;
+        this.datasetAccess = datasetAccess;
     }
 
     /**
@@ -113,13 +119,14 @@ public class ArtifactRepoService {
             throw new IllegalArgumentException("repoId is required");
         }
         log.debug("查询 artifact repo: repoId={}", repoId);
-        ArtifactRepo repo = artifactRepoMapper.selectById(repoId);
+        ArtifactRepo repo = artifactRepoMapper.selectCatalogueById(repoId);
         if (repo == null) {
             log.debug("未找到指定的 artifact repo: repoId={}", repoId);
             throw ExceptionUtils.notFound("未找到 artifact repo， repoId: " + repoId);
         }
+        datasetAccess.requireArtifact(repo.getRepoId(), null, false);
         log.info("成功查询 artifact repo: repoId={}, repoName={}", repo.getRepoId(), repo.getRepoName());
-        return toResponse(repo);
+        return toCatalogueResponse(repo);
     }
 
     /**
@@ -156,13 +163,14 @@ public class ArtifactRepoService {
             throw new IllegalArgumentException("repoName is required");
         }
         log.debug("查询 artifact repo: repoName={}", repoName);
-        ArtifactRepo repo = artifactRepoMapper.selectByName(repoName.trim());
+        ArtifactRepo repo = artifactRepoMapper.selectCatalogueByName(repoName.trim());
         if (repo == null) {
             log.debug("未找到指定的 artifact repo: repoName={}", repoName);
             throw ExceptionUtils.notFound("未找到 artifact repo， repoName: " + repoName);
         }
+        datasetAccess.requireArtifact(repo.getRepoId(), null, false);
         log.info("成功查询 artifact repo: repoId={}, repoName={}", repo.getRepoId(), repo.getRepoName());
-        return toResponse(repo);
+        return toCatalogueResponse(repo);
     }
     
     /**
@@ -171,51 +179,34 @@ public class ArtifactRepoService {
      * @return 分页结果
      */
     public PageRes<ArtifactRepoResponse> listAllPaged(ListArtifactReposQuery query) {
-        log.info("分页查询 artifact repos: page={}, size={}, sortBy={}, sortOrder={}, visibility={}, searchKeyword={}",
-                query.getPageOrDefault(), query.getSizeOrDefault(), query.getSortByOrDefault(),
-                query.getSortOrderOrDefault(), query.getVisibility(), query.getSearchKeyword());
-
-        // 查询总数
-        long totalCount = artifactRepoMapper.countByQuery(query);
-        log.debug("符合条件的 artifact repos 总数: {}", totalCount);
-
-        // 如果没有数据，直接返回空结果
-        if (totalCount == 0) {
-            return new PageRes<>(0, 0, query.getPageOrDefault(), query.getSizeOrDefault(), List.of());
+        List<ArtifactRepo> visible = artifactRepoMapper.selectCatalogueCandidates(query).stream()
+                .filter(repo -> datasetAccess.canReadArtifact(repo.getRepoId(), null))
+                .toList();
+        int page = query.getPageOrDefault();
+        int size = query.getSizeOrDefault();
+        long total = visible.size();
+        if (total == 0) {
+            return new PageRes<>(0, 0, page, size, List.of());
         }
-
-        // 计算总页数
-        int totalPages = (int) ((totalCount + query.getSizeOrDefault() - 1) / query.getSizeOrDefault());
-
-        // 检查页码是否越界（1-based）
-        if (query.getPageOrDefault() > totalPages) {
-            log.warn("请求的页码超出范围: page={}, totalPages={}, totalCount={}",
-                    query.getPageOrDefault(), totalPages, totalCount);
-            throw ExceptionUtils.badRequest(
-                String.format("页码超出范围：请求第 %d 页，但总共只有 %d 页", 
-                    query.getPageOrDefault(), totalPages)
-            );
-        } else if (query.getPageOrDefault() < 1) {
-            log.warn("请求的页码小于1: page={}", query.getPageOrDefault());
-            throw ExceptionUtils.badRequest("页码必须大于等于 1");
+        int totalPages = (int) ((total + size - 1) / size);
+        if (page > totalPages) {
+            throw ExceptionUtils.badRequest(String.format("页码超出范围：请求第 %d 页，但总共只有 %d 页", page, totalPages));
         }
-
-        // 查询当前页数据
-        List<ArtifactRepo> repos = artifactRepoMapper.selectByPage(query);
-        List<ArtifactRepoResponse> responses = repos.stream()
-                .map(this::toResponse)
-                .collect(Collectors.toList());
-
-
-        log.info("查询到 {} 个 artifact repos，当前页: {}/{}", responses.size(), query.getPageOrDefault(), totalPages);
-
-        return new PageRes<>(
-                totalCount,
-                totalPages,
-                query.getPageOrDefault(),
-                query.getSizeOrDefault(),
-                responses
-        );
+        long offset = (page - 1L) * size;
+        List<ArtifactRepoResponse> items;
+        if ("updated_at".equals(query.getSortByOrDefault())) {
+            Comparator<ArtifactRepoResponse> byUpdated = Comparator.comparing(
+                    ArtifactRepoResponse::getUpdatedAt, Comparator.nullsLast(Comparator.naturalOrder()));
+            if ("DESC".equals(query.getSortOrderOrDefault())) {
+                byUpdated = byUpdated.reversed();
+            }
+            items = visible.stream().map(this::toCatalogueResponse)
+                    .sorted(byUpdated.thenComparing(ArtifactRepoResponse::getRepoId))
+                    .skip(offset).limit(size).toList();
+        } else {
+            items = visible.stream().skip(offset).limit(size).map(this::toCatalogueResponse).toList();
+        }
+        return new PageRes<>(total, totalPages, page, size, items);
     }
 
     /**
@@ -285,12 +276,26 @@ public class ArtifactRepoService {
         }
     }
 
-    // 将实体类转换为响应 DTO
-    private ArtifactRepoResponse toResponse(ArtifactRepo r) {
-        ArtifactRepoResponse response = new ArtifactRepoResponse();
+    private ArtifactRepoResponse toCatalogueResponse(ArtifactRepo repo) {
+        List<ArtifactCommit> visible = artifactCommitMapper.selectByRepoId(repo.getRepoId()).stream()
+                .filter(commit -> datasetAccess.canReadArtifact(repo.getRepoId(), commit.getCommitId()))
+                .toList();
+        long published = visible.stream().filter(commit -> commit.getCommitStatus() == CommitStatus.PUBLISHED).count();
+        long drafts = visible.stream().filter(commit -> commit.getCommitStatus() == CommitStatus.DRAFT).count();
+        OffsetDateTime updatedAt = visible.stream().filter(commit -> commit.getCommitStatus() == CommitStatus.PUBLISHED)
+                .map(ArtifactCommit::getPublishedAt).filter(Objects::nonNull).max(Comparator.naturalOrder())
+                .orElse(repo.getUpdatedAt());
+        return toResponse(repo, published, drafts, updatedAt);
+    }
 
-        long publishedCount = artifactCommitMapper.countByRepoIdAndStatus(r.getRepoId(), "PUBLISHED");
-        long draftCount = artifactCommitMapper.countByRepoIdAndStatus(r.getRepoId(), "DRAFT");
+    private ArtifactRepoResponse toResponse(ArtifactRepo repo) {
+        long published = artifactCommitMapper.countByRepoIdAndStatus(repo.getRepoId(), "PUBLISHED");
+        long drafts = artifactCommitMapper.countByRepoIdAndStatus(repo.getRepoId(), "DRAFT");
+        return toResponse(repo, published, drafts, repo.getUpdatedAt());
+    }
+
+    private ArtifactRepoResponse toResponse(ArtifactRepo r, long publishedCount, long draftCount, OffsetDateTime updatedAt) {
+        ArtifactRepoResponse response = new ArtifactRepoResponse();
         UserInfo ownerUser = new UserInfo(r.getOwnerUserId(), userService.resolveUsername(r.getOwnerUserId()));
         response.setRepoId(r.getRepoId());
         response.setRepoName(r.getRepoName());
@@ -299,10 +304,9 @@ public class ArtifactRepoService {
         response.setOwnerUser(ownerUser);
         response.setVisibility(ArtifactVisibility.fromString(r.getVisibility()));
         response.setCreatedAt(r.getCreatedAt());
-        response.setUpdatedAt(r.getUpdatedAt());
+        response.setUpdatedAt(updatedAt);
         response.setPublishedCount(publishedCount);
         response.setDraftCount(draftCount);
-        
         return response;
     }
 }

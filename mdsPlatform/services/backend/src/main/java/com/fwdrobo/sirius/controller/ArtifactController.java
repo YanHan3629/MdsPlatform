@@ -254,7 +254,7 @@ public class ArtifactController {
      */
     @GetMapping("/artifacts/{artifactId}/commits/refs/head")
     public ArtifactCommitResponse getHead(@PathVariable("artifactId") UUID artifactId) {
-        ArtifactCommitResponse response = artifactCommitService.getHead(artifactId);
+        ArtifactCommitResponse response = artifactCommitService.getReadableHead(artifactId);
         return response;
     }
 

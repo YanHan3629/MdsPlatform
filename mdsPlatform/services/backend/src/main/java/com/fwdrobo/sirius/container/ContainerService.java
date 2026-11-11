@@ -18,6 +18,7 @@ import com.fwdrobo.sirius.service.TrialLimitService;
 import com.fwdrobo.sirius.security.JwtService;
 import com.fwdrobo.sirius.util.ExceptionUtils;
 import com.fwdrobo.sirius.util.SecurityUtils;
+import io.jsonwebtoken.Claims;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.stereotype.Service;
@@ -53,11 +54,18 @@ public class ContainerService {
 
     private final ContainerProperties containerProperties;
     private final TransactionTemplate tx;
+    private final TransactionTemplate stateTx;
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.springframework.jdbc.core.JdbcTemplate jdbc;
     private final ContainerLauncher launcher;
     private final ContainerInspector inspector;
     private final DockerHostResolver resolver;
     private final TrialLimitService trialLimitService;
     private final JwtService jwtService;
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.fwdrobo.sirius.security.JobExecutionDefinitionService definitions;
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.fwdrobo.sirius.service.DatasetAccessService datasetAccess;
 
     public ContainerService(
             JobRunMapper repo,
@@ -84,6 +92,8 @@ public class ContainerService {
         this.objectMapper = objectMapper;
         this.containerProperties = containerProperties;
         this.tx = new TransactionTemplate(txManager);
+        this.stateTx=new TransactionTemplate(txManager);
+        this.stateTx.setPropagationBehavior(org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
         this.launcher = launcher;
         this.inspector = inspector;
         this.resolver = resolver;
@@ -93,14 +103,33 @@ public class ContainerService {
     /**
      * dockerHost: 选择哪台 docker daemon 来 run（GPU_01/CPU_02/LOCAL）
      */
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.fwdrobo.sirius.security.IndexJobAuthority indexAuthority;
+    @org.springframework.beans.factory.annotation.Autowired private com.fwdrobo.sirius.security.ControlledViewPreviewAuthority previews;
+
     @Transactional
     public JobRun runJob(UUID jobId, String token) throws Exception {
+        return launchJob(jobId, jwtService.parseClaims(token, JwtService.TokenType.ACCESS), null, null);
+    }
+
+    @Transactional
+    public JobRun runIndexJob(UUID jobId,Claims accessClaims,UUID dataset,UUID version,UUID index) throws Exception {
+        return launchJob(jobId,accessClaims,new com.fwdrobo.sirius.security.IndexJobAuthority.Coordinates(dataset,version,index),null);
+    }
+
+    @Transactional
+    public JobRun runControlledViewPreviewJob(UUID jobId,String token,UUID attempt) throws Exception {
+        return launchJob(jobId,jwtService.parseClaims(token,JwtService.TokenType.ACCESS),null,attempt);
+    }
+    private JobRun launchJob(UUID jobId,Claims accessClaims,com.fwdrobo.sirius.security.IndexJobAuthority.Coordinates indexCoordinates,UUID previewAttempt) throws Exception {
         UUID runId = UUID.randomUUID();
         UUID userId = SecurityUtils.getUserId();
         UUID orgId = SecurityUtils.getUserOrgId();
         if (orgId == null) {
             throw ExceptionUtils.notFound("当前用户未绑定组织，无法启动任务");
         }
+        definitions.lockJob(jobId);
+        if(indexCoordinates==null&&previewAttempt==null)definitions.preflightCurrentGeneric(jobId);
         Job job = jobService.getJobById(jobId);
         JsonNode params = job.getParams();
         String name = "jobId-" + jobId + "-runId-" + runId;
@@ -137,11 +166,24 @@ public class ContainerService {
             tx.executeWithoutResult(status -> repo.insert(jobRun));
 
             JsonParam jp = objectMapper.treeToValue(params, JsonParam.class);
-            Map<String, Object> envMap = jp.env;
-            parseRepos(job, envMap);
+            if(jp==null)jp=new JsonParam();
+            if(jp.env==null)jp.env=new java.util.HashMap<>();
+            Map<String,Object> envMap=jp.env;
+            for(String reserved:List.of("MM_INTERNAL_TOKEN","X_MM_INTERNAL_TOKEN","AUTHHEADER","HOST","JOB_ID","ARTIFACT_ID","COMMIT_ID","OUTPUT_ID","OUTPUT_COMMIT_ID","SCRIPT_URL","TEMPLATE_URL","UPLOAD_URL","FILES_URL","DOWNLOAD_URL","MDS_EXECUTION_DEFINITION_SHA256","MDS_ENTRYPOINT_SHA256","MDS_BOOTSTRAP_SHA256","MDS_VERIFIED_IMAGE_SHA256","MDS_JOB_IO_MANIFEST_SHA256","MDS_JOB_IO_MANIFEST"))envMap.remove(reserved);
+            envMap.put("BACKEND_BEARER_TOKEN","");
+            if(previewAttempt!=null){
+                var preview=previews.preflight(jobId,previewAttempt,accessClaims);
+                envMap.put("InputRepoId",preview.inputRepo().toString());envMap.put("InputCommitId",preview.inputCommit().toString());
+                envMap.put("OutputRepoId",preview.outputRepo().toString());envMap.put("OutputCommitId",preview.outputCommit().toString());
+                envMap.put("MDS_INPUT_REPO_ID",preview.inputRepo().toString());envMap.put("MDS_INPUT_COMMIT_ID",preview.inputCommit().toString());
+                envMap.put("MDS_OUTPUT_REPO_ID",preview.outputRepo().toString());envMap.put("MDS_OUTPUT_COMMIT_ID",preview.outputCommit().toString());
+                envMap.put("MDS_REQUIRED_IMAGE_SHA256",previews.imageSha());
+            }else parseRepos(job,envMap,indexCoordinates!=null);
+            envMap.remove("MM_INTERNAL_TOKEN");
+            envMap.remove("X_MM_INTERNAL_TOKEN");
             int timeoutSeconds = trialLimitService.currentRuntimeLimitSeconds();
             boolean formalOrg = isFormalOrgForCurrentUser();
-            String workerToken = token;
+            String workerToken;
             if (envMap.get("InputRepoId") != null && envMap.get("InputCommitId") != null
                     && envMap.get("OutputRepoId") != null && envMap.get("OutputCommitId") != null) {
                 Map<String, String> scope = new java.util.HashMap<>();
@@ -153,15 +195,28 @@ public class ContainerService {
                 Object previous = envMap.get("PREVIOUS_INDEX_COMMIT_ID");
                 if (previous != null && !previous.toString().isBlank()) {
                     UUID previousId = UUID.fromString(previous.toString());
-                    var previousCommit = artifactCommitService.getCommit(UUID.fromString(scope.get("outputRepoId")), previousId);
+                    com.fwdrobo.sirius.dto.artifact.ArtifactCommitResponse previousCommit;
+                    try(var purpose=datasetAccess.fixedOperation(indexCoordinates==null?"data.raw.download":"dataset.index.build",indexCoordinates==null?"GENERAL_READ":"VIEW_BUILD")){
+                        previousCommit=artifactCommitService.getCommit(UUID.fromString(scope.get("outputRepoId")),previousId);
+                    }
                     if (previousCommit.getCommitStatus() != com.fwdrobo.sirius.entity.artifact.CommitStatus.PUBLISHED) {
                         throw ExceptionUtils.badRequest("任务缓存必须来自已发布索引快照");
                     }
                     scope.put("previousIndexCommitId", previousId.toString());
                 }
-                var accessClaims = jwtService.parseClaims(token, JwtService.TokenType.ACCESS);
+                scope.put("parentSessionId", UUID.fromString(accessClaims.get("sid", String.class)).toString());
+                if(indexCoordinates!=null)indexAuthority.prepare(indexCoordinates,scope,accessClaims);
+                if(previewAttempt!=null)previews.prepare(jobId,previewAttempt,scope,accessClaims);
+                var definition=definitions.freeze(scope,accessClaims,timeoutSeconds,objectMapper.valueToTree(jp));
+                image=definition.image();cmdNode=definition.script();
+                if(!definition.ioManifestSha().isEmpty())envMap.put("MDS_JOB_IO_MANIFEST_SHA256",definition.ioManifestSha());
+                envMap.put("MDS_EXECUTION_DEFINITION_SHA256",definition.hash());
+                envMap.put("MDS_ENTRYPOINT_SHA256",definition.scriptSha());
+                envMap.put("MDS_BOOTSTRAP_SHA256",definition.bootstrapSha());
                 workerToken = jwtService.generateJobIoToken(accessClaims.getSubject(), jwtService.extractTokenVersion(accessClaims), scope, timeoutSeconds);
                 if (envMap.containsKey("BACKEND_BEARER_TOKEN")) envMap.put("BACKEND_BEARER_TOKEN", workerToken);
+            } else {
+                throw ExceptionUtils.badRequest("JOB_FROZEN_INPUT_OUTPUT_SCOPE_REQUIRED");
             }
             //同步组装 DockerArgs
             DockerArgs Args = DockerArgs.builder(
@@ -181,7 +236,17 @@ public class ContainerService {
             List<String> args = DockerRunArgsBuilder.build(runSpec);
             List<String> runArgs = Args.buildArgs(args);
             //异步启动（立刻返回，不阻塞HTTP）
-            launcher.launch(runId, volArgs, runArgs, dockerHostValue);
+            if(!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()
+                ||!org.springframework.transaction.support.TransactionSynchronizationManager.isSynchronizationActive())
+                throw new IllegalStateException("JOB_LAUNCH_TRANSACTION_REQUIRED");
+            List<String> frozenVolumes=List.copyOf(volArgs),frozenArguments=List.copyOf(runArgs);
+            org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                new org.springframework.transaction.support.TransactionSynchronization(){
+                    @Override public void afterCommit(){
+                        try{launcher.launch(runId,frozenVolumes,frozenArguments,dockerHostValue,workerToken);}
+                        catch(RuntimeException rejected){launcher.rejectBeforeDispatch(runId);}
+                    }
+                });
             return jobRun;
         } catch (Exception ex) {
             trialLimitService.releaseRunRuntimeQuota(orgId, reservation);
@@ -220,61 +285,56 @@ public class ContainerService {
     /**
      * dockerHost：要 stop/rm 的 daemon
      */
-    @Transactional
-    public JobRun stopJob(UUID runId, boolean purge) throws Exception {
-        JobRun jobRun = repo.selectByRunId(runId)
-                .orElseThrow(() -> ExceptionUtils.notFound("JobRun不存在"));
-
-        String dockerHost = resolver.resolve(jobRun.getDockerHost());
-        String containerStr = (jobRun.getContainerId() != null) ? jobRun.getContainerId() : jobRun.getContainerName();
-        ContainerStatus containerStatus;
-        try {
-            if (containerStr != null && !containerStr.isBlank()) {
-                if (purge) {
-                    dockerCli.exec(List.of("rm", "-f", containerStr), dockerHost);
-                    containerStatus = ContainerStatus.REMOVED;
-
-                    DockerCli.ExecResult vrm = dockerCli.exec(List.of("volume", "rm", "vol_" + runId), dockerHost);
-                    if (vrm.exitCode() != 0) {
-                        log.warn("volume rm failed runId={}, stderr={}", runId, vrm.stderr());
-                    }
-                    
-                    // TODO: 如果 purge，可以选择同时删除 MinIO 中的日志
-                    // minioService.removeObject("job/" + jobRun.getJobId() + "/" + runId + "/logs/");
-                } else {
-                    dockerCli.exec(List.of("stop", "-t", "10", containerStr), dockerHost);
-                    containerStatus = ContainerStatus.STOPPED;
-                }
-            } else {
-                containerStatus = ContainerStatus.UNKNOWN;
-            }
-        } catch (Exception ex) {
-            containerStatus = purge ? ContainerStatus.REMOVE_FAILED : ContainerStatus.STOP_FAILED;
+    public JobRun stopJob(UUID runId,boolean purge)throws Exception {
+        boolean[] noRuntime={false};
+        JobRun target=stateTx.execute(status->{
+            lockRunState(runId);
+            JobRun current=repo.selectByRunId(runId).orElseThrow(()->ExceptionUtils.notFound("JobRun不存在"));
+            if(current.getRunStatus()==RunStatus.QUEUED&&current.getContainerId()==null){
+                // Serialized with the launcher's QUEUED -> RUNNING claim.
+                current.setRunStatus(RunStatus.CANCELED);current.setContainerStatus(ContainerStatus.STOPPED);
+                current.setFinishedAt(OffsetDateTime.now());noRuntime[0]=true;
+            }else if(!terminalRun(current.getRunStatus()))current.setRunStatus(RunStatus.CANCELING);
+            current.setLastSeenAt(OffsetDateTime.now());repo.updateStatusAndTimes(current);
+            if(terminalRun(current.getRunStatus()))trialLimitService.releaseRunRuntimeQuotaIfNeeded(current);
+            return current;
+        });
+        if(noRuntime[0])return target;
+        String dockerHost=resolver.resolve(target.getDockerHost());
+        String container=target.getContainerId()!=null?target.getContainerId():target.getContainerName();
+        boolean confirmed=false;
+        if(container!=null&&!container.isBlank()){
+            try{
+                var result=dockerCli.exec(purge?List.of("rm","-f",container):List.of("stop","-t","10",container),dockerHost);
+                confirmed=result.exitCode()==0;
+                if(purge&&confirmed)dockerCli.exec(List.of("volume","rm","vol_"+runId),dockerHost);
+            }catch(Exception unavailable){log.warn("Task stop unconfirmed runId={}",runId);}
         }
-        
-        // 停止日志采集（在容器停止后）
-        // 给日志采集器 2 秒时间读取和上传容器停止前的最后日志
-        try {
-            if (logStreamer.isStreaming(runId)) {
-                Thread.sleep(2000);
-                logStreamer.stopStreaming(runId);
-                log.info("Stopped log streaming for runId={}", runId);
+        // Cancellation is already durable before external I/O or final log flush.
+        try{
+            if(logStreamer.isStreaming(runId)){Thread.sleep(2000);logStreamer.stopStreaming(runId);}
+        }catch(InterruptedException interrupted){Thread.currentThread().interrupt();logStreamer.stopStreaming(runId);}
+        final boolean stopped=confirmed;
+        return stateTx.execute(status->{
+            lockRunState(runId);
+            JobRun current=repo.selectByRunId(runId).orElseThrow(()->ExceptionUtils.notFound("JobRun不存在"));
+            current.setContainerStatus(stopped?(purge?ContainerStatus.REMOVED:ContainerStatus.STOPPED):
+                (purge?ContainerStatus.REMOVE_FAILED:ContainerStatus.STOP_FAILED));
+            if(current.getRunStatus()==RunStatus.CANCELING&&stopped){
+                current.setRunStatus(RunStatus.CANCELED);current.setFinishedAt(OffsetDateTime.now());
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.warn("Interrupted while waiting for final logs for runId={}", runId);
-            logStreamer.stopStreaming(runId);
-        } catch (Exception e) {
-            log.error("Failed to stop log streaming for runId={}", runId, e);
-        }
-
-        jobRun.setRunStatus(RunStatus.CANCELED);
-        jobRun.setContainerStatus(containerStatus);
-        jobRun.setFinishedAt(OffsetDateTime.now());
-        jobRun.setLastSeenAt(OffsetDateTime.now());
-        repo.updateStatusAndTimes(jobRun);
-        trialLimitService.releaseRunRuntimeQuotaIfNeeded(jobRun);
-        return jobRun;
+            if(!stopped)current.setErrorMessage("TASK_STOP_UNCONFIRMED");
+            current.setLastSeenAt(OffsetDateTime.now());repo.updateStatusAndTimes(current);
+            if(terminalRun(current.getRunStatus()))trialLimitService.releaseRunRuntimeQuotaIfNeeded(current);
+            return current;
+        });
+    }
+    private void lockRunState(UUID runId){
+        jdbc.execute("SELECT pg_advisory_xact_lock(805014630400001::bigint)");
+        jdbc.queryForList("SELECT run_id FROM job_run WHERE run_id=? FOR UPDATE",runId);
+    }
+    private static boolean terminalRun(RunStatus status){
+        return status==RunStatus.SUCCEEDED||status==RunStatus.FAILED||status==RunStatus.CANCELED;
     }
 
     /**
@@ -503,7 +563,7 @@ public class ContainerService {
     }
 
     //解析输入输出仓库ID
-    private void parseRepos(Job job, Map<String, Object> envMap) {
+    private void parseRepos(Job job,Map<String,Object> envMap,boolean typed) throws Exception {
         // Persist pins in the job so retries also read the immutable source snapshot.
         UUID pinnedRepoId = envMap.get("MDS_INPUT_REPO_ID") == null ? null
                 : UUID.fromString(envMap.get("MDS_INPUT_REPO_ID").toString());
@@ -522,9 +582,13 @@ public class ContainerService {
             if (pinnedRepoId != null && (inputList.size() != 1 || !pinnedRepoId.toString().equals(InputRepoId))) {
                 throw ExceptionUtils.badRequest("固定输入快照不属于任务输入仓库");
             }
-            var inputCommit = pinnedCommitId == null
-                    ? artifactCommitService.getHead(UUID.fromString(InputRepoId))
-                    : artifactCommitService.getCommit(pinnedRepoId, pinnedCommitId);
+            UUID declaredPin=definitions.declaredInputPin(job.getJobId(),UUID.fromString(InputRepoId));
+            if(declaredPin!=null&&pinnedCommitId!=null&&!declaredPin.equals(pinnedCommitId))throw ExceptionUtils.badRequest("JOB_INPUT_PIN_CONFLICT");
+            if(declaredPin!=null){pinnedRepoId=UUID.fromString(InputRepoId);pinnedCommitId=declaredPin;}
+            com.fwdrobo.sirius.dto.artifact.ArtifactCommitResponse inputCommit;
+            try(var operation=datasetAccess.fixedOperation(typed?"dataset.index.build":"data.raw.download",typed?"VIEW_BUILD":"GENERAL_READ")){
+                inputCommit=pinnedCommitId==null?artifactCommitService.getHead(UUID.fromString(InputRepoId)):artifactCommitService.getCommit(pinnedRepoId,pinnedCommitId);
+            }
             if (inputCommit.getCommitStatus() != com.fwdrobo.sirius.entity.artifact.CommitStatus.PUBLISHED) {
                 throw ExceptionUtils.badRequest("任务输入必须是已发布快照");
             }
@@ -537,10 +601,28 @@ public class ContainerService {
                     outputRepoIds, new TypeReference<List<String>>() {
                     });
             String OutputRepoId = outputList.get(0);
-            String OutputCommitId = artifactCommitService.getOrCreateDraft(UUID.fromString(OutputRepoId))
-                    .getCommitId().toString();
+            Object pinnedOutputRepo=envMap.get("MDS_OUTPUT_REPO_ID"),pinnedOutputCommit=envMap.get("MDS_OUTPUT_COMMIT_ID");
+            if((pinnedOutputRepo==null)!=(pinnedOutputCommit==null))
+                throw ExceptionUtils.badRequest("固定输出必须同时提供仓库和快照");
+            if(pinnedOutputRepo!=null&&(outputList.size()!=1||!OutputRepoId.equals(pinnedOutputRepo.toString())))
+                throw ExceptionUtils.badRequest("固定输出快照不属于任务输出仓库");
+            boolean indexOutput=typed||Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM mm_dataset WHERE index_repo_id=?)",Boolean.class,UUID.fromString(OutputRepoId)));
+            com.fwdrobo.sirius.dto.artifact.ArtifactCommitResponse outputCommit;
+            try(var operation=datasetAccess.fixedOperation(indexOutput?"dataset.index.build":"dataset.upload",indexOutput?"VIEW_BUILD":"GENERAL_READ")){
+                outputCommit=pinnedOutputCommit==null?artifactCommitService.getOrCreateDraft(UUID.fromString(OutputRepoId)):
+                    artifactCommitService.getCommit(UUID.fromString(OutputRepoId),UUID.fromString(pinnedOutputCommit.toString()));
+            }
+            if(outputCommit.getCommitStatus()!=com.fwdrobo.sirius.entity.artifact.CommitStatus.DRAFT)
+                throw ExceptionUtils.conflict("任务输出必须是当前草稿");
+            String OutputCommitId=outputCommit.getCommitId().toString();
             envMap.put("OutputRepoId", OutputRepoId);
             envMap.put("OutputCommitId", OutputCommitId);
+            if(!typed)for(String additional:outputList)if(!additional.equals(OutputRepoId)){
+                UUID outputRepo=UUID.fromString(additional);boolean index=Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM mm_dataset WHERE index_repo_id=?)",Boolean.class,outputRepo));
+                try(var operation=datasetAccess.fixedOperation(index?"dataset.index.build":"dataset.upload",index?"VIEW_BUILD":"GENERAL_READ")){
+                    var draft=artifactCommitService.getOrCreateDraft(outputRepo);if(draft.getCommitStatus()!=com.fwdrobo.sirius.entity.artifact.CommitStatus.DRAFT)throw ExceptionUtils.conflict("JOB_ALL_OUTPUTS_REQUIRE_FROZEN_DRAFTS");
+                }
+            }
         }
     }
 

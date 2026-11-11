@@ -4,7 +4,7 @@ from services.answer_lineage import Catalogue,LineageError,canonical,checksum,re
 from services.read_receipt import digest
 from services.user_input_evidence import is_user,has_user,verify as verify_user,verify_context,question_matches,citation_allowed
 
-VERSION='engineering-answer-lineage-2026-10-25.1'
+VERSION='engineering-answer-lineage-2026-11-08.2'
 CITATION=re.compile(r'\[来源\s*(\d+)\]')
 VISUAL_HEADER='图像观察（当前模型，语义尚未认证）：\n'
 
@@ -88,8 +88,39 @@ def _visual_links(sources,image_parts,trace,call,indices,question=None):
             'modelCallId':call['callId'],'modelRequestBodySha256':call['requestBodySha256']})
     return links
 
+def _visual_presentation(question,raw,sources,image_parts,trace,call,indices,*,prefix='',source_offset=0):
+    links=_visual_links(sources,image_parts,trace,call,indices,question)
+    mapping={old:new for new,old in enumerate(indices,source_offset+1)}
+    for link in links:
+        link['modelSourceIndex']=link['sourceIndex'];link['sourceIndex']=mapping[link['sourceIndex']]
+    text=CITATION.sub(lambda match:'[来源'+str(mapping[int(match[1])])+']',raw)
+    heading=prefix+VISUAL_HEADER
+    answer=heading+text
+    claim={'claimId':str(uuid.uuid5(uuid.NAMESPACE_URL,canonical([VERSION,text,links]))),
+        'text':text,'answerStart':len(heading),'answerEnd':len(answer),'offsetUnit':'unicode-code-points',
+        'sourceIndices':list(mapping.values()),'evidenceNature':'model_interpretation',
+        'verification':'actual-transmitted-image-binding-only-not-semantic-verification','kind':'visual_interpretation',
+        'factIds':[],'evidenceIds':[source.evidence_id for index,source in enumerate(sources,1) if index in indices],
+        'readIds':sorted({identifier for link in links for identifier in link['readIds']}),
+        'imageIds':[link['imageId'] for link in links],'inputLinks':links}
+    final_sources=[source.model_copy(update={'provenance':{**source.provenance,'modelSourceIndex':index,'finalSourceIndex':mapping[index],
+        'citationScopeCheck':'actual-image-input-binding-only'}}).model_dump(mode='json') for index,source in enumerate(sources,1) if index in indices]
+    return answer,claim,final_sources
+
+
+def _mixed_observation_has_no_property_echo(raw,properties):
+    from services.engineering_evidence_plan import _field_selected
+    # Bind the whole observation to its leading image citation. Attribute
+    # questions already have independently verified output in the field section.
+    if not CITATION.match(raw.lstrip()) or re.search(r'程序几何计算|几何计算所得|原始字段|\bmetadata\b',raw,re.I):
+        return False
+    fields={fact['field'] for source in properties for fact in source.evidence_bundle['facts']
+        if fact['factId'] in source.fact_ids}
+    return not any(_field_selected(field,raw) for field in fields)
+
+
 def finish(question,result,sources,image_parts,trace,output_check):
-    """Display verified fields, or label visual prose with its actual image links."""
+    """Keep exact property claims separate from observations linked to actual images."""
     call=_call(result,trace)
     mixed=has_user(sources)
     require(all((question_matches(source,question,True) if is_user(source) else source.provenance.get('validatedEngineeringQuestion')==question) for source in sources),'CLAIM_ENGINEERING_QUESTION_CHANGED')
@@ -97,6 +128,9 @@ def finish(question,result,sources,image_parts,trace,output_check):
         verify_context(sources,trace,call)
         for source in sources:
             if is_user(source):verify_user(source,question,trace,call,image_parts)
+    raw=result['choices'][0]['message']['content']
+    indices=sorted({int(value) for value in CITATION.findall(raw)})
+    visual_draft=bool(image_parts) and output_check.get('status')=='SCOPE_CHECKED'
     properties=[]
     for index,source in enumerate(sources,1):
         if source.provenance.get('engineeringReadVersion') and not source.provenance.get('engineeringVisualRead'):
@@ -116,25 +150,30 @@ def finish(question,result,sources,image_parts,trace,output_check):
             finalClaimCheck=check,modelInterpretationVerified=False,withheldRawInterpretation=True,
             verificationScope='Actual native property values, units, source nature and exact final spans; not physical metrology, complete question semantics or raw model prose.')
         trace.event('engineeringFieldPresentation',presentation)
+        # A combined native question can show a separate observation if every
+        # model citation is to an actual image and each image binding verifies.
+        if visual_draft and not mixed and indices and all(
+            1<=index<=len(sources) and sources[index-1].provenance.get('engineeringVisualRead') for index in indices
+        ) and _mixed_observation_has_no_property_echo(raw,properties):
+            try:
+                answer,claim,visual_sources=_visual_presentation(question,raw,sources,image_parts,trace,call,indices,
+                    prefix=presentation['answer']+'\n\n',source_offset=len(presentation['sources']))
+            except (ValueError,KeyError,TypeError) as error:
+                trace.event('engineeringMixedObservationWithheld',{'reason':str(error) if isinstance(error,LineageError) else type(error).__name__})
+            else:
+                combined={**presentation,'answer':answer,'claims':[*presentation['claims'],claim],
+                    'sources':[*presentation['sources'],*visual_sources],'generationStatus':'source_interpretation_unverified',
+                    'withheldRawInterpretation':False,
+                    'notice':'属性值和图像来源已核对。图像观察由模型生成，形状、数量及完整语义尚未认证。',
+                    'verificationScope':'Exact actual-input property spans and separately linked actual-image observation; no semantic correctness claim.'}
+                combined['sourceIndices']=[source['provenance']['modelSourceIndex'] for source in combined['sources']]
+                combined['propertyClaimCheck']=combined.pop('finalClaimCheck')
+                trace.event('engineeringMixedPresentation',combined)
+                return combined
         return presentation
-    require(image_parts and output_check.get('status')=='SCOPE_CHECKED','CLAIM_ENGINEERING_VISUAL_DRAFT_WITHHELD')
-    raw=result['choices'][0]['message']['content'];indices=sorted({int(value) for value in CITATION.findall(raw)})
+    require(visual_draft,'CLAIM_ENGINEERING_VISUAL_DRAFT_WITHHELD')
     require(indices and all(1<=index<=len(sources) for index in indices),'CLAIM_ENGINEERING_VISUAL_CITATION_CHANGED')
-    links=_visual_links(sources,image_parts,trace,call,indices,question)
-    mapping={old:new for new,old in enumerate(indices,1)}
-    for link in links:
-        link['modelSourceIndex']=link['sourceIndex'];link['sourceIndex']=mapping[link['sourceIndex']]
-    text=CITATION.sub(lambda match:'[来源'+str(mapping[int(match[1])])+']',raw)
-    answer=VISUAL_HEADER+text
-    claim={'claimId':str(uuid.uuid5(uuid.NAMESPACE_URL,canonical([VERSION,text,links]))),
-        'text':text,'answerStart':len(VISUAL_HEADER),'answerEnd':len(answer),'offsetUnit':'unicode-code-points',
-        'sourceIndices':list(range(1,len(indices)+1)),'evidenceNature':'model_interpretation',
-        'verification':'actual-transmitted-image-binding-only-not-semantic-verification','kind':'visual_interpretation',
-        'factIds':[],'evidenceIds':[source.evidence_id for index,source in enumerate(sources,1) if index in indices],
-        'readIds':sorted({identifier for link in links for identifier in link['readIds']}),
-        'imageIds':[link['imageId'] for link in links],'inputLinks':links}
-    final_sources=[source.model_copy(update={'provenance':{**source.provenance,'modelSourceIndex':index,'finalSourceIndex':mapping[index],
-        'citationScopeCheck':'actual-image-input-binding-only'}}).model_dump(mode='json') for index,source in enumerate(sources,1) if index in indices]
+    answer,claim,final_sources=_visual_presentation(question,raw,sources,image_parts,trace,call,indices)
     presentation={'version':VERSION,'answer':answer,'claims':[claim],'sourceIndices':indices,'sources':final_sources,
         'generationStatus':'source_interpretation_unverified','modelInterpretationVerified':False,
         'notice':'图像和来源映射已核对；以下为当前模型的图像解释，语义、形状及数量判断尚未认证。',

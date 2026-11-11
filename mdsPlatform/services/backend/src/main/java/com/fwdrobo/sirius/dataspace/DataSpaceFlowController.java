@@ -201,6 +201,9 @@ public class DataSpaceFlowController {
         return service.listContracts();
     }
 
+    @GetMapping("/contracts/options")
+    public Map<String,Object> contractOptions(@RequestParam java.util.UUID applicationId){return contracts.options(applicationId);}
+
     @PostMapping("/contracts")
     public Map<String, Object> createContract(@RequestBody Map<String, Object> body) {
         return contracts.create(body);

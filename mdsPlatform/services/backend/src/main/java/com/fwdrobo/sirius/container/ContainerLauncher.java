@@ -4,16 +4,15 @@ import com.fwdrobo.sirius.docker.service.DockerCli;
 import com.fwdrobo.sirius.entity.job.ContainerStatus;
 import com.fwdrobo.sirius.entity.job.JobRun;
 import com.fwdrobo.sirius.entity.job.RunStatus;
-import com.fwdrobo.sirius.mapper.JobMapper;
 import com.fwdrobo.sirius.mapper.JobRunMapper;
 import com.fwdrobo.sirius.service.TrialLimitService;
-import com.fwdrobo.sirius.util.ExceptionUtils;
+import com.fwdrobo.sirius.security.JobLaunchAuthority;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
-
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.UUID;
@@ -21,128 +20,83 @@ import java.util.UUID;
 @Slf4j
 @Service
 public class ContainerLauncher {
-
-    private final JobRunMapper repo;
-    private final DockerCli dockerCli;
-    private final TransactionTemplate tx;
-    private final ContainerInspector containerInspector;
-    private final ContainerLogStreamer logStreamer;
-    private final JobMapper jobMapper;
-    private final TrialLimitService trialLimitService;
-
-    public ContainerLauncher(
-            JobRunMapper repo,
-            DockerCli dockerCli,
-            PlatformTransactionManager txManager,
-            ContainerInspector containerInspector,
-            ContainerLogStreamer logStreamer,
-            JobMapper jobMapper,
-            TrialLimitService trialLimitService) {
-        this.repo = repo;
-        this.dockerCli = dockerCli;
-        this.tx = new TransactionTemplate(txManager);
-        this.containerInspector = containerInspector;
-        this.logStreamer = logStreamer;
-        this.jobMapper = jobMapper;
-        this.trialLimitService = trialLimitService;
+ @org.springframework.beans.factory.annotation.Autowired private JobExecutionWatchdog watchdog;
+ private final JobRunMapper repo;private final DockerCli dockerCli;
+ private final TransactionTemplate tx;private final ContainerInspector inspector;
+ private final ContainerLogStreamer logs;private final TrialLimitService quotas;private final JobLaunchAuthority authority;
+ public ContainerLauncher(JobRunMapper repo,DockerCli dockerCli,PlatformTransactionManager manager,
+   ContainerInspector inspector,ContainerLogStreamer logs,TrialLimitService quotas,JobLaunchAuthority authority){
+  this.repo=repo;this.dockerCli=dockerCli;this.inspector=inspector;this.logs=logs;this.quotas=quotas;this.authority=authority;
+  tx=new TransactionTemplate(manager);tx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+ }
+ /** Invoked only after the submitting transaction commits. */
+ @Async("jobLauncherExecutor")
+ public void launch(UUID runId,List<String> volumes,List<String> arguments,String host,String workerToken){
+  String created=null;
+  try{
+   boolean start=Boolean.TRUE.equals(tx.execute(status->{
+    JobRun current=authority.lockRun(runId,true);
+    if(current==null||current.getRunStatus()!=RunStatus.QUEUED)return false;
+    if(!authority.current(current,workerToken)){failLocked(current,"JOB_LAUNCH_AUTHORITY_REVOKED_OR_CHANGED");return false;}
+    current.setRunStatus(RunStatus.RUNNING);current.setLastSeenAt(OffsetDateTime.now());repo.updateStatusAndTimes(current);return true;
+   }));
+   if(!start)return;
+   // Neither authority locks nor a database transaction span resource allocation.
+   var result=dockerCli.exec(arguments,host);
+   if(result.exitCode()!=0){failRun(runId,"TASK_CREATE_FAILED");return;}
+   created=result.stdout().trim();
+   if(created.isBlank()||created.chars().anyMatch(Character::isWhitespace))throw new IllegalStateException("INVALID_CREATED_RUNTIME_ID");
+   final String container=created;
+   JobRun attached=tx.execute(status->{
+    JobRun current=authority.lockRun(runId,true);
+    if(current==null)return null;
+    current.setContainerId(container);current.setContainerStatus(ContainerStatus.CREATED);
+    if(!StatusMapper.isTerminalOrCanceling(current.getRunStatus())&&!authority.current(current,workerToken)){
+     current.setRunStatus(RunStatus.CANCELING);current.setErrorMessage("JOB_LAUNCH_AUTHORITY_REVOKED_OR_CHANGED");
     }
-    /**
-     * 异步启动容器：volume create + docker run + 写回containerId + inspect刷新
-     * dockerHost：本次容器应创建/运行/inspect/port 查询所在的 docker daemon
-     */
-    @Async("jobLauncherExecutor")
-    public void launch(UUID runId, List<String> volArgs, List<String> runArgs, String dockerHost) {
-        log.info("[launcher] launch begin runId={}, dockerHost={}", runId, dockerHost);
-
-        // 先把 runStatus 从 QUEUED 推进到 RUNNING（幂等）
-        tx.executeWithoutResult(status -> {
-            repo.selectByRunId(runId).ifPresent(jr -> {
-                if (jr.getRunStatus() == null || jr.getRunStatus() == RunStatus.QUEUED) {
-                    jr.setRunStatus(RunStatus.RUNNING);
-                    jr.setLastSeenAt(OffsetDateTime.now());
-                    repo.updateStatusAndTimes(jr);
-                }
-            });
-        });
-
-        try {
-            //todo 暂时注释掉，服务器上因为大量测试的job volume占用了很多资源
-//            DockerCli.ExecResult vr = dockerCli.exec(volArgs, dockerHost);
-//            if (vr.exitCode() != 0) {
-//                failRun(runId, "docker volume create failed: " + vr.stderr());
-//                return;
-//            }
-
-            //docker run（事务外）
-            log.info("[launcher] docker run: {}", String.join(" ", runArgs));
-            DockerCli.ExecResult rr = dockerCli.exec(runArgs, dockerHost);
-            if (rr.exitCode() != 0) {
-                failRun(runId, "docker run failed: " + rr.stderr());
-                return;
-            }
-
-            String containerId = rr.stdout().trim();
-            log.info("[launcher] docker run succeeded runId={}, containerId={}", runId, containerId);
-
-            //读出 jobRun（短事务）
-            JobRun jobRun = tx.execute(status ->
-                    repo.selectByRunId(runId)
-                            .orElseThrow(() -> ExceptionUtils.notFound("JobRun不存在, runId=" + runId))
-            );
-
-            //写回 containerId + containerStatus（短事务）
-            tx.executeWithoutResult(status -> {
-                jobRun.setContainerId(containerId);
-                jobRun.setContainerStatus(ContainerStatus.CREATED);
-                if (!StatusMapper.isTerminalOrCanceling(jobRun.getRunStatus())) {
-                    jobRun.setRunStatus(RunStatus.RUNNING);
-                }
-                jobRun.setLastSeenAt(OffsetDateTime.now());
-                repo.updateContainerByRunId(jobRun);
-            });
-
-            //启动日志流采集（注意：如果 logStreamer 内部会 docker logs/follow，也需要支持 dockerHost）
-            try {
-                logStreamer.startStreaming(runId, jobRun.getJobId(), containerId, dockerHost);
-                log.info("[launcher] started log streaming for runId={}", runId);
-            } catch (Exception ex) {
-                log.warn("[launcher] failed to start log streaming for runId={}, err={}", runId, ex.getMessage());
-            }
-
-            //inspect 刷新
-            try {
-                containerInspector.refreshByRunId(runId, containerId, dockerHost);
-            } catch (Exception ex) {
-                log.warn("[launcher] refreshFromInspect failed runId={}, err={}", runId, ex.getMessage());
-            }
-
-            log.info("[launcher] launch done runId={}", runId);
-        } catch (Exception ex) {
-            log.error("[launcher] unexpected error runId={}", runId, ex);
-            failRun(runId, "launcher error: " + ex.getMessage());
-        }
-    }
-
-    private void failRun(UUID runId, String msg) {
-        log.warn("[launcher] fail runId={}, msg={}", runId, msg);
-        tx.executeWithoutResult(status -> {
-            repo.selectByRunId(runId).ifPresent(jr -> {
-                if (jr.getRunStatus() == RunStatus.CANCELING || jr.getRunStatus() == RunStatus.CANCELED) {
-                    jr.setErrorMessage(msg);
-                    jr.setLastSeenAt(OffsetDateTime.now());
-                    repo.updateContainerByRunId(jr);
-                    trialLimitService.releaseRunRuntimeQuotaIfNeeded(jr);
-                    return;
-                }
-                jr.setRunStatus(RunStatus.FAILED);
-                jr.setContainerStatus(ContainerStatus.FAILED);
-                jr.setErrorMessage(msg);
-                jr.setFinishedAt(OffsetDateTime.now());
-                jr.setLastSeenAt(OffsetDateTime.now());
-                repo.updateContainerByRunId(jr);
-                trialLimitService.releaseRunRuntimeQuotaIfNeeded(jr);
-            });
-        });
-    }
-
+    current.setLastSeenAt(OffsetDateTime.now());repo.updateContainerByRunId(current);return current;
+   });
+   if(attached==null||StatusMapper.isTerminalOrCanceling(attached.getRunStatus())){
+    stopCreatedRuntime(runId,container,host);return;
+   }
+   watchdog.track(attached,host);
+   try{logs.startStreaming(runId,attached.getJobId(),container,host);}
+   catch(Exception unavailable){log.warn("Task log streaming unavailable runId={}",runId);}
+   inspector.refreshByRunId(runId,container,host);
+  }catch(Exception unavailable){
+   // An allocated runtime is always addressed by the exact ID returned above.
+   if(created!=null&&!created.isBlank())stopCreatedRuntime(runId,created,host);
+   else failRun(runId,"TASK_LAUNCH_FAILED");
+  }
+ }
+ public void rejectBeforeDispatch(UUID runId){failRun(runId,"TASK_DISPATCH_REJECTED");}
+ private void stopCreatedRuntime(UUID runId,String container,String host){
+  boolean stopped=false;
+  try{stopped=dockerCli.exec(List.of("stop","-t","10",container),host).exitCode()==0;}
+  catch(Exception unavailable){log.warn("Late task stop unconfirmed runId={}",runId);}
+  final boolean confirmed=stopped;
+  tx.executeWithoutResult(status->{
+   JobRun current=authority.lockRun(runId,false);if(current==null)return;
+   current.setContainerId(container);
+   current.setContainerStatus(confirmed?ContainerStatus.STOPPED:ContainerStatus.STOP_FAILED);
+   if(!terminal(current.getRunStatus())){
+    current.setRunStatus(confirmed?RunStatus.CANCELED:RunStatus.CANCELING);
+    if(confirmed)current.setFinishedAt(OffsetDateTime.now());
+   }
+   current.setLastSeenAt(OffsetDateTime.now());repo.updateContainerByRunId(current);
+   if(terminal(current.getRunStatus()))quotas.releaseRunRuntimeQuotaIfNeeded(current);
+  });
+ }
+ private static boolean terminal(RunStatus status){return status==RunStatus.SUCCEEDED||status==RunStatus.FAILED||status==RunStatus.CANCELED;}
+ private void failLocked(JobRun current,String code){
+  if(terminal(current.getRunStatus()))return;
+  // A canceled in-progress allocation still needs its eventual runtime ID.
+  if(current.getRunStatus()==RunStatus.CANCELING)return;
+  current.setRunStatus(RunStatus.FAILED);current.setContainerStatus(ContainerStatus.FAILED);
+  current.setErrorMessage(code);current.setFinishedAt(OffsetDateTime.now());current.setLastSeenAt(OffsetDateTime.now());
+  repo.updateStatusAndTimes(current);quotas.releaseRunRuntimeQuotaIfNeeded(current);
+ }
+ private void failRun(UUID runId,String code){
+  tx.executeWithoutResult(status->{JobRun current=authority.lockRun(runId,false);if(current!=null)failLocked(current,code);});
+ }
 }

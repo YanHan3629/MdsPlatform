@@ -2,7 +2,9 @@
 import hashlib,re,uuid
 from decimal import Decimal,InvalidOperation
 from services.answer_lineage import LineageError,require,canonical,same,value_type
-from services.record_evidence_plan import VERSION,SUPPORTED_READ_VERSIONS,MAX_ROWS,MAX_SOURCES,same_key
+from services.record_evidence_plan import (
+    VERSION,CSV_SET_VERSION,CSV_SET_RECORD_TYPE_FIELD,SUPPORTED_READ_VERSIONS,MAX_ROWS,MAX_SOURCES,same_key,
+)
 from services.read_receipt import verify,digest
 COMPARISON_VERSION='native-record-declared-value-equality-2026-10-26.1'
 IDENTIFIER_COMPARISON_VERSION='native-record-identifier-string-equality-2026-10-26.1'
@@ -30,15 +32,33 @@ def validate_source(source):
     fields=provenance.get('requestedRecordFields',[]);paths=provenance.get('requiredRelationSourcePaths',[])
     require(isinstance(fields,list) and 1<=len(fields)<=4 and len(set(fields))==len(fields),'CLAIM_RECORD_FIELDS_INVALID')
     require(set(selector)=={'field','sourceType','value'} and selector['sourceType'] in {'string','number','boolean','null'},'CLAIM_RECORD_SELECTOR_INVALID')
-    require(isinstance(paths,list) and 2<=len(paths)<=MAX_SOURCES and len(set(paths))==len(paths) and identity.get('logicalPath') in paths,'CLAIM_RECORD_REQUIRED_SOURCES_INVALID')
+    mode=provenance.get('recordLookupMode');set_mode=mode=='SINGLE_EXPLICIT_CSV_SET';single=set_mode or mode in {'SINGLE_EXPLICIT_XLSX','SINGLE_EXPLICIT_CSV'}
+    require((provenance.get('recordReadVersion')==CSV_SET_VERSION)==set_mode,'CLAIM_CSV_RECORD_SET_CONTRACT_INVALID')
+    if single:
+        from services.record_evidence_plan import explicit_key_binding
+        expected_format='XLSX' if mode=='SINGLE_EXPLICIT_XLSX' else 'CSV'
+        versions={CSV_SET_VERSION} if set_mode else {VERSION,'native-record-lookup-2026-11-05.7'} if expected_format=='XLSX' else {VERSION}
+        expected_method='explicit-single-csv-set-key' if set_mode else 'explicit-single-xlsx-key' if expected_format=='XLSX' else 'explicit-single-csv-key'
+        require(provenance.get('recordReadVersion') in versions
+            and identity.get('originalFormat')==expected_format
+            and provenance.get('sourceDiscovery',{}).get('method')==expected_method
+            and explicit_key_binding(provenance.get('validatedRecordQuestion',''),selector),
+            'CLAIM_RECORD_SINGLE_SOURCE_CONTRACT_INVALID')
+    require(isinstance(paths,list) and (len(paths)==1 if single else 2<=len(paths)<=MAX_SOURCES)
+        and len(set(paths))==len(paths) and identity.get('logicalPath') in paths,'CLAIM_RECORD_REQUIRED_SOURCES_INVALID')
     require(identity.get('logicalPath')==provenance.get('explicitSourcePath'),'CLAIM_RECORD_SOURCE_PATH_CHANGED')
-    requested=list(dict.fromkeys([selector['field'],*fields]));rows=bundle.get('content',{}).get('records',[]);coverage=bundle.get('coverage',{})
+    scan_fields=list(dict.fromkeys([selector['field'],*fields]))
+    type_field=provenance.get('recordSetTypeField')
+    require(type_field is None or (set_mode and type_field==CSV_SET_RECORD_TYPE_FIELD and type_field not in scan_fields),
+        'CLAIM_CSV_RECORD_SET_TYPE_FIELD_INVALID')
+    requested=[*scan_fields,type_field] if type_field else scan_fields
+    rows=bundle.get('content',{}).get('records',[]);coverage=bundle.get('coverage',{})
     require(operation.get('operation')=='read_table' and operation.get('tableId')==provenance.get('recordTableId')==bundle.get('content',{}).get('tableId'),'CLAIM_RECORD_TABLE_MISMATCH')
     require(operation.get('fields')==requested and operation.get('limit')==1 and operation.get('rowStart')==operation.get('rowEnd'),'CLAIM_RECORD_POINT_REQUEST_INVALID')
     require(len(rows)==coverage.get('returnedRowCount')==1 and coverage.get('requestedRangeComplete') and not coverage.get('hasMore') and not coverage.get('truncated'),'CLAIM_RECORD_POINT_INCOMPLETE')
     row=rows[0];number=row.get('rawRow');require(type(number) is int and number==operation['rowStart'],'CLAIM_RECORD_POINT_ROW_MISMATCH')
     require(selector['field'] in row.get('values',{}) and same_key(row['values'][selector['field']],selector),'CLAIM_RECORD_POINT_KEY_MISMATCH')
-    require(all(field in row['values'] for field in fields),'CLAIM_RECORD_FIELD_ABSENT')
+    require(all(field in row['values'] for field in requested),'CLAIM_RECORD_FIELD_ABSENT')
     facts=bundle.get('facts',[]);by_field={fact['field']:fact for fact in facts}
     require(len(by_field)==len(facts) and set(by_field)==set(requested),'CLAIM_RECORD_POINT_FACTS_INVALID')
     for field,fact in by_field.items():
@@ -55,7 +75,7 @@ def validate_source(source):
     for index,scan in enumerate(scans):
         receipt=verify(scan);scan_request=receipt['operation'];read_ids.append(scan['readId']);receipts.append(digest(receipt))
         require(same(scan.get('identity'),identity),'CLAIM_RECORD_SCAN_SOURCE_MISMATCH')
-        require(scan_request=={'operation':'read_table','tableId':operation['tableId'],'rowStart':start,'rowEnd':2147483647,'fields':requested,'limit':32},'CLAIM_RECORD_SCAN_REQUEST_CHANGED')
+        require(scan_request=={'operation':'read_table','tableId':operation['tableId'],'rowStart':start,'rowEnd':2147483647,'fields':scan_fields,'limit':32},'CLAIM_RECORD_SCAN_REQUEST_CHANGED')
         scan_rows=scan.get('content',{}).get('records',[]);scan_coverage=scan.get('coverage',{})
         require(scan.get('content',{}).get('tableId')==operation['tableId'] and scan_coverage.get('totalRowCount')==total and scan_coverage.get('returnedRowCount')==len(scan_rows),'CLAIM_RECORD_SCAN_COVERAGE_MISMATCH')
         for record in scan_rows:
@@ -70,9 +90,22 @@ def validate_source(source):
         else:
             require(scan_rows and scan_coverage.get('hasMore') and scan_coverage.get('truncated'),'CLAIM_RECORD_SCAN_CONTINUATION_INVALID')
             start=scan_coverage.get('nextRow');require(type(start) is int and start>scan_rows[-1]['rawRow'],'CLAIM_RECORD_SCAN_CONTINUATION_INVALID')
-    require(len(seen)==total and len(matches)==1,'CLAIM_RECORD_KEY_NOT_PROVEN_UNIQUE')
-    require(matches[0]['rawRow']==number and same(matches[0]['values'],row['values']),'CLAIM_RECORD_SCAN_AND_POINT_DISAGREE')
-    return {'selector':selector,'requestedFields':fields,'keyFactId':by_field[selector['field']]['factId'],'scanReceiptSha256s':receipts,'scanReadIds':read_ids,'requiredSourcePaths':paths}
+    require(len(seen)==total,'CLAIM_RECORD_SCAN_INCOMPLETE')
+    if set_mode:
+        declared=provenance.get('recordSetRows')
+        require(2<=len(matches)<=MAX_SOURCES and isinstance(declared,list)
+            and all(type(value) is int for value in declared)
+            and declared==sorted(record['rawRow'] for record in matches)
+            and len(set(declared))==len(declared),'CLAIM_CSV_RECORD_SET_ROWS_INVALID')
+        point=[record for record in matches if record['rawRow']==number]
+        scan_values={field:row['values'][field] for field in scan_fields}
+        require(len(point)==1 and same(point[0]['values'],scan_values),'CLAIM_RECORD_SCAN_AND_POINT_DISAGREE')
+    else:
+        require(len(matches)==1,'CLAIM_RECORD_KEY_NOT_PROVEN_UNIQUE')
+        require(matches[0]['rawRow']==number and same(matches[0]['values'],row['values']),'CLAIM_RECORD_SCAN_AND_POINT_DISAGREE')
+    return {'selector':selector,'requestedFields':fields,'keyFactId':by_field[selector['field']]['factId'],
+        'typeFactId':by_field[type_field]['factId'] if type_field else None,
+        'scanReceiptSha256s':receipts,'scanReadIds':read_ids,'requiredSourcePaths':paths}
 
 def view(source,fact,validated):
     return {**validated,'selectable':fact['field'] in validated['requestedFields'],'sourcePath':source['logical_path']}
@@ -83,7 +116,17 @@ def bindings(source,node,facts):
     require(anchor['locator'].get('sheet')==node['locator'].get('sheet') and anchor['locator'].get('jsonlLine')==node['locator'].get('jsonlLine'),'CLAIM_RECORD_ANCHOR_SCOPE_MISMATCH')
     if node['identity']['originalFormat'] in {'JSON','JSONL'}:
         require(anchor['locator'].get('jsonPointer','').rsplit('/',1)[0]==node['locator'].get('jsonPointer','').rsplit('/',1)[0],'CLAIM_RECORD_ANCHOR_ARRAY_MISMATCH')
-    return {meta['selector']['field']:anchor['value']},[anchor['factId']] if anchor['factId']!=node['factId'] else []
+    values={meta['selector']['field']:anchor['value']}
+    references=[anchor['factId']]
+    if meta['typeFactId']:
+        record_type=facts.get(meta['typeFactId'])
+        require(record_type is not None and record_type['field']==CSV_SET_RECORD_TYPE_FIELD
+            and same(record_type['identity'],node['identity'])
+            and record_type['locator'].get('rawRow')==node['locator'].get('rawRow'),
+            'CLAIM_CSV_RECORD_SET_TYPE_ANCHOR_UNAVAILABLE')
+        values[CSV_SET_RECORD_TYPE_FIELD]=record_type['value']
+        references.append(record_type['factId'])
+    return values,[identifier for identifier in references if identifier!=node['factId']]
 
 def comparison_pairs(nodes):
     grouped={}
@@ -115,7 +158,21 @@ def preflight(catalogue,question):
     sources=[source for source in catalogue.sources if source.get('provenance',{}).get('recordReadVersion')]
     if not sources:return
     require(len(sources)==len(catalogue.sources),'CLAIM_RECORD_MIXED_CONTRACT_UNSUPPORTED')
-    actual=sorted(source['logical_path'] for source in sources)
+    record_sets=[source for source in sources if source['provenance'].get('recordLookupMode')=='SINGLE_EXPLICIT_CSV_SET']
+    if record_sets:
+        require(len(record_sets)==len(sources),'CLAIM_CSV_RECORD_SET_MIXED_SOURCES')
+        signatures=[];points=[]
+        for source in record_sets:
+            provenance=source['provenance'];bundle=source['evidence_bundle']
+            signatures.append(canonical({'identity':bundle['identity'],'selector':provenance['recordSelector'],
+                'tableId':provenance['recordTableId'],'fields':provenance['requestedRecordFields'],
+                'typeField':provenance.get('recordSetTypeField'),'rows':provenance['recordSetRows']}))
+            points.append(provenance['nativeReadOperation']['rowStart'])
+        require(len(set(signatures))==1,'CLAIM_CSV_RECORD_SET_GROUP_MISMATCH')
+        require(2<=len(points)<=MAX_SOURCES and len(set(points))==len(points)
+            and sorted(points)==record_sets[0]['provenance']['recordSetRows'],'CLAIM_CSV_RECORD_SET_MEMBER_ABSENT_OR_DUPLICATE')
+        actual=sorted({source['logical_path'] for source in sources})
+    else:actual=sorted(source['logical_path'] for source in sources)
     for source in sources:
         provenance=source['provenance']
         require(provenance.get('validatedRecordQuestion')==question,'CLAIM_RECORD_QUESTION_CHANGED')

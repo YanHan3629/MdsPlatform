@@ -32,7 +32,6 @@ public class RoleController {
     }
 
     @PostMapping
-    @PreAuthorize("hasRole('SUPER_ADMIN')")
     public Map<String, Object> create(@RequestBody RoleReq req) {
         UUID roleId = roleService.create(req);
         return Map.of("message", "role创建成功",
@@ -40,7 +39,6 @@ public class RoleController {
     }
 
     @PatchMapping("/{roleId}")
-    @PreAuthorize("hasRole('SUPER_ADMIN')")
     public Map<String, Object> update(@PathVariable UUID roleId, @RequestBody RoleReq req) {
         roleService.update(roleId, req);
         return Map.of("message", "role修改成功",
@@ -48,9 +46,11 @@ public class RoleController {
     }
 
     @DeleteMapping("/{roleId}")
-    @PreAuthorize("hasRole('SUPER_ADMIN')")
-    public Map<String, Object> delete(@PathVariable UUID roleId) {
-        roleService.delete(roleId);
+    public Map<String, Object> delete(@PathVariable UUID roleId,
+            @RequestHeader(value="If-Match",required=false) Long version,
+            @RequestParam(required=false) UUID replacementTypeId,
+            @RequestParam(required=false) Long replacementTypeVersion) {
+        roleService.delete(roleId,version,replacementTypeId,replacementTypeVersion);
         return Map.of("message", "role删除成功",
                 "roleId", roleId);
     }
@@ -61,8 +61,9 @@ public class RoleController {
     }
 
     @PutMapping("/{roleId}/permissions")
-    public void setRolePermissions(@PathVariable UUID roleId, @RequestBody List<UUID> permissionIds) {
-        roleService.setRolePermissions(roleId, permissionIds);
+    public void setRolePermissions(@PathVariable UUID roleId, @RequestBody List<UUID> permissionIds,
+            @RequestHeader(value="If-Match",required=false) Long version) {
+        roleService.setRolePermissions(roleId, permissionIds,version);
     }
 
     @GetMapping("/{roleId}/permissions/tree")
@@ -70,4 +71,8 @@ public class RoleController {
         return roleService.getRolePermissionTree(roleId);
     }
 
+
+    @PostMapping("/{roleId}/impact") public Object impact(@PathVariable UUID roleId,@RequestBody RoleReq req){return roleService.previewUpdate(roleId,req);}
+    @PostMapping("/{roleId}/permissions/impact") public Object permissionsImpact(@PathVariable UUID roleId,@RequestBody List<UUID> permissionIds,@RequestHeader(value="If-Match",required=false) Long version){return roleService.previewPermissions(roleId,permissionIds,version);}
+    @PostMapping("/{roleId}/delete-impact") public Object deleteImpact(@PathVariable UUID roleId,@RequestHeader(value="If-Match",required=false) Long version,@RequestParam(required=false) UUID replacementTypeId,@RequestParam(required=false) Long replacementTypeVersion){return roleService.previewDelete(roleId,version,replacementTypeId,replacementTypeVersion);}
 }

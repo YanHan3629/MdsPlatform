@@ -8,7 +8,7 @@ import re
 from services.text_evidence_plan import IDENTIFIER,merge,validate_group,residual,literal
 from services.text_temporal_literals import check as temporal_check
 
-VERSION='txt-literal-output-scope-2026-10-24.3'
+VERSION='txt-literal-output-scope-2026-11-08.1'
 REFERENCE=re.compile(r'\[来源(?:编号)?\s*[:：]?\s*([^\]\s]+)\s*\]')
 UNITS=re.compile(r'(?<![A-Za-z0-9_.])[-+]?\d+(?:\.\d+)?\s*(套|台|件|个|箱|组|包|盒|扇|块)(?![A-Za-z])')
 
@@ -48,14 +48,20 @@ def validate(question,answer,sources,*,truncated=False):
         return result
     answer=REFERENCE.sub(reference,answer)
     technical=[]
-    # Remove only a known read/fact alias at a provenance-only line prefix;
-    # keep all business text and the visible source number unchanged.
+    # Remove a known provenance prefix and a following range only when the
+    # range exactly matches the actual context for that source.
     def technical_prefix(match):
         identifier=match[2]
         if identifier not in mapping:unknown.append(identifier);return match[0]
+        if match[3]:
+            lines=sources[mapping[identifier]-1].model_context.splitlines()
+            if len(lines)<2 or not lines[0].startswith('读取事实 ') or match[3]!=lines[1]:
+                reasons.append('TXT_READ_RANGE_NOT_IN_ACTUAL_SOURCE');return match[0]
         technical.append({'original':match[0],'knownReadAlias':identifier})
         return match[1].rstrip()+('\n' if '\n' in match[0] else ' ')
-    answer=re.sub(r'(?m)^(\s*(?:\[来源\d+\]\s*)?)读取事实\s+([A-Za-z0-9][A-Za-z0-9-]{6,80})(?:\s*中)?\s*[，:：]?\s*',technical_prefix,answer)
+    answer=re.sub(r'(?m)^([ \t]*(?:\[来源\d+\][ \t]*)?)(?:TXT[ \t]+)?读取事实[ \t]+'
+        r'([A-Za-z0-9][A-Za-z0-9-]{6,80})(?:[ \t]*中)?[ \t]*[，:：]?[ \t]*'
+        r'(?:\r?\n(原文字符区间[^\r\n]{1,100}))?(?:\r?\n)?',technical_prefix,answer)
     cited={int(value) for value in re.findall(r'\[来源(\d+)\]',answer)}
     if truncated:reasons.append('TXT_OUTPUT_LIMIT')
     if unknown:reasons.append('TXT_UNKNOWN_SOURCE_REFERENCE')

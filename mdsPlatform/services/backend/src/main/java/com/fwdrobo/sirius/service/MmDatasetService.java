@@ -70,6 +70,7 @@ public class MmDatasetService {
         dataset.setStatus("ACTIVE");
         dataset.setMeta(JsonbTypeHandler.toJsonNode(Map.of()));
         mmDatasetMapper.insert(dataset);
+        access.establishCreatorCustody(dataset.getDatasetId());
         return toResp(dataset);
     }
 
@@ -100,10 +101,16 @@ public class MmDatasetService {
         mmSpaceService.getSpaceOrNotFound(spaceId);
         int pageOrDefault = page == null ? 1 : page;
         int sizeOrDefault = size == null ? 20 : size;
-        int offset = (pageOrDefault - 1) * sizeOrDefault;
-        long total = mmDatasetMapper.countBySpaceId(spaceId);
+        if (pageOrDefault < 1 || sizeOrDefault < 1) {
+            throw ExceptionUtils.badRequest("分页范围无效");
+        }
+        long offset = (pageOrDefault - 1L) * sizeOrDefault;
+        List<MmDataset> visible = mmDatasetMapper.selectBySpaceId(spaceId).stream()
+                .filter(dataset -> access.canReadVersion(dataset.getDatasetId(), null, null))
+                .toList();
+        long total = visible.size();
         int totalPages = total == 0 ? 0 : (int) ((total + sizeOrDefault - 1) / sizeOrDefault);
-        List<MmDatasetResp> items = mmDatasetMapper.selectBySpaceId(spaceId, sizeOrDefault, offset).stream().map(this::toResp).toList();
+        List<MmDatasetResp> items = visible.stream().skip(offset).limit(sizeOrDefault).map(this::toResp).toList();
         return new PageRes<>(total, totalPages, pageOrDefault, sizeOrDefault, items);
     }
 

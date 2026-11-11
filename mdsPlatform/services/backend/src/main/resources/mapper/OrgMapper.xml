@@ -10,6 +10,7 @@
         <result column="org_name" property="orgName"/>
         <result column="org_status" property="orgStatus" javaType="java.lang.Integer"/>
         <result column="license_type" property="licenseType"/>
+        <result column="permission_version" property="permissionVersion" javaType="java.lang.Long"/>
         <result column="created_at" property="createdAt" javaType="java.time.OffsetDateTime"/>
         <result column="created_by" property="createdBy" javaType="java.util.UUID"/>
         <result column="updated_at" property="updatedAt" javaType="java.time.OffsetDateTime"/>
@@ -17,7 +18,7 @@
     </resultMap>
 
     <sql id="BaseColumns">
-        org_id, org_name, org_status, license_type, created_at, created_by, updated_at, updated_by
+        org_id, org_name, org_status, license_type, permission_version, created_at, created_by, updated_at, updated_by
     </sql>
 
 

@@ -44,10 +44,10 @@ function shanghaiTime(value){if(!/^\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d)?$/.test(va
 async function load(showToast = false) {
   if(state.loading&&!showToast)return;
   const sequence=++state.loadSequence;
-  if(!window.dataSpaceSession?.authenticated){state.snapshot=null;state.products=[];renderAll();$('#health').textContent='请登录数据空间';return;}
+  if(!window.dataSpaceSession?.authenticated||!window.dataSpaceSession.has('data.catalog.read')){state.snapshot=null;state.products=[];renderAll();$('#health').textContent=window.dataSpaceSession?.authenticated?'当前账号无目录操作权限':'请登录数据空间';return;}
   try {
     state.loading=true;
-    const [snapshot,endpoints]=await Promise.all([api('/snapshot'),api('/receiver-endpoints')]);if(sequence!==state.loadSequence)return;
+    const [snapshot,endpoints]=await Promise.all([api('/snapshot'),window.dataSpaceSession.has('delivery.endpoint.manage')?api('/receiver-endpoints'):Promise.resolve([])]);if(sequence!==state.loadSequence)return;
     snapshot.receiverEndpoints=endpoints;
     state.snapshot=snapshot;
     window.dataSpaceSession.updateIndexingTasks(snapshot.tasks||[]);
@@ -205,16 +205,20 @@ function renderCatalogTable() {
     const stt = x.status || x.governanceStatus || '-';
     return `<tr><td><b>${esc(name)}</b><p>${esc(x.kind)} · ${esc(x.versionName||'')} · ${esc(x.catalogId || x.datasetId)}</p></td><td><span class="pill">${esc(x.businessName || '待补充')}</span></td><td>${esc(source.sourceName || '待关联目录')}</td><td><span class="pill">${esc(x.modalityType||'见实际数据集')}</span><p>${esc((x.formats||[]).join(' / '))}</p></td><td>${sample}<p>业务记录未统计</p></td><td>${quality}</td><td>${esc(idx)}</td><td>${status(stt)}<p>${x.kind==='数据集'?esc(x.productStatus==='PUBLISHED'?'存在已发布产品':'产品未发布'):''}</p></td></tr>`;
   }).join('') || '<tr><td colspan="8"><div class="empty">暂无匹配目录或数据集</div></td></tr>';
-  $$('[data-quality]').forEach(b=>b.onclick=()=>showQuality(b.dataset.quality).catch(e=>toast(e.message)));
+  $$('[data-quality]').forEach(b=>b.onclick=()=>showQuality(b.dataset.quality).catch(e=>{if(e.name!=='AbortError')toast(e.message);}));
 }
 
 async function showQuality(id) {
+  const session=window.dataSpaceSession,revision=session.revision;
   const report=await api(`/quality/${encodeURIComponent(id)}`);
-  if(!window.dataSpaceSession.authenticated)return;
+  if(revision!==session.revision)return;
   const coverage=report.coverage||{};
   $('#qualityReport').innerHTML=`<p><b>${esc(report.status)} · ${esc(report.jobStatus)}</b> · 任务 ${esc(report.reportId)}</p><p>版本 ${esc(report.versionId)} · 规则 ${esc(report.rulesVersion)}</p><p>已测断言 ${esc(report.measuredCount)}，通过 ${esc(report.passedCount)}，关键阻断 ${esc(report.blockingCount)}，未评估规则范围 ${esc(coverage.unassessedRuleScopes??'尚未完成')}。</p><p>${esc(coverage.formula||'后台正在读取真实快照')}</p>${report.error?`<p>${esc(report.error)}</p>`:''}<button class="btn" id="qualityRefresh">刷新报告</button> <button class="btn" id="qualityDownload">下载完整 JSON 报告</button><details><summary>问题定位（前 100 项）</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(JSON.stringify((report.checks||[]).filter(c=>c.status!=='PASS'&&c.status!=='NOT_APPLICABLE').slice(0,100),null,2))}</pre></details>`;
-  $('#qualityRefresh').onclick=()=>showQuality(id).catch(e=>toast(e.message));
-  $('#qualityDownload').onclick=()=>{const url=URL.createObjectURL(new Blob([JSON.stringify(report,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=`quality-${id}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+  $('#qualityRefresh').onclick=()=>showQuality(id).catch(e=>{if(e.name!=='AbortError')toast(e.message);});
+  $('#qualityDownload').onclick=event=>{
+    if(revision!==session.revision||!event.currentTarget.isConnected)return;
+    session.saveBusinessBlob(new Blob([JSON.stringify(report,null,2)],{type:'application/json'}),`quality-${id}.json`);
+  };
   location.hash='#provider';
 }
 
@@ -242,32 +246,51 @@ function renderProducts(products) {
 }
 
 function renderApplications(){
-  const rows=state.snapshot?.intents||[],signature=JSON.stringify(rows);
+  const session=window.dataSpaceSession;
+  const rows=state.snapshot?.intents||[],canReview=session.has('application.review');
+  const canRead=canReview||session.has('application.submit')||session.has('contract.edit');
+  const signature=JSON.stringify([canRead,canReview,rows]);
   if(signature===state.applicationSignature)return;state.applicationSignature=signature;
+  if(!canRead){$('#applications').innerHTML='<div class="empty">当前账号无消费申请查看权限。</div>';return;}
   const drafts=Object.fromEntries($$('[data-decision-reason]').map(e=>[e.dataset.decisionReason,e.value]));
-  $('#applications').innerHTML=rows.map(a=>`<div class="compact"><div><b>${esc(a.productName)} · ${esc(a.consumerName)}</b><p>数据版本 ${esc(a.versionName)} · 产品修订 ${esc(a.productRevision)}</p><p>${esc(a.intentId)} · ${esc(a.status)} · ${esc(a.expectedSendTime)}</p><p>${esc(a.purpose)}</p><p>${esc(a.decisionReason||'')}${a.decisionActor?' · '+esc(a.decisionActor):''}</p>${a.status==='PENDING'&&a.providerOrgId===chainOwner().orgId?`<textarea data-decision-reason="${esc(a.intentId)}" placeholder="审核说明；拒绝时必填">${esc(drafts[a.intentId]||'')}</textarea><button class="btn" data-decide="${esc(a.intentId)}" data-decision="APPROVED">批准申请</button> <button class="btn" data-decide="${esc(a.intentId)}" data-decision="REJECTED">拒绝申请</button>`:''}</div></div>`).join('')||'<div class="empty">暂无消费申请。批准申请后仍需双方确认技术合约，才可能生效授权。</div>';
+  $('#applications').innerHTML=rows.map(a=>`<div class="compact"><div><b>${esc(a.productName)} · ${esc(a.consumerName)}</b><p>数据版本 ${esc(a.versionName)} · 产品修订 ${esc(a.productRevision)}</p><p>${esc(a.intentId)} · ${esc(a.status)} · ${esc(a.expectedSendTime)}</p><p>${esc(a.purpose)}</p><p>${esc(a.decisionReason||'')}${a.decisionActor?' · '+esc(a.decisionActor):''}</p>${canReview&&a.status==='PENDING'&&a.providerOrgId===chainOwner().orgId?`<textarea data-decision-reason="${esc(a.intentId)}" placeholder="审核说明；拒绝时必填">${esc(drafts[a.intentId]||'')}</textarea><button class="btn" data-decide="${esc(a.intentId)}" data-decision="APPROVED">批准申请</button> <button class="btn" data-decide="${esc(a.intentId)}" data-decision="REJECTED">拒绝申请</button>`:''}</div></div>`).join('')||'<div class="empty">暂无消费申请。批准申请后仍需双方确认技术合约，才可能生效授权。</div>';
   $$('[data-decide]').forEach(b=>b.onclick=async()=>{try{await json(`/intents/${b.dataset.decide}/decision`,{decision:b.dataset.decision,reason:$(`[data-decision-reason="${b.dataset.decide}"]`).value});toast('申请审核已持久化；尚未授予内容读取权');await load(true);}catch(e){if(e.name!=='AbortError')toast(e.message);}});
 }
 
 function renderContracts() {
+  const session=window.dataSpaceSession;
   const rows = state.snapshot?.contracts || [];
-  const signature=JSON.stringify(rows);if(signature===state.contractSignature)return;state.contractSignature=signature;
+  const canRead=session.has('contract.read'),canSearch=session.has('data.search');
+  const canConfirm=session.has('contract.confirm'),canRevoke=session.has('contract.revoke');
+  const canEdit=session.has('contract.edit'),canDispatch=session.has('delivery.execute');
+  const signature=JSON.stringify([canRead,canSearch,canConfirm,canRevoke,canEdit,canDispatch,rows]);if(signature===state.contractSignature)return;state.contractSignature=signature;
+  if(!canRead){$('#contractTable').innerHTML='<tr><td colspan="7"><div class="empty">当前账号无合约查看权限。</div></td></tr>';return;}
   const drafts=Object.fromEntries($$('[data-revoke-reason]').map(e=>[e.dataset.revokeReason,e.value]));
-  $('#contractTable').innerHTML = rows.map(c => `
+  $('#contractTable').innerHTML = rows.map(c => {
+    const provider=c.providerOrgId===chainOwner().orgId,consumer=c.consumerOrgId===chainOwner().orgId;
+    const pending=c.status==='PENDING_CONFIRMATION',confirmed=c.status==='CONFIRMED';
+    return `
     <tr>
       <td><b>${esc(c.contractName)} · 修订 ${esc(c.revision)}</b><p>${esc(c.contractId)}</p><p>${esc(c.status)} · 授权 ${esc(c.authorizationStatus)}</p></td>
       <td>${esc(c.businessName || '-')}<p>${esc(c.productName)} / ${esc(c.versionName)} / 产品修订 ${esc(c.productRevision)}</p><p>${esc(c.scopeType)} · ${esc(c.fileCount)} 文件</p></td>
       <td>${esc(c.providerName)}<p>→ ${esc(c.consumerName)}</p></td>
-      <td>${esc(c.sendTime)}<p>有效期 ${esc(c.validFrom)} 至 ${esc(c.validTo)}</p><p>${esc(c.receiverEndpoint)}</p></td><td>${c.qualityThreshold==null?'不另设数值门槛':'≥ '+esc(c.qualityThreshold)+'%'}<p>实测 ${esc(c.measuredQuality)}% · ${esc(c.qualityRulesVersion)}</p></td><td>${status(c.pushStatus)}<p>${esc(c.error||c.revokeReason||'')}</p></td>
-      <td><button class="btn link" data-contract-history="${esc(c.contractId)}">条款记录</button>${c.hasAccess?`<button class="btn link" data-open-product="${esc(c.productId)}" data-version="${esc(c.productVersionId)}" data-target="#retrieval">进入冻结版本检索</button>`:''}${c.status==='PENDING_CONFIRMATION'&&c.consumerOrgId===chainOwner().orgId?`<button class="btn" data-confirm-contract="${esc(c.contractId)}" data-revision="${esc(c.revision)}">确认修订 ${esc(c.revision)} 并启用约定只读授权</button>`:''}${['PENDING_CONFIRMATION','CONFIRMED'].includes(c.status)?`<textarea data-revoke-reason="${esc(c.contractId)}" placeholder="撤销原因">${esc(drafts[c.contractId]||'')}</textarea><button class="btn link" data-revoke-contract="${esc(c.contractId)}">显式撤销授权及未完成交付</button>${c.providerOrgId===chainOwner().orgId?`<button class="btn link" data-revise-contract="${esc(c.contractId)}">修订计划并重新确认</button>${c.status==='CONFIRMED'?`<button class="btn link" data-dispatch="${esc(c.contractId)}">重试 / 查看后台交付计划</button>`:''}`:''}`:''}</td>
+      <td>${esc(c.sendTime)}<p>有效期 ${esc(c.validFrom)} 至 ${esc(c.validTo)}</p><p>${esc(c.receiverEndpoint)}</p></td><td>${c.qualityThreshold==null?'不另设数值门槛':'≥ '+esc(c.qualityThreshold)+'%'}<p>实测 ${esc(c.measuredQuality)}% · ${esc(c.qualityRulesVersion)}</p></td><td>${c.pushStatus?status(c.pushStatus):'—'}<p>${esc(c.error||c.revokeReason||'')}</p></td>
+      <td><button class="btn link" data-contract-history="${esc(c.contractId)}">条款记录</button>
+        ${c.hasAccess&&canSearch?`<button class="btn link" data-open-product="${esc(c.productId)}" data-version="${esc(c.productVersionId)}" data-target="#retrieval">进入冻结版本检索</button>`:''}
+        ${pending&&consumer&&canConfirm?`<button class="btn" data-confirm-contract="${esc(c.contractId)}" data-revision="${esc(c.revision)}">确认修订 ${esc(c.revision)}</button>`:''}
+        ${(pending||confirmed)&&(provider||consumer)&&canRevoke?`<textarea data-revoke-reason="${esc(c.contractId)}" placeholder="撤销原因">${esc(drafts[c.contractId]||'')}</textarea><button class="btn link" data-revoke-contract="${esc(c.contractId)}">显式撤销授权及未完成交付</button>`:''}
+        ${(pending||confirmed)&&provider&&canEdit?`<button class="btn link" data-revise-contract="${esc(c.contractId)}">修订计划并重新确认</button>`:''}
+        ${confirmed&&provider&&canDispatch&&(c.scopeType==='FULL_VERSION'||c.deliveryServiceSubjectId)?`<button class="btn link" data-dispatch="${esc(c.contractId)}">重试 / 查看后台交付计划</button>`:''}
+      </td>
     </tr>
-  `).join('') || '<tr><td colspan="7"><div class="empty">暂无合约</div></td></tr>';
+    `;
+  }).join('') || '<tr><td colspan="7"><div class="empty">暂无合约</div></td></tr>';
   const act=fn=>async()=>{try{await fn();}catch(e){if(e.name!=='AbortError')toast(e.message);}};
   $$('[data-dispatch]').forEach(b => b.onclick = act(async()=>{const r=await api(`/contracts/${b.dataset.dispatch}/dispatch`,{method:'POST'});toast(`后台任务 ${r.taskId} · ${r.status}`);await load(true);}));
-  $$('[data-confirm-contract]').forEach(b=>b.onclick=act(async()=>{await json(`/contracts/${b.dataset.confirmContract}/confirm`,{revision:Number(b.dataset.revision)});toast('已确认当前技术条款；读取权限及交付分别按约定时间生效');await load(true);await window.dataSpaceSession.refresh();}));
+  $$('[data-confirm-contract]').forEach(b=>b.onclick=act(async()=>{await json(`/contracts/${b.dataset.confirmContract}/confirm`,{revision:Number(b.dataset.revision)});toast('已确认当前技术条款；消费权限仍由已审阅的授权决定');await load(true);await window.dataSpaceSession.refresh();}));
   $$('[data-revoke-contract]').forEach(b=>b.onclick=act(async()=>{await json(`/contracts/${b.dataset.revokeContract}/revoke`,{reason:$(`[data-revoke-reason="${b.dataset.revokeContract}"]`).value});toast('已撤销；旧平台下载入口会重新鉴权');await load(true);await window.dataSpaceSession.refresh();}));
   $$('[data-contract-history]').forEach(b=>b.onclick=act(async()=>{$('#deliveryDetails').textContent=JSON.stringify(await api(`/contracts/${b.dataset.contractHistory}/history`),null,2);}));
-  $$('[data-revise-contract]').forEach(b=>b.onclick=act(async()=>{const c=rows.find(x=>x.contractId===b.dataset.reviseContract),form=$('#contractForm');form.elements.contractId.value=c.contractId;form.elements.revision.value=c.revision;$('#contractIntentSelect').value=c.intentId;$('#contractIntentSelect').disabled=true;for(const [key,value] of Object.entries({validFrom:c.validFrom,validTo:c.validTo,sendTime:c.sendTime}))form.elements[key].value=beijingInput(new Date(value));form.elements.minimumQuality.value=c.qualityThreshold??'';form.elements.purpose.value=c.purpose;await loadContractEndpoints(true);$('#contractEndpointSelect').value=c.endpointId;toast(`正在修订 ${c.contractId}；提交后消费方需要重新确认`);}));
+  $$('[data-revise-contract]').forEach(b=>b.onclick=act(async()=>{const c=rows.find(x=>x.contractId===b.dataset.reviseContract),form=$('#contractForm');form.elements.contractId.value=c.contractId;form.elements.revision.value=c.revision;$('#contractIntentSelect').value=c.intentId;$('#contractIntentSelect').disabled=true;for(const [key,value] of Object.entries({validFrom:c.validFrom,validTo:c.validTo,sendTime:c.sendTime}))form.elements[key].value=beijingInput(new Date(value));form.elements.minimumQuality.value=c.qualityThreshold??'';form.elements.purpose.value=c.purpose;const history=await api(`/contracts/${c.contractId}/history`);if(form.elements.contractId.value!==c.contractId)return;const saved=history.find(row=>row.revision===c.revision)?.terms;await loadContractEndpoints(true,saved,c.endpointId);toast(`正在修订 ${c.contractId}；提交后消费方需要重新确认`);}));
   $$('[data-open-product]',$('#contractTable')).forEach(b=>b.onclick=act(async()=>{const scope=await api(`/products/${b.dataset.openProduct}/versions/${b.dataset.version}/scope`);await window.dataSpaceSession.openProductScope(scope,b.dataset.target);}));
 }
 
@@ -275,21 +298,97 @@ function renderDeliveries() {
   const rows = state.snapshot?.deliveries || [];
   $('#deliveries').innerHTML = rows.map(d => `
     <div class="compact"><div><b>${esc(d.productName)} · 合约修订 ${esc(d.contractRevision)}</b><p>任务 ${esc(d.taskId)} · ${esc(d.receiverEndpoint)}</p><p>尝试 ${esc(d.attemptCount)} / ${esc(d.maxAttempts)}，下次 ${esc(d.nextAttemptAt)}</p><p>${esc(d.error||'')}</p>${d.receiptId?`<p>已核对 ${esc(d.fileCount)} 文件 / ${esc(d.sizeBytes)} bytes · ${esc(d.manifestDigest)}</p><p>${esc(d.receiverIdentity)}</p>`:''}<button class="btn link" data-delivery-json="${esc(d.taskId)}" data-kind="attempts">尝试记录</button><button class="btn link" data-delivery-json="${esc(d.taskId)}" data-kind="manifest">冻结交付清单</button>${d.receiptId?`<button class="btn link" data-delivery-json="${esc(d.taskId)}" data-kind="receipt">签名接收回执</button><button class="btn link" data-delivery-download="${esc(d.taskId)}" data-kind="receipt">下载回执 JSON</button>${d.deliveryStatus==='DELIVERED'&&d.hasPackageAccess?`<button class="btn" data-delivery-download="${esc(d.taskId)}" data-kind="package">鉴权下载实际交付包</button>`:''}`:''}</div><div>${status(d.deliveryStatus)}<p>${esc(d.deliveredAt||'尚未接收')}</p></div></div>
-  `).join('') || '<div class="empty">暂无实际交付记录；只有独立接收回执核验通过后才显示已交付。</div>';
+  `).join('') || (window.dataSpaceSession.has('delivery.receipt.read')
+    ?'<div class="empty">暂无实际交付记录；只有独立接收回执核验通过后才显示已交付。</div>'
+    :'<div class="empty">当前账号无交付记录查看权限。</div>');
   $$('[data-delivery-json]').forEach(b=>b.onclick=async()=>{try{$('#deliveryDetails').textContent=JSON.stringify(await api(`/deliveries/${b.dataset.deliveryJson}/${b.dataset.kind}`),null,2);}catch(e){if(e.name!=='AbortError')toast(e.message);}});
   $$('[data-delivery-download]').forEach(b=>b.onclick=async()=>{try{await window.dataSpaceSession.downloadBusiness(`/deliveries/${b.dataset.deliveryDownload}/${b.dataset.kind}`,`delivery-${b.dataset.deliveryDownload}.${b.dataset.kind==='package'?'zip':'json'}`);}catch(e){if(e.name!=='AbortError')toast(e.message);}});
   $('#receiverConfigurations').innerHTML=(state.snapshot?.receiverEndpoints||[]).map(e=>`<p>${esc(e.endpointName)} · ${esc(e.adapterType)} · ${esc(e.receiverIdentity)} · ${e.enabled?'已配置':'已停用'}</p>`).join('')||'<p>当前组织尚未配置接收端。</p>';
 }
 
 function beijingInput(date){const p=Object.fromEntries(new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(date).map(p=>[p.type,p.value]));return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;}
-async function loadContractEndpoints(force=false){
+const contractActionLabels = {
+  'data.catalog.read':'查看目录',
+  'data.preview':'预览',
+  'data.search':'检索',
+  'data.qa':'问答',
+  'data.raw.download':'下载原件',
+  'data.view.export':'导出受控视图',
+  'delivery.package.download':'下载交付包'
+};
+const contractPurposeLabels = {
+  'GENERAL_READ':'常规读取',
+  'CONTROLLED_DELIVERY':'受控交付'
+};
+
+function updateContractDelivery() {
+  const form=$('#contractForm'),scope=state.contractOptions;
+  const delivery=$$('input[name="operations"]:checked',form).some(input=>input.value==='delivery.package.download');
+  const select=$('#contractDeliverySubject');
+  select.disabled=!scope||scope.scopeType!=='CONTROLLED_VIEW'||!delivery;
+  select.required=!select.disabled;
+  if(select.disabled)select.value='';
+}
+
+function renderContractOptions(scope,revision=null) {
+  state.contractOptions=scope;
+  const panel=$('#contractControlled');
+  panel.hidden=scope?.scopeType!=='CONTROLLED_VIEW';
+  panel.disabled=panel.hidden;
+  $('#contractScope').textContent=scope
+    ? panel.hidden?'完整冻结版本':`受控视图 ${scope.viewId} · 授权版本 ${scope.viewAuthorizationVersion}`
+    : '选择已批准申请以读取冻结范围';
+  $('#contractViewWindow').textContent=scope?.viewValidUntil
+    ? `视图授权有效至 ${new Date(scope.viewValidUntil).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'})}（北京时间）`
+    : '';
+  const inputs=(name,codes,labels,selected)=>(codes||[]).map(code=>
+    `<label><input type="checkbox" name="${name}" value="${esc(code)}" ${selected?.includes(code)?'checked':''} />${esc(labels[code]||code)}</label>`).join('');
+  $('#contractActions').innerHTML=inputs('operations',scope?.allowedOperations,contractActionLabels,revision?.operations);
+  $('#contractPurposes').innerHTML=inputs('purposeCodes',scope?.allowedPurposeCodes,contractPurposeLabels,revision?.purposeCodes);
+  $('#contractDeliverySubject').innerHTML=option('','选择此视图的交付服务主体')+
+    (scope?.deliveryServices||[]).map(service=>option(service.serviceSubjectId,service.name)).join('');
+  updateContractDelivery();
+  if(revision?.deliveryServiceSubjectId)$('#contractDeliverySubject').value=revision.deliveryServiceSubjectId;
+}
+
+function contractRequest(form) {
+  const data=new FormData(form),body=Object.fromEntries(data.entries()),scope=state.contractOptions;
+  const intent=$('#contractIntentSelect').value;
+  if(!scope||state.endpointApplication!==intent||!intent)throw new Error('请先确认当前申请的冻结范围');
+  body.intentId=intent;
+  for(const field of ['validFrom','validTo','sendTime'])body[field]=shanghaiTime(body[field]);
+  if(!body.purpose)delete body.purpose;
+  body.scopeType=scope.scopeType;
+  if(scope.scopeType==='CONTROLLED_VIEW'){
+    body.viewId=scope.viewId;
+    body.operations=data.getAll('operations');
+    body.purposeCodes=data.getAll('purposeCodes');
+    if(!body.operations.length||!body.purposeCodes.length)throw new Error('请选择合约允许的动作和用途');
+    if(body.operations.includes('delivery.package.download')&&
+       (!body.operations.includes('data.view.export')||!body.purposeCodes.includes('CONTROLLED_DELIVERY')||!body.deliveryServiceSubjectId))
+      throw new Error('交付包需要视图导出权限、受控交付用途和交付服务主体');
+    if(scope.hasOriginalByteCopies&&body.operations.includes('data.view.export')&&!body.operations.includes('data.raw.download'))
+      throw new Error('该视图包含原件副本，导出须同时约定原件下载权限');
+    if(!body.deliveryServiceSubjectId)delete body.deliveryServiceSubjectId;
+  }
+  const id=body.contractId;
+  delete body.contractId;
+  if(id)body.revision=Number(body.revision);else delete body.revision;
+  return {id,body};
+}
+
+async function loadContractEndpoints(force=false, revision=null, endpoint=null){
   const application=$('#contractIntentSelect').value;if(!force&&state.endpointApplication===application)return;
   state.endpointApplication=application;const seq=(state.endpointSequence||0)+1;state.endpointSequence=seq;
+  renderContractOptions(null);
   if(!application){$('#contractEndpointSelect').innerHTML=option('','先选择已批准申请');return;}
   $('#contractEndpointSelect').innerHTML=option('','正在读取该消费组织接收配置');
-  const rows=await api(`/receiver-endpoints?applicationId=${encodeURIComponent(application)}`);
+  const query=encodeURIComponent(application);
+  const [rows,scope]=await Promise.all([api(`/receiver-endpoints?applicationId=${query}`),api(`/contracts/options?applicationId=${query}`)]);
   if(state.endpointSequence!==seq||$('#contractIntentSelect').value!==application)return;
   $('#contractEndpointSelect').innerHTML=option('',rows.length?'选择该消费组织的接收端':'该消费组织尚未配置本地接收端')+rows.filter(e=>e.enabled).map(e=>option(e.endpointId,e.endpointName+' / '+e.adapterType)).join('');
+  if(endpoint)$('#contractEndpointSelect').value=endpoint;
+  renderContractOptions(scope,revision);
 }
 
 async function searchProducts(showToast = true) {
@@ -323,7 +422,7 @@ function bindNav() {
 
 function bindForms() {
   $('#apiBase').value = state.api;
-  $('#apiBase').onchange = e => { state.api = e.target.value || '/api/data-space'; localStorage.setItem('dataSpaceApi', state.api); load(true); };
+  $('#apiBase').onchange = e => { state.api=e.target.value||'/api/data-space';localStorage.setItem('dataSpaceApi',state.api);window.mdsIdentity.configure();load(true); };
   $('#reloadBtn').onclick = () => load(true);
   $('#demoDispatchBtn').onclick = () => load(true);
   $('#spaceForm').onsubmit = async e => { e.preventDefault(); const r = await json('/spaces/register', formData(e.currentTarget)); toast(`平台空间已创建：${r.spaceId}；不代表企业认证`); load(); };
@@ -341,7 +440,14 @@ function bindForms() {
   $('#productModality').onchange = runSearch;
   $('#productBusiness').onchange = e => { state.activeBusiness = e.target.value; localStorage.setItem('activeBusiness', state.activeBusiness); renderBusinessTree(); runSearch(); };
   $('#intentForm').onsubmit = async e => { e.preventDefault();const v=formData(e.currentTarget);v.expectedSendTime=shanghaiTime(v.expectedSendTime);const r = await json('/intents',v); toast(`消费申请已提交：${r.intentId} · ${r.status}`); load(); location.hash = '#contracts'; };
-  $('#contractForm').onsubmit = async e => { e.preventDefault();const v=formData(e.currentTarget);for(const field of ['validFrom','validTo','sendTime'])v[field]=shanghaiTime(v[field]);if(!v.purpose)delete v.purpose;const id=v.contractId;delete v.contractId;if(!id)delete v.revision;else v.revision=Number(v.revision);const r=await json(id?`/contracts/${id}/revise`:'/contracts',v);toast(`技术条款修订 ${r.revision} 已提交，等待消费方确认`);await load(true); };
+  $('#contractControlled').onchange=updateContractDelivery;
+  $('#contractForm').onsubmit=async e=>{
+    e.preventDefault();
+    const {id,body}=contractRequest(e.currentTarget);
+    const result=await json(id?`/contracts/${id}/revise`:'/contracts',body);
+    toast(`技术条款修订 ${result.revision} 已提交，等待消费方确认`);
+    await load(true);
+  };
   $('#receiverForm').onsubmit=async e=>{e.preventDefault();const r=await json('/receiver-endpoints',formData(e.currentTarget));toast(`真实本地接收端已配置：${r.endpointName}`);await load(true);await loadContractEndpoints(true);};
   $('#contractIntentSelect').onchange=()=>loadContractEndpoints(true).catch(e=>{if(e.name!=='AbortError')toast(e.message);});
   $('#contractNew').onclick=()=>{$('#contractForm').reset();$('#contractIntentSelect').disabled=false;state.endpointApplication=null;setDefaultTimes();loadContractEndpoints(true).catch(e=>toast(e.message));};
@@ -353,11 +459,14 @@ function bindForms() {
 
 window.addEventListener('dataspace-auth',()=>{
   state.loadSequence++;state.searchSequence++;state.snapshot=null;state.products=[];state.marketSearchActive=false;
+  state.activeBusiness='';localStorage.removeItem('activeBusiness');
   state.marketPage=1;$('#marketSearchStatus').textContent='账号范围已切换，正在读取当前可见产品。';
   state.loading=false;
-  state.applicationSignature=null;state.contractSignature=null;state.endpointApplication=null;state.endpointSequence=(state.endpointSequence||0)+1;$('#contractIntentSelect').disabled=false;$('#qualityReport').textContent='登录后可查看有权访问的质量报告。';$('#marketVersionDetails').replaceChildren();$('#deliveryDetails').textContent='选择当前账号有权查看的交付任务。';
+  state.applicationSignature=null;state.contractSignature=null;state.endpointApplication=null;state.endpointSequence=(state.endpointSequence||0)+1;renderContractOptions(null);$('#contractEndpointSelect').replaceChildren();$('#contractIntentSelect').disabled=false;$('#qualityReport').textContent='登录后可查看有权访问的质量报告。';$('#marketVersionDetails').replaceChildren();$('#deliveryDetails').textContent='选择当前账号有权查看的交付任务。';
   for(const form of $$('#provider form,#market form,#contracts form'))form.reset();
-  $('#productKeyword').value='';setDefaultTimes();load();
+  for(const id of ['catalogKeyword','catalogStatus','productKeyword','productModality'])$('#'+id).value='';
+  clearTimeout(toast.timer);$('#toast').classList.remove('show');$('#toast').textContent='';
+  setDefaultTimes();load();
 });
 
 document.addEventListener('DOMContentLoaded', () => {

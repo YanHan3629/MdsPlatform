@@ -107,17 +107,7 @@ public class OrgScopeInterceptor implements Interceptor {
     }
 
     private boolean isSuperAdmin() {
-        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
-        if (auth == null || !auth.isAuthenticated()) return false;
-
-        // 你们 JwtAuthFilter 里把所有角色都映射成 ROLE_xxx 了
-        for (GrantedAuthority ga : auth.getAuthorities()) {
-            if (ga == null) continue;
-            String a = ga.getAuthority();
-            if ("ROLE_SUPER_ADMIN".equals(a) || "ROLE_SUPERADMIN".equals(a)) {
-                return true;
-            }
-        }
+        // Protected management qualifications never imply cross-tenant SQL reads.
         return false;
     }
 

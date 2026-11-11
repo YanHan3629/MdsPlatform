@@ -1,0 +1,29 @@
+{
+  "schema": "NATIVE_INDEX_SOURCE_CAPSULE_V1",
+  "files": {
+    "CLIP_Classifier_usecsv.py": "69da51d8777f71a338daaa7477c721286c0e87a34b5ed3d3fbc1e131cbcc37d9",
+    "CLIP_Match_usecsv.py": "bcd74ee3b713cdaf819e507cd6f2d201678a6d9005dd27a513eebe3ee2f79961",
+    "build_index.py": "0072ff7c5ace43f83990f4b2bacb19e3b2baa9cf0abf7bc680a18853ad84a71f",
+    "index_callback.py": "2302affb7ffac0698c94bc3c4fe69f0dc99643571970f1433e12fd5a91518d16",
+    "prepare_text_model.py": "a5c892250489186d221852ae620bcdb8c9f93dba898ccc332234f6a4c60168fc",
+    "professional/__init__.py": "fc38cf43cfe89002caf491626b9705513f13f1e629303dc22f681f20025ff524",
+    "professional/cad_geometry.py": "94368be925ab0e52c154cb4dfe6790edde81fa98fd864c338f8312d29309968c",
+    "professional/contracts.py": "dde6b4135b0e32bda107e8decb386e48cb493bad69c72c4bc35f8e47f4128640",
+    "professional/cpu_queue.py": "2d04e01e6e7a5a26738b6da357eea5d6dc8ba2855ad46e473f40aa52c8ba0419",
+    "professional/derived_cache.py": "8121f2e748c3256643f6d71de2844f578a59272747c84251d58dc3bad1854858",
+    "professional/document_native.py": "d8813cd86dee92d871bc2a53edae986b174e79bbcac7b0fac2de47f03ab3d98e",
+    "professional/engineering_render.py": "59038f15cf5a54fb6b157dfa831562c2fd6c7bef1aa22784cc110e77a782ed61",
+    "professional/geometry_surface.py": "a2239b81acf0af4428b93a4ddf981e7b72ce7c3cec45b3762a04a6183702c8f2",
+    "professional/json_native.py": "622ee492bd5b4342683ecc7fd9f9039461f37daab8b2d744446a77c09f1f8a0e",
+    "professional/native_evidence.py": "15b841a34f58c05568aab5222cfd32d341cf2fbdd8fbda8abd6d00a4230dee9d",
+    "professional/organizer.py": "9c2ed342584b5cc9dd9dbd73b4c0da28af61813fb5a9887defb9dcecc039d999",
+    "professional/parsers.py": "60e70d7ba652540d0b0a4d8c38a18893238e9454f85ab40af770e1a20950833b",
+    "professional/pipeline.py": "345855a661fbfa1e96f23846e692c93c5b8e9a37c48eacfce376d1fa228ea0f0",
+    "professional/snapshot_catalog.py": "f460cb2c573da888fceb19245a76ac01249534061cadb8ce21aff27f1eb70691",
+    "professional/source_timezone.py": "e391471a608009d866815ce4dabce6026cd46818fa5c23c02c0ad2f034e070ee",
+    "professional/svg_native.py": "979423c955102c6c6fd587369cf20a65f28d9ded194d64fc469af943f81c1af5",
+    "professional/table_native.py": "7ce3340423034950fae4b2861e999afc712e72288bed6b79e77f838ff9ec537e",
+    "professional/text_embedding.py": "1b6197fc8b5b6cb8f6f84f5bacd20f82a45f6588f790dc5db995ea8e1e55051c",
+    "representations.py": "01ec1e57ffb822b2d1c35d6534995e0980bf30c5dc1aaa1d837255a889e85fe1"
+  }
+}

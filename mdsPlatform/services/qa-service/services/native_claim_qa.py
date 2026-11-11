@@ -91,10 +91,16 @@ def answer(service,*,question,sources,items,scope,diagnostics,started,retrieval_
         generation_status='partial' if presentation['status']=='PARTIAL' else 'source_values_verified'
         notice=('本次只完成了部分来源字段核验，完整问题尚未答完。' if presentation['status']=='PARTIAL' else
             '已核对所列字段的原始值；问题中的解释、推断或尚未列出的字段仍未完成核验。')
+        matched_rows=next((source.provenance['recordSetRows'] for source in sources
+            if source.provenance.get('recordLookupMode')=='SINGLE_EXPLICIT_CSV_SET'),None)
+        if matched_rows:
+            notice=f'同一查询键匹配 {len(matched_rows)} 条原始记录。若只需要其中一条，请补充能够唯一定位的记录标识。'+notice
         diagnostics['claimProtocol']={key:presentation[key] for key in ('protocolVersion','status','questionCompleteness',
             'missingRequiredFactIds','withheldInterpretations','finalClaimCheck','verificationScope')}
         if 'missingRecordComparisons' in presentation:diagnostics['claimProtocol']['missingRecordComparisons']=presentation['missingRecordComparisons']
         if trace:trace.event('finalClaims',claims)
+    if diagnostics.get('questionScopedUserInputsExcluded'):
+        notice=(notice+' ' if notice else '')+'本次按问题限定，只使用指定文件；附加资料未参与回答。'
     kept={source.evidence_id for source in final_sources}
     retained=[item for item in items if item['evidenceId'] in kept]
     diagnostics.update(finalEvidenceIds=[source.evidence_id for source in final_sources],

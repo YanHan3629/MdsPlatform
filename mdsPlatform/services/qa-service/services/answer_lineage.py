@@ -226,7 +226,7 @@ def _original_links(links):
     return result
 
 
-def render(catalogue,fact_ids,comparisons=()):
+def render(catalogue,fact_ids,comparisons=(),*,single_sentence=False):
     """Render only exact typed source values and registered equality results."""
     require(len(fact_ids)<=32 and len(set(fact_ids))==len(fact_ids),'CLAIM_SELECTION_DUPLICATE_OR_TOO_LARGE')
     rows=[]
@@ -259,6 +259,14 @@ def render(catalogue,fact_ids,comparisons=()):
             text=render_text(node,display)
         if node['identity']['originalFormat'] in {'JSON','JSONL'}:text+='（JSON 类型：'+node['sourceType']+'）'
         if not node['calculationEligible'] and not node.get('engineeringView'):text+='；此记录未核验为可用于计算的值'
+        if single_sentence:
+            if node['identity']['originalFormat']=='CSV':
+                from services.record_evidence_plan import CSV_SET_RECORD_TYPE_FIELD
+                record_type=display(node['recordBindings'][CSV_SET_RECORD_TYPE_FIELD])
+                text=f"第 {location['rawRow']} 行的 {record_type} 记录中，{node['field']} 为 {display(node['value'])}"
+            else:
+                text=f"原始字段 {node['field']} 为 {display(node['value'])}"
+            if node['unit'] is not None:text+=' '+str(node['unit'])
         rows.append({'text':text,'factIds':[fact_id,*node['supportFactIds']],'links':links,'evidenceNature':node['evidenceNature'],
             'kind':'source_value','primaryFactIds':[fact_id],
             'verification':'exact-actual-input-value-not-semantic-endorsement'})
@@ -332,7 +340,7 @@ def render(catalogue,fact_ids,comparisons=()):
     used=sorted({link['sourceIndex'] for row in rows for link in row['links']});mapping={old:new for new,old in enumerate(used,1)}
     answer='';claims=[]
     for row in rows:
-        if answer:answer+='\n\n'
+        if answer:answer+='，' if single_sentence else '\n\n'
         start=len(answer);answer+=row['text'];end=len(answer)
         require(len(answer)<=12000,'CLAIM_PRESENTATION_BUDGET_EXCEEDED')
         indices=sorted({mapping[link['sourceIndex']] for link in row['links']})
@@ -348,12 +356,13 @@ def render(catalogue,fact_ids,comparisons=()):
             'factIds':row['factIds'],'evidenceIds':sorted({link['evidenceId'] for link in row['links']}),
             'readIds':sorted({identifier for link in row['links'] for identifier in [link['readId'],*link.get('selectionReadIds',[])]}),'inputLinks':public_links,
             **({'operation':row['operation']} if 'operation' in row else {})})
+    if single_sentence and claims:answer+='。'
     return {'version':VERSION,'answer':answer,'claims':claims,'sourceIndices':used,
         'sources':copy.deepcopy([catalogue.sources[index-1] for index in used]),
         'missingRequiredFactIds':sorted(set(catalogue.required_fact_ids)-set(fact_ids)),
         'verificationScope':'Exact values and registered operations only; question completeness and free model interpretation are not certified.'}
 
-def verify_presentation(result,catalogue):
+def verify_presentation(result,catalogue,*,single_sentence=False):
     """Every visible data span must equal a registered source/operation view."""
     answer=result['answer'];claims=result['claims'];used=sorted({_original_link_index(link) for claim in claims for link in claim['inputLinks']})
     require(result['sourceIndices']==used and same(result['sources'],[catalogue.sources[index-1] for index in used]),'CLAIM_FINAL_SOURCE_MAPPING_CHANGED')
@@ -362,10 +371,14 @@ def verify_presentation(result,catalogue):
         start,end=claim['answerStart'],claim['answerEnd']
         require(type(start) is int and type(end) is int and cursor<=start<end<=len(answer)
             and claim['offsetUnit']=='unicode-code-points' and answer[start:end]==claim['text'],'CLAIM_FINAL_SPAN_CHANGED')
-        require(answer[cursor:start].strip()=='','CLAIM_UNATTRIBUTED_FINAL_TEXT')
+        gap=answer[cursor:start]
+        if single_sentence:
+            require(gap==('，' if cursor else ''),'CLAIM_UNATTRIBUTED_FINAL_TEXT')
+        else:
+            require(not gap.strip(),'CLAIM_UNATTRIBUTED_FINAL_TEXT')
         if claim['kind']=='source_value':
             require(len(claim['primaryFactIds'])==1,'CLAIM_PRIMARY_FACT_INVALID')
-            expected=render(catalogue,claim['primaryFactIds'])['claims'][0]
+            expected=render(catalogue,claim['primaryFactIds'],single_sentence=single_sentence)['claims'][0]
         elif claim['kind']=='registered_operation':
             operation=claim.get('operation',{})
             if operation.get('name')=='record_group_value_equal':
@@ -386,7 +399,11 @@ def verify_presentation(result,catalogue):
         citations=' '+''.join(f'[来源{index}]' for index in indices)
         require(answer[end:end+len(citations)]==citations,'CLAIM_FINAL_CITATION_TEXT_CHANGED')
         cursor=end+len(citations);verified.append(claim['claimId'])
-    require(answer[cursor:].strip()=='','CLAIM_UNATTRIBUTED_FINAL_TEXT')
+    tail=answer[cursor:]
+    if single_sentence:
+        require(tail==('。' if claims else ''),'CLAIM_UNATTRIBUTED_FINAL_TEXT')
+    else:
+        require(not tail.strip(),'CLAIM_UNATTRIBUTED_FINAL_TEXT')
     return {'version':VERSION,'status':'VERIFIED_EXACT_SPANS' if claims else 'NO_CLAIMS','verifiedClaimIds':verified,
         'answerSha256':hashlib.sha256(answer.encode()).hexdigest(),'claimsSha256':checksum(claims),
         'scope':'Typed source values and registered operations only. This does not certify question completeness or free interpretation.'}

@@ -32,25 +32,30 @@ public class MmSearchGatewayService {
     private final SearchServiceClient searchServiceClient;
     private final MmAssetService mmAssetService;
     private final MmSearchLogMapper mmSearchLogMapper;
+    private final com.fwdrobo.sirius.security.AuthorizationService authorization;
 
     public MmSearchGatewayService(MmDatasetVersionService mmDatasetVersionService,
                                   MmIndexVersionMapper mmIndexVersionMapper,
                                   SearchServiceClient searchServiceClient,
                                   MmAssetService mmAssetService,
-                                  MmSearchLogMapper mmSearchLogMapper) {
+                                  MmSearchLogMapper mmSearchLogMapper,
+                                  com.fwdrobo.sirius.security.AuthorizationService authorization) {
         this.mmDatasetVersionService = mmDatasetVersionService;
         this.mmIndexVersionMapper = mmIndexVersionMapper;
         this.searchServiceClient = searchServiceClient;
         this.mmAssetService = mmAssetService;
         this.mmSearchLogMapper = mmSearchLogMapper;
+        this.authorization=authorization;
     }
 
     public MmTextToImageResp textToImage(MmTextToImageReq req) {
+        authorization.requireDataset(req.datasetId(),req.versionId(),null,"data.search");
         MmDatasetVersion version = mmDatasetVersionService.getVersionOrNotFound(req.versionId());
         if (!req.datasetId().equals(version.getDatasetId())) {
             throw ExceptionUtils.badRequest("dataset and version mismatch");
         }
         MmIndexVersion indexVersion = loadActiveIndex(version);
+        authorization.requireDataset(version.getDatasetId(),version.getVersionId(),indexVersion.getIndexVersionId(),"data.search");
         Instant start = Instant.now();
         InternalTextToImageResp internal = searchServiceClient.textToImage(new InternalTextToImageReq(req.datasetId(), req.versionId(), indexVersion.getIndexVersionId(), req.query(), req.topKOrDefault()));
         int latency = (int) Duration.between(start, Instant.now()).toMillis();
@@ -69,11 +74,13 @@ public class MmSearchGatewayService {
     }
 
     public MmImageToTextResp imageToText(UUID datasetId, UUID versionId, Integer topK, MultipartFile file) {
+        authorization.requireDataset(datasetId,versionId,null,"data.search");
         MmDatasetVersion version = mmDatasetVersionService.getVersionOrNotFound(versionId);
         if (!datasetId.equals(version.getDatasetId())) {
             throw ExceptionUtils.badRequest("dataset and version mismatch");
         }
         MmIndexVersion indexVersion = loadActiveIndex(version);
+        authorization.requireDataset(version.getDatasetId(),version.getVersionId(),indexVersion.getIndexVersionId(),"data.search");
         Instant start = Instant.now();
         InternalImageToTextResp internal = searchServiceClient.imageToText(datasetId, versionId, indexVersion.getIndexVersionId(), topK == null ? 5 : topK, file);
         int latency = (int) Duration.between(start, Instant.now()).toMillis();

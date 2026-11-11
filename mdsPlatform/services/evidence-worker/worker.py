@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64,hashlib,hmac,importlib.util,json,math,multiprocessing,os,re,resource,tempfile,threading,time,traceback,uuid
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
+from worker_authority import authenticate,current_guard,require_scope,bind,reset,AuthorityError
 
 for _thread_variable in ('OMP_NUM_THREADS','OPENBLAS_NUM_THREADS','MKL_NUM_THREADS'):os.environ[_thread_variable]='1'
 
@@ -135,23 +136,30 @@ def _child(connection,raw,format,parameters):
     finally:connection.close()
 
 def execute(raw,format,parameters):
+    guard=current_guard();guard.revalidate(force=True)
     context=multiprocessing.get_context('spawn');receiver,sender=context.Pipe(duplex=False)
     process=context.Process(target=_child,args=(sender,raw,format,parameters));process.start();sender.close()
     try:
-        if not receiver.poll(40):raise Invalid('RENDER_TIMEOUT',504)
+        deadline=time.monotonic()+40
+        while not receiver.poll(.5):
+            guard.revalidate(force=True)
+            if time.monotonic()>=deadline:raise Invalid('RENDER_TIMEOUT',504)
+        guard.revalidate(force=True)
         try:result=receiver.recv()
         except EOFError:raise Invalid('RENDER_PROCESS_TERMINATED',503)
         process.join(2)
         if 'error' in result:raise Invalid(result['error'],result['status'])
         return result
     finally:
-        if process.is_alive():process.terminate();process.join(5)
+        if process.is_alive():process.terminate();process.join(.5)
+        if process.is_alive():process.kill();process.join(.5)
         receiver.close()
 
 def render(body):
     import fitz
     from PIL import __version__ as pillow_version
     identity,parameters,raw=validate(body)
+    guard=require_scope(identity["datasetId"],identity["versionId"],identity["indexVersionId"])
     recipe=body['recipeVersion'];engines={'pymupdf':fitz.VersionBind,'pillow':pillow_version}
     if recipe==ENGINEERING_RECIPE:
         from professional.engineering_render import engine_binding
@@ -160,6 +168,7 @@ def render(body):
     key=digest(canonical({'identity':identity,'parameters':parameters,'recipeVersion':recipe,'engines':engines}))
     root=Path(os.environ.get('EVIDENCE_CACHE_DIR','/cache'));root.mkdir(parents=True,exist_ok=True)
     def cached():
+        guard.revalidate(force=True)
         try:
             if (root/(key+'.json')).stat().st_size>1024*1024 or (root/(key+'.png')).stat().st_size>MAX_OUTPUT:return None
             wrapper=json.loads((root/(key+'.json')).read_text());metadata=wrapper['payload'];png=(root/(key+'.png')).read_bytes()
@@ -178,6 +187,7 @@ def render(body):
                 metadata={'schemaVersion':'qa-region-image-1','identity':identity,'parameters':parameters,'recipeVersion':recipe,
                     **rendered,'outputSha256':digest(png),'outputBytes':len(png)}
                 metadata['representationId']=str(uuid.uuid5(uuid.NAMESPACE_URL,key+':'+metadata['outputSha256']))
+                guard.revalidate(force=True)
                 wrapper={'payload':metadata,'sha256':digest(canonical(metadata))}
                 for suffix,content in [('.png',png),('.json',canonical(wrapper))]:
                     with tempfile.NamedTemporaryFile(dir=root,prefix=key+'.',delete=False) as stream:temporary=Path(stream.name);stream.write(content)
@@ -185,13 +195,20 @@ def render(body):
                 pair=metadata,png;status='MISS'
     with metrics_lock:metrics['cacheHits' if status=='HIT' else 'rendered']+=1
     metadata,png=pair
+    guard.revalidate(force=True)
     return {**metadata,'imageBase64':base64.b64encode(png).decode(),'cacheStatus':status,'queueWaitMs':queue_wait,'elapsedMs':round((time.perf_counter()-started)*1000,3)}
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version='HTTP/1.1'
     def log_message(self,*args):pass
     def reply(self,status,value):
-        raw=canonical(value);self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.send_header('Cache-Control','no-store');self.send_header('Connection','close');self.end_headers();self.wfile.write(raw);self.close_connection=True
+        raw=canonical(value);guard=None
+        if status<400 and self.path=='/internal/v1/evidence/render':guard=current_guard();guard.revalidate(force=True)
+        self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.send_header('Cache-Control','no-store');self.send_header('Connection','close');self.end_headers();self._response_started=True
+        for offset in range(0,len(raw),65536):
+            if guard is not None:guard.revalidate()
+            self.wfile.write(raw[offset:offset+65536])
+        self.close_connection=True
     def authorized(self):
         token=os.environ.get('MM_INTERNAL_TOKEN','')
         return bool(token) and hmac.compare_digest(self.headers.get('X-MM-Internal-Token',''),token)
@@ -203,7 +220,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.authorized():return self.reply(401,{'error':'INTERNAL_IDENTITY_REQUIRED'})
         if self.path!='/internal/v1/evidence/render':return self.reply(404,{'error':'NOT_FOUND'})
+        binding=None;self._response_started=False
         try:
+            guard=authenticate(self.headers,{'data.preview','data.search','data.qa'});binding=bind(guard)
             if self.headers.get('Transfer-Encoding'):raise Invalid('CHUNKED_BODY_UNSUPPORTED')
             if not self.headers.get('Content-Type','').startswith('application/json'):raise Invalid('JSON_REQUIRED')
             try:length=int(self.headers.get('Content-Length','-1'))
@@ -214,6 +233,9 @@ class Handler(BaseHTTPRequestHandler):
             body=json.loads(raw,object_pairs_hook=duplicate,parse_constant=lambda value:(_ for _ in ()).throw(Invalid('NONFINITE_JSON_NUMBER')))
             with metrics_lock:metrics['acceptedRequests']+=1
             self.reply(200,render(body))
+        except AuthorityError as error:
+            if self._response_started:self.close_connection=True
+            else:self.reply(error.status,{'error':error.code})
         except Invalid as error:
             with metrics_lock:metrics['failures']+=1
             self.reply(error.status,{'error':error.code})
@@ -225,6 +247,8 @@ class Handler(BaseHTTPRequestHandler):
             with metrics_lock:metrics['failures']+=1;metrics['lastFailure']=diagnostic
             print(json.dumps(diagnostic),flush=True)
             self.reply(503,{'error':'EVIDENCE_RENDER_UNAVAILABLE'})
+        finally:
+            if binding is not None:reset(binding)
 
 class Server(ThreadingHTTPServer):
     daemon_threads=True
@@ -239,4 +263,4 @@ class Server(ThreadingHTTPServer):
         try:super().process_request_thread(request,address)
         finally:self.slots.release()
 
-if __name__=='__main__':Server(('0.0.0.0',18083),Handler).serve_forever()
+if __name__=='__main__':Server((os.environ.get('EVIDENCE_BIND_HOST','0.0.0.0'),18083),Handler).serve_forever()

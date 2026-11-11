@@ -203,7 +203,7 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Map<String, Object>> handleIllegalStateException(IllegalStateException ex) {
         Map<String, Object> error = new HashMap<>();
         error.put("success", false);
-        error.put("message", ex.getMessage() != null ? ex.getMessage() : "服务器内部状态异常");
+        error.put("message", "INTERNAL_STATE_ERROR");
         error.put("status", HttpStatus.INTERNAL_SERVER_ERROR.value());
         error.put("errorType", "ILLEGAL_STATE");
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(error);
@@ -216,10 +216,30 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Map<String, Object>> handleJsonProcessingException(JsonProcessingException ex) {
         Map<String, Object> error = new HashMap<>();
         error.put("success", false);
-        error.put("message", ex.getOriginalMessage() != null ? ex.getOriginalMessage() : "JSON处理失败");
+        error.put("message", "INVALID_JSON");
         error.put("status", HttpStatus.BAD_REQUEST.value());
         error.put("errorType", "JSON_PROCESSING_ERROR");
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
+    }
+
+    @ExceptionHandler({org.springframework.dao.DataAccessException.class,org.springframework.transaction.TransactionException.class})
+    public ResponseEntity<Map<String,Object>> handleDatabaseConflict(Exception ex) {
+        String code="AUTHORITY_UNAVAILABLE";int status=503;
+        Throwable cause=ex;
+        for(int depth=0;cause!=null&&depth<16;depth++,cause=cause.getCause()) {
+            if(cause instanceof java.sql.SQLException sql) {
+                String state=sql.getSQLState();String message=sql.getMessage();
+                if(message!=null&&message.contains("LAST_PLATFORM_ADMIN_REQUIRED")){code="LAST_PLATFORM_ADMIN_REQUIRED";status=409;break;}
+                if("23505".equals(state)){code="IDENTITY_OR_RESOURCE_CONFLICT";status=409;break;}
+                if("23503".equals(state)||"23514".equals(state)){code="RESOURCE_STATE_CONFLICT";status=409;break;}
+                if("40P01".equals(state)||"40001".equals(state)){code="CONCURRENT_IDENTITY_CHANGE_RETRY";status=409;break;}
+            }
+        }
+        return ResponseEntity.status(status).body(Map.of("success",false,"errorType",code,"message",code,"status",status));
+    }
+    @ExceptionHandler(org.springframework.http.converter.HttpMessageNotReadableException.class)
+    public ResponseEntity<Map<String,Object>> unreadableBody(Exception ex) {
+        return ResponseEntity.badRequest().body(Map.of("success",false,"errorType","INVALID_OR_DUPLICATE_JSON_FIELDS","status",400));
     }
 
     /**
@@ -229,7 +249,7 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Map<String, Object>> handleGenericException(Exception ex) {
         Map<String, Object> error = new HashMap<>();
         error.put("success", false);
-        error.put("message", "服务器处理请求时发生错误：" + ex.getMessage());
+        error.put("message", "INTERNAL_ERROR");
         error.put("status", HttpStatus.INTERNAL_SERVER_ERROR.value());
         error.put("errorType", "INTERNAL_ERROR");
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(error);

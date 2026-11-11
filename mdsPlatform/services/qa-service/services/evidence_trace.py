@@ -16,17 +16,31 @@ class TraceStorageError(RuntimeError):
 def current():return _current.get()
 def _sha(value):return hashlib.sha256(value).hexdigest()
 
+def source_frame(source, position):
+    """Render the citation label and source context shared by prompting and validation."""
+    context = source.model_context or source.content_preview
+    if source.source_type == 'user_image':
+        context = '用户所附图片，文件名不构成图片内容依据。'
+    return f'[来源{position}] {source.original_format or source.source_type} {context}'
+
+
 class EvidenceTrace:
     def __init__(self,kwargs):
         self.id=str(uuid.uuid4());self.contexts=[];self.inputs=[]
+        self.source_part_sha256 = None
+        self.source_frame_hashes = []
         self.data={'schemaVersion':'qa-actual-evidence-trace-1','traceId':self.id,'startedAt':datetime.now(timezone.utc).isoformat(),
             'questionSha256':_sha(str(kwargs.get('question','')).encode()),
             'snapshot':{key:str(kwargs[key]) for key in ('dataset_id','version_id','index_version_id') if kwargs.get(key)},
             'events':[],'modelCalls':[],'tokenizerCalls':[]}
     def event(self,kind,value):
         self.data['events'].append({'kind':kind,'value':copy.deepcopy(value)});self.checkpoint()
-    def generation_inputs(self,sources,images):
+    def generation_inputs(self,sources,images,*,source_part=None):
         self.contexts=[];self.inputs=[]
+        self.source_part_sha256 = _sha(source_part.encode()) if source_part is not None else None
+        self.source_frame_hashes = [
+            _sha(source_frame(source, index).encode()) for index, source in enumerate(sources, 1)
+        ] if source_part is not None else []
         for source in sources:
             text=source.model_context or source.content_preview
             value={'sourceId':source.source_id,'evidenceId':source.evidence_id,'representationId':source.representation_id,
@@ -63,10 +77,29 @@ class EvidenceTrace:
                     else:safe_parts.append({'type':'image_url','urlSha256':_sha(url.encode()),'externalUrlOmitted':True})
             safe_messages.append({'role':message.get('role'),'content':safe_parts})
         safe['messages']=safe_messages;call['request']=safe;joined='\n'.join(actual_text)
-        call['actualEvidence']=[{**copy.deepcopy(source),'contextMatchedActualRequest':True,
-            'factIdStatus':'present' if source['factIds'] else 'not_available',
-            'factIdsPresentInActualRequest':bool(source['factIds']) and all(fact in joined for fact in source['factIds'])}
-            for source,text in zip(self.inputs,self.contexts) if text and text in joined]
+        # Match the entire canonical source part from the outgoing user message.
+        # A source-like string inside another part cannot establish citation order.
+        source_part_sent = self.source_part_sha256 is not None and any(
+            part.get('textSha256') == self.source_part_sha256
+            for message in safe_messages if message['role'] == 'user'
+            for part in message['content'] if part['type'] == 'text'
+        )
+        if self.source_part_sha256 is not None:
+            call['expectedSourcePartSha256'] = self.source_part_sha256
+        evidence = []
+        for position, (source, text) in enumerate(zip(self.inputs, self.contexts), 1):
+            if not text or text not in joined:
+                continue
+            actual = {**copy.deepcopy(source), 'contextMatchedActualRequest': True,
+                      'factIdStatus': 'present' if source['factIds'] else 'not_available',
+                      'factIdsPresentInActualRequest': bool(source['factIds']) and all(fact in joined for fact in source['factIds'])}
+            if source_part_sent:
+                actual['sourceFrameProof'] = {
+                    'position': position, 'frameSha256': self.source_frame_hashes[position - 1],
+                    'sourcePartSha256': self.source_part_sha256,
+                }
+            evidence.append(actual)
+        call['actualEvidence'] = evidence
         call['status']='request_prepared'
         target='modelCalls' if path=='/v1/chat/completions' else 'tokenizerCalls';self.data[target].append(call);self.checkpoint()
         return call

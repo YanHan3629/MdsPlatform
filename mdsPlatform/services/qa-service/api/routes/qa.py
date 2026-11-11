@@ -16,6 +16,8 @@ router = APIRouter()
 
 def _handle_errors(exc: Exception) -> HTTPException:
     import requests
+    from core.worker_authority import AuthorityError
+    if isinstance(exc,AuthorityError):return HTTPException(status_code=exc.status,detail=exc.code)
     from services.evidence_trace import TraceStorageError
     if isinstance(exc, TraceStorageError):
         return HTTPException(status_code=503, detail="EVIDENCE_TRACE_UNAVAILABLE: 本次证据记录未能保存，暂不能交付回答，请稍后重试")

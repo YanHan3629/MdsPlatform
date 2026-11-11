@@ -18,7 +18,5 @@ public interface MmDatasetMapper {
 
     MmDataset selectBySpaceIdAndName(@Param("spaceId") UUID spaceId, @Param("datasetName") String datasetName);
 
-    List<MmDataset> selectBySpaceId(@Param("spaceId") UUID spaceId, @Param("limit") int limit, @Param("offset") int offset);
-
-    long countBySpaceId(@Param("spaceId") UUID spaceId);
+    List<MmDataset> selectBySpaceId(@Param("spaceId") UUID spaceId);
 }

@@ -1,9 +1,11 @@
 package com.fwdrobo.sirius.dataspace;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fwdrobo.sirius.security.AuthorizationService;
 import com.fwdrobo.sirius.service.*;
 import com.fwdrobo.sirius.dto.mm.MmSpaceReq;
 import com.fwdrobo.sirius.util.SecurityUtils;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -25,9 +27,13 @@ public class PersistentDataSpaceService {
     private final MmSpaceService spaces;
     private final MmIndexOutboxService outbox;
     private final ObjectMapper json;
+    private final AuthorizationService auth;
+    private final ObjectProvider<DataSpaceDeliveryService> deliveryService;
     public PersistentDataSpaceService(JdbcTemplate jdbc,DatasetAccessService access,FileService files,
-            MmSpaceService spaces,MmIndexOutboxService outbox,ObjectMapper json) {
-        this.jdbc=jdbc;this.access=access;this.files=files;this.spaces=spaces;this.outbox=outbox;this.json=json;
+            MmSpaceService spaces,MmIndexOutboxService outbox,ObjectMapper json,AuthorizationService auth,
+            ObjectProvider<DataSpaceDeliveryService> deliveryService) {
+        this.jdbc=jdbc;this.access=access;this.files=files;this.spaces=spaces;this.outbox=outbox;this.json=json;this.auth=auth;
+        this.deliveryService=deliveryService;
     }
     static Map<String,Object> map(Object... fields) {
         Map<String,Object> result=new LinkedHashMap<>();
@@ -54,6 +60,63 @@ public class PersistentDataSpaceService {
             value instanceof org.postgresql.util.PGobject p && "jsonb".equals(p.getType())?decode(p):value);
         return rows;
     }
+    /** Organization membership alone never makes a dataset row visible. */
+    private boolean catalogRowVisible(Map<String,Object> row) {
+        if(!(row.get("datasetId") instanceof UUID dataset))return false;
+        return access.canReadVersion(dataset,(UUID)row.get("versionId"),(UUID)row.get("indexVersionId"));
+    }
+    private UUID optionalId(Object value) {
+        if(value==null)return null;
+        try{return value instanceof UUID id?id:UUID.fromString(value.toString());}
+        catch(IllegalArgumentException invalid){return null;}
+    }
+    private boolean eventVisible(Map<String,Object> row) {
+        UUID target=optionalId(row.get("objectId"));if(target==null)return false;
+        String type=Objects.toString(row.get("objectType"),"");
+        Object decoded=decode(row.get("detail"));Map<?,?> detail=decoded instanceof Map<?,?> value?value:Map.of();
+        if("SPACE".equals(type))return Boolean.TRUE.equals(jdbc.queryForObject(
+            "SELECT EXISTS(SELECT 1 FROM mm_space WHERE space_id=? AND org_id=?)",Boolean.class,target,access.actorOrg()));
+        if("SOURCE".equals(type))return jdbc.queryForList("SELECT dataset_id FROM ds_source WHERE source_id=? AND org_id=?",
+            UUID.class,target,access.actorOrg()).stream().anyMatch(dataset->access.canReadVersion(dataset,null,null));
+        if("DATASET".equals(type)) {
+            UUID version=optionalId(detail.get("versionId")),index=optionalId(detail.get("indexVersionId"));
+            if(detail.containsKey("versionId")&&version==null||detail.containsKey("indexVersionId")&&index==null)return false;
+            return access.canReadVersion(target,version,index);
+        }
+        if("PRODUCT".equals(type)) {
+            UUID productVersion=optionalId(detail.get("productVersionId"));
+            if(detail.containsKey("productVersionId")&&productVersion==null)return false;
+            var scopes=jdbc.queryForList("""
+                SELECT dataset_id AS "datasetId",version_id AS "versionId",index_version_id AS "indexVersionId"
+                FROM ds_product_version WHERE product_id=? AND (?::uuid IS NULL OR product_version_id=?::uuid)
+                """,target,productVersion,productVersion);
+            return scopes.stream().anyMatch(this::catalogRowVisible);
+        }
+        return false;
+    }
+    private List<Map<String,Object>> visibleTasks(UUID org) {
+        var rows=jdbc.queryForList("""
+            SELECT t.task_id AS "taskId",t.dataset_id AS "datasetId",t.dataset_version_id AS "versionId",
+              d.dataset_name AS "datasetName",v.version_name AS "versionName",t.index_version_id AS "indexVersionId",t.task_status AS status,
+              t.stage,t.error_message AS error,t.updated_at AS "updatedAt"
+            FROM mm_ingest_task t JOIN mm_dataset d ON d.dataset_id=t.dataset_id
+            JOIN mm_dataset_version v ON v.version_id=t.dataset_version_id AND v.dataset_id=t.dataset_id AND v.raw_commit_id=t.raw_commit_id
+            WHERE t.org_id=? AND (t.index_version_id IS NULL OR EXISTS(SELECT 1 FROM mm_index_version task_index
+                WHERE task_index.index_version_id=t.index_version_id AND task_index.dataset_id=t.dataset_id
+                  AND task_index.dataset_version_id=t.dataset_version_id)) ORDER BY t.updated_at DESC
+            """,org);
+        return normalise(rows.stream().filter(row->access.canInspectIndexTask((UUID)row.get("datasetId"),
+            (UUID)row.get("versionId"),(UUID)row.get("indexVersionId"))).limit(50).toList());
+    }
+    private List<Map<String,Object>> visibleEvents(UUID org) {
+        var rows=jdbc.queryForList("""
+            SELECT a.event_id AS "eventId",a.action AS title,a.details AS detail,a.object_type AS "objectType",
+              a.object_id AS "objectId",u.user_name AS actor,a.created_at AS "createdAt"
+            FROM ds_audit_event a LEFT JOIN fwd_user u ON u.user_id=a.actor_user_id
+            WHERE a.org_id=? ORDER BY a.created_at DESC
+            """,org);
+        return normalise(rows.stream().filter(this::eventVisible).limit(50).toList());
+    }
     public List<Map<String,Object>> listBusinessDomains() {
         String[][] names={{"marketing","营销"},{"service","服务"},{"retail","零售"},{"customer-service","客服"},{"channel-sales","渠道销售"},{"procurement","采购"},
             {"manufacturing","制造"},{"rd","研发"},{"quality","质量"},{"logistics","物流"},{"supply-chain","供应链"},{"finance","财务"},{"planning","企划"},{"legal","法务"},{"hr","人力"},{"strategy","战略"},{"it","IT"}};
@@ -73,14 +136,25 @@ public class PersistentDataSpaceService {
         return map("spaceId",created.spaceId(),"status","ACTIVE","authStatus","NOT_ASSESSED");
     }
     public Map<String,Object> verifySpace(String id) {throw error(HttpStatus.CONFLICT,"未配置企业认证审核；创建平台空间不代表企业已认证");}
+    /** Catalog association changes metadata, never the frozen bytes or publication state. */
+    private void requireSourceMetadataWrite(UUID dataset) {
+        try (var ignored=access.fixedOperation("dataset.draft.manage","GENERAL_READ")) {
+            var views=jdbc.queryForList("SELECT owner_org_id,version_id,index_version_id,state FROM ds_controlled_view WHERE dataset_id=?",dataset);
+            if(views.isEmpty()){access.requireDatasetWrite(dataset);return;}
+            if(views.size()!=1||!"READY".equals(views.get(0).get("state"))||!access.actorOrg().equals(views.get(0).get("owner_org_id")))
+                throw error(HttpStatus.NOT_FOUND,"SOURCE_METADATA_SCOPE_NOT_AVAILABLE");
+            var view=views.get(0);
+            access.requireVersionRead(dataset,(UUID)view.get("version_id"),(UUID)view.get("index_version_id"));
+        }
+    }
     private Map<String,Object> source(UUID source) {
         var row=one("SELECT s.*,d.space_id FROM ds_source s JOIN mm_dataset d ON d.dataset_id=s.dataset_id WHERE source_id=?",source);
-        access.requireDatasetWrite((UUID)row.get("dataset_id"));return row;
+        requireSourceMetadataWrite((UUID)row.get("dataset_id"));return row;
     }
     @Transactional public Map<String,Object> createSource(Map<String,Object> body) {
         UUID org=access.actorOrg();String type=text(body,"sourceType","EXISTING_DATASET");
         if(!Set.of("EXISTING_DATASET","LOCAL_UPLOAD").contains(type))throw error(HttpStatus.CONFLICT,"该外部连接器尚未配置，不能执行接入；可复用已有数据或打开真实文件/目录上传");
-        UUID dataset=uuid(required(body,"datasetId"));access.requireDatasetWrite(dataset);
+        UUID dataset=uuid(required(body,"datasetId"));requireSourceMetadataWrite(dataset);
         var actual=one("SELECT space_id FROM mm_dataset WHERE dataset_id=?",dataset);
         if(!text(body,"spaceId","").isBlank()&&!actual.get("space_id").equals(uuid(body.get("spaceId").toString())))throw error(HttpStatus.BAD_REQUEST,"空间与数据集不匹配");
         UUID id=UUID.randomUUID();
@@ -99,6 +173,7 @@ public class PersistentDataSpaceService {
             'ASSOCIATED' AS status,s.created_at AS "createdAt" FROM ds_source s JOIN mm_dataset d ON d.dataset_id=s.dataset_id
             JOIN org o ON o.org_id=s.org_id LEFT JOIN ds_catalog c ON c.source_id=s.source_id WHERE s.org_id=? ORDER BY s.created_at DESC
             """,access.actorOrg());
+        rows.removeIf(row->!catalogRowVisible(row));
         rows.forEach(r->r.put("businessName",businessName(r.get("businessCode"))));return normalise(rows);
     }
     @Transactional public Map<String,Object> createCatalog(String sourceId,Map<String,Object> body) {
@@ -117,7 +192,7 @@ public class PersistentDataSpaceService {
             SELECT c.source_id AS "sourceId",c.source_id AS "catalogId",c.catalog_name AS "catalogName",c.business_code AS "businessCode",
             c.description,c.intended_use AS "intendedUse",s.dataset_id AS "datasetId",'DESCRIBED' AS status,c.updated_at AS "updatedAt"
             FROM ds_catalog c JOIN ds_source s ON s.source_id=c.source_id WHERE s.org_id=? ORDER BY c.updated_at DESC
-            """,access.actorOrg());rows.forEach(r->r.put("businessName",businessName(r.get("businessCode"))));return normalise(rows);
+            """,access.actorOrg());rows.removeIf(row->!catalogRowVisible(row));rows.forEach(r->r.put("businessName",businessName(r.get("businessCode"))));return normalise(rows);
     }
     public Map<String,Object> manifestSummary(UUID dataset,UUID version) {
         access.requireVersionRead(dataset,version,null);
@@ -152,6 +227,7 @@ public class PersistentDataSpaceService {
             LEFT JOIN LATERAL(SELECT * FROM ds_quality_report qr WHERE qr.version_id=v.version_id ORDER BY qr.created_at DESC LIMIT 1) q ON true
             WHERE d.org_id=? AND d.status='ACTIVE' ORDER BY d.created_at DESC
             """,org);
+        rows.removeIf(row->!catalogRowVisible(row));
         Set<Object> present=new HashSet<>();rows.forEach(r->present.add(r.get("datasetId")));
         for(var scope:access.readableReadyScopes()) if(present.add(scope.get("datasetId"))) {
             var entry=new LinkedHashMap<>(scope);entry.put("accessMode","GRANTED");entry.put("status","PUBLISHED");entry.put("qualityStatus","NOT_ASSESSED");
@@ -179,11 +255,13 @@ public class PersistentDataSpaceService {
         long ready=datasets.stream().filter(d->"READY".equals(d.get("indexStatus"))).count();
         var owner=one("SELECT org_id AS \"orgId\",org_name AS name FROM org WHERE org_id=?",org);
         return map("platformName","产业链数据空间平台","chainOwner",owner,"businessDomains",listBusinessDomains(),"spaces",listSpaces(),
-            "sources",sources,"catalogs",catalogs,"datasets",datasets,"products",products,"intents",listIntents(),"contracts",listContracts(),"deliveries",listDeliveries(),
+            "sources",sources,"catalogs",catalogs,"datasets",datasets,"products",products,"intents",listIntents(),
+            "contracts",auth.hasOperation("contract.read")?listContracts():List.of(),
+            "deliveries",auth.hasOperation("delivery.receipt.read")?listDeliveries():List.of(),
             "kpis",map("sources",sources.size(),"catalogs",catalogs.size(),"datasets",datasets.size(),"readyDatasets",ready,"fileCount",count,
                 "recordCount",null,"avgQuality",null,"qualityMeasuredDatasets",datasets.stream().filter(d->d.get("qualityScore")!=null).count(),"qualityBlockedDatasets",datasets.stream().filter(d->"FAILED".equals(d.get("qualityStatus"))).count(),"products",products.stream().filter(p->"PUBLISHED".equals(p.get("status"))).count()),
-            "tasks",normalise(jdbc.queryForList("SELECT t.task_id AS \"taskId\",t.dataset_id AS \"datasetId\",t.dataset_version_id AS \"versionId\",d.dataset_name AS \"datasetName\",v.version_name AS \"versionName\",t.task_status AS status,t.stage,t.error_message AS error,t.updated_at AS \"updatedAt\" FROM mm_ingest_task t JOIN mm_dataset d ON d.dataset_id=t.dataset_id JOIN mm_dataset_version v ON v.version_id=t.dataset_version_id WHERE t.org_id=? ORDER BY t.updated_at DESC LIMIT 50",org)),
-            "events",normalise(jdbc.queryForList("SELECT a.event_id AS \"eventId\",a.action AS title,a.details AS detail,a.object_type AS \"objectType\",a.object_id AS \"objectId\",u.user_name AS actor,a.created_at AS \"createdAt\" FROM ds_audit_event a LEFT JOIN fwd_user u ON u.user_id=a.actor_user_id WHERE a.org_id=? ORDER BY a.created_at DESC LIMIT 50",org)));
+            "tasks",visibleTasks(org),
+            "events",visibleEvents(org));
     }
     @Transactional public Map<String,Object> buildIndex(String datasetId,Map<String,Object> body) {
         UUID dataset=uuid(datasetId);access.requireDatasetWrite(dataset);
@@ -197,6 +275,7 @@ public class PersistentDataSpaceService {
     public List<Map<String,Object>> listProducts() {
         UUID org=access.actorOrg();var rows=jdbc.queryForList("""
             SELECT p.product_id AS "productId",p.product_name AS "productName",p.description,p.status,p.visibility,p.business_code AS "businessCode",
+            p.public_description_explicit AS "publicDescriptionExplicit",
             o.org_name AS "providerName",p.provider_org_id AS "providerOrgId",v.product_version_id AS "productVersionId",v.revision,
             v.dataset_id AS "datasetId",v.version_id AS "versionId",v.index_version_id AS "indexVersionId",dv.version_name AS "versionName",
             v.file_count AS "fileCount",v.formats,v.content_types AS "contentTypes",v.allowed_use AS rights,v.created_at AS "updatedAt",
@@ -209,8 +288,12 @@ public class PersistentDataSpaceService {
             LEFT JOIN ds_quality_report q ON q.report_id=v.quality_report_id
             WHERE p.provider_org_id=? OR (p.status='PUBLISHED' AND p.visibility='PUBLIC') ORDER BY v.created_at DESC
             """,org);
+        rows.removeIf(row->!catalogRowVisible(row)&&!("PUBLISHED".equals(row.get("status"))&&"PUBLIC".equals(row.get("visibility"))));
         for(var row:rows) {
             boolean readable=access.canReadVersion((UUID)row.get("datasetId"),(UUID)row.get("versionId"),(UUID)row.get("indexVersionId"));
+            boolean explicitPublicDescription=Boolean.TRUE.equals(row.remove("publicDescriptionExplicit"));
+            if("PUBLIC".equals(row.get("visibility"))&&!explicitPublicDescription
+                &&!(org.equals(row.get("providerOrgId"))&&readable))row.put("description","");
             row.put("hasAccess",readable);row.put("formats",decode(row.get("formats")));row.put("contentTypes",decode(row.get("contentTypes")));
             row.put("businessName",businessName(row.get("businessCode")));
             if(!readable)for(String key:List.of("datasetId","versionId","indexVersionId"))row.remove(key);
@@ -230,19 +313,61 @@ public class PersistentDataSpaceService {
         audit("DELIST_PRODUCT","PRODUCT",id,Map.of());return map("productId",id,"status","OFFLINE");
     }
     public List<Map<String,Object>> listIntents() {
-        return normalise(jdbc.queryForList("""
+        var actor=auth.actor();
+        boolean submit=actor.operations().contains("application.submit");
+        boolean review=actor.operations().contains("application.review");
+        boolean edit=actor.operations().contains("contract.edit");
+        if(!submit&&!review&&!edit)return List.of();
+        var rows=intentRows(null,actor.orgId(),submit,review,edit);
+        rows.removeIf(row->!actor.orgId().equals(row.get("consumerOrgId"))
+            && !(review&&canHandleApplication((UUID)row.get("datasetId"),"application.review"))
+            && !(edit&&"APPROVED".equals(row.get("status"))&&canHandleApplication((UUID)row.get("datasetId"),"contract.edit")));
+        rows.forEach(row->row.remove("datasetId"));
+        return normalise(rows);
+    }
+    private boolean canHandleApplication(UUID dataset,String operation) {
+        try(var ignored=access.fixedOperation(operation,"GENERAL_READ")){
+            access.requireDatasetWrite(dataset);
+            return true;
+        }catch(ResponseStatusException denied){
+            if(Set.of(403,404).contains(denied.getStatusCode().value()))return false;
+            throw denied;
+        }
+    }
+    // Mutation responses are limited to the one application already authorized by the caller.
+    Map<String,Object> applicationView(UUID intent) {
+        var rows=intentRows(intent,access.actorOrg(),true,true,false);
+        if(rows.isEmpty())throw error(HttpStatus.NOT_FOUND,"消费申请不存在或无权查看");
+        var row=normalise(rows).get(0);
+        row.remove("datasetId");
+        return row;
+    }
+    private List<Map<String,Object>> intentRows(UUID intent,UUID org,boolean submit,boolean review,boolean edit) {
+        return jdbc.queryForList("""
             SELECT a.application_id AS "intentId",a.product_version_id AS "productVersionId",p.product_name AS "productName",p.business_code AS "businessCode",
             a.purpose,a.status,dv.version_name AS "versionName",v.revision AS "productRevision",a.decision_reason AS "decisionReason",o.org_name AS "consumerName",a.consumer_org_id AS "consumerOrgId",
             p.provider_org_id AS "providerOrgId",a.created_by AS "createdBy",a.expected_at AS "expectedSendTime",a.created_at AS "createdAt",
-            a.decided_at AS "decidedAt",u.user_name AS "decisionActor"
+            a.decided_at AS "decidedAt",u.user_name AS "decisionActor",v.dataset_id AS "datasetId"
             FROM ds_application a JOIN ds_product_version v ON v.product_version_id=a.product_version_id JOIN ds_product p ON p.product_id=v.product_id JOIN mm_dataset_version dv ON dv.version_id=v.version_id
-            JOIN org o ON o.org_id=a.consumer_org_id LEFT JOIN fwd_user u ON u.user_id=a.decided_by WHERE a.consumer_org_id=? OR p.provider_org_id=? ORDER BY a.created_at DESC
-            """,access.actorOrg(),access.actorOrg()));
+            JOIN org o ON o.org_id=a.consumer_org_id LEFT JOIN fwd_user u ON u.user_id=a.decided_by
+            WHERE (?::uuid IS NULL OR a.application_id=?)
+              AND ((? AND a.consumer_org_id=?) OR (p.provider_org_id=? AND (? OR (? AND a.status='APPROVED'))))
+            ORDER BY a.created_at DESC
+            """,intent,intent,submit,org,org,review,edit);
     }
     public List<Map<String,Object>> listContracts() {
+        return contractRows(null);
+    }
+    Map<String,Object> contractView(UUID id) {
+        return contractRows(id).stream().findFirst().orElseThrow(()->error(HttpStatus.NOT_FOUND,"合约不存在或不可访问"));
+    }
+    private List<Map<String,Object>> contractRows(UUID id) {
+        var actor=auth.actor();
+        boolean receipt=actor.operations().contains("delivery.receipt.read");
         var rows=jdbc.queryForList("""
             SELECT c.contract_id AS "contractId",c.application_id AS "intentId",c.status,c.scheduled_at AS "sendTime",c.valid_from AS "validFrom",c.valid_to AS "validTo",c.revision,c.revoked_at AS "revokedAt",c.revoke_reason AS "revokeReason",
-              c.provider_org_id AS "providerOrgId",c.consumer_org_id AS "consumerOrgId",c.provider_confirmed_at AS "providerConfirmedAt",c.consumer_confirmed_at AS "consumerConfirmedAt",c.purpose,c.scope_type AS "scopeType",
+              c.provider_org_id AS "providerOrgId",c.consumer_org_id AS "consumerOrgId",c.provider_confirmed_at AS "providerConfirmedAt",c.consumer_confirmed_at AS "consumerConfirmedAt",c.purpose,c.scope_type AS "scopeType",plan.view_id AS "viewId",plan.view_authorization_version AS "viewAuthorizationVersion",
+              plan.delivery_service_id AS "deliveryServiceSubjectId",
               c.minimum_quality AS "qualityThreshold",v.product_version_id AS "productVersionId",p.product_id AS "productId",p.product_name AS "productName",p.business_code AS "businessCode",v.revision AS "productRevision",
               v.dataset_id AS "datasetId",v.version_id AS "versionId",v.index_version_id AS "indexVersionId",dv.version_name AS "versionName",v.manifest_digest AS "manifestDigest",v.file_count AS "fileCount",
               po.org_name AS "providerName",co.org_name AS "consumerName",e.endpoint_id AS "endpointId",e.endpoint_name AS "receiverEndpoint",e.adapter_type AS "deliveryMethod",
@@ -250,23 +375,41 @@ public class PersistentDataSpaceService {
               CASE WHEN c.status IN ('REVOKED','CANCELLED') THEN c.status WHEN c.valid_to<=now() THEN 'EXPIRED' WHEN c.status<>'CONFIRMED' THEN 'PENDING_CONFIRMATION' WHEN c.valid_from>now() THEN 'WAITING_VALIDITY' ELSE 'EFFECTIVE' END AS "authorizationStatus"
             FROM ds_contract c JOIN ds_product_version v ON v.product_version_id=c.product_version_id JOIN ds_product p ON p.product_id=v.product_id JOIN mm_dataset_version dv ON dv.version_id=v.version_id
             JOIN org po ON po.org_id=c.provider_org_id JOIN org co ON co.org_id=c.consumer_org_id JOIN ds_receiver_endpoint e ON e.endpoint_id=c.endpoint_id
-            JOIN ds_quality_report q ON q.report_id=v.quality_report_id LEFT JOIN ds_delivery_task t ON t.contract_id=c.contract_id AND t.contract_revision=c.revision
-            WHERE c.provider_org_id=? OR c.consumer_org_id=? ORDER BY c.created_at DESC
-            """,access.actorOrg(),access.actorOrg());
-        for(var row:rows){row.put("contractName","技术授权 · "+row.get("productName"));row.put("businessName",businessName(row.get("businessCode")));row.put("hasAccess",access.canReadVersion((UUID)row.get("datasetId"),(UUID)row.get("versionId"),(UUID)row.get("indexVersionId")));}return normalise(rows);
+            JOIN ds_quality_report q ON q.report_id=v.quality_report_id
+            LEFT JOIN ds_contract_controlled_revision plan ON plan.contract_id=c.contract_id AND plan.revision=c.revision
+            LEFT JOIN ds_delivery_task t ON t.contract_id=c.contract_id AND t.contract_revision=c.revision
+            WHERE (?::uuid IS NULL OR c.contract_id=?) AND (c.provider_org_id=? OR c.consumer_org_id=?) ORDER BY c.created_at DESC
+            """,id,id,actor.orgId(),actor.orgId());
+        for(var row:rows){
+            row.put("contractName","技术授权 · "+row.get("productName"));
+            row.put("businessName",businessName(row.get("businessCode")));
+            row.put("hasAccess",auth.canUseDataset(actor,(UUID)row.get("datasetId"),(UUID)row.get("versionId"),
+                (UUID)row.get("indexVersionId"),"data.catalog.read","GENERAL_READ"));
+            if(!receipt){
+                row.remove("taskId");
+                row.remove("error");
+                row.remove("pushStatus");
+            }
+        }
+        return normalise(rows);
     }
     public List<Map<String,Object>> listDeliveries() {
         var rows=jdbc.queryForList("""
             SELECT t.task_id AS "taskId",t.contract_id AS "contractId",t.delivery_key AS "deliveryKey",t.contract_revision AS "contractRevision",t.status AS "deliveryStatus",t.attempt_count AS "attemptCount",t.max_attempts AS "maxAttempts",t.last_error AS error,t.next_attempt_at AS "nextAttemptAt",t.updated_at AS "updatedAt",
               p.product_name AS "productName",e.endpoint_name AS "receiverEndpoint",r.receipt_id AS "receiptId",r.file_count AS "fileCount",r.size_bytes AS "sizeBytes",r.manifest_digest AS "manifestDigest",r.received_at AS "deliveredAt",r.receiver_identity AS "receiverIdentity",
-              v.dataset_id AS "datasetId",v.version_id AS "versionId",v.index_version_id AS "indexVersionId",c.revision AS "currentRevision",(c.status='CONFIRMED' AND c.revoked_at IS NULL AND c.valid_from<=now() AND now()<c.valid_to) AS "liveContract"
+              v.dataset_id AS "datasetId",v.version_id AS "versionId",v.index_version_id AS "indexVersionId",c.revision AS "currentRevision",
+              (c.status='CONFIRMED' AND c.revoked_at IS NULL AND c.valid_from<=now() AND now()<c.valid_to
+               AND provider.org_status=1 AND consumer.org_status=1 AND e.enabled) AS "liveContract"
             FROM ds_delivery_task t JOIN ds_contract c ON c.contract_id=t.contract_id JOIN ds_product_version v ON v.product_version_id=c.product_version_id JOIN ds_product p ON p.product_id=v.product_id
+            JOIN org provider ON provider.org_id=c.provider_org_id JOIN org consumer ON consumer.org_id=c.consumer_org_id
             JOIN ds_receiver_endpoint e ON e.endpoint_id=c.endpoint_id LEFT JOIN ds_receipt r ON r.delivery_key=t.delivery_key
             WHERE c.provider_org_id=? OR c.consumer_org_id=? ORDER BY t.created_at DESC
             """,access.actorOrg(),access.actorOrg());
+        boolean packageOperation=auth.hasOperation("delivery.package.download");
         for(var row:rows){
-            boolean readable=true;try{access.requireVersionRead((UUID)row.get("datasetId"),(UUID)row.get("versionId"),(UUID)row.get("indexVersionId"));}catch(ResponseStatusException e){readable=false;}
-            row.put("hasPackageAccess",readable&&(access.ownsDataset((UUID)row.get("datasetId"))||(Boolean.TRUE.equals(row.get("liveContract"))&&row.get("currentRevision").equals(row.get("contractRevision")))));
+            boolean packageAccess=packageOperation&&"DELIVERED".equals(row.get("deliveryStatus"))
+                &&deliveryService.getObject().canOpenPackage((UUID)row.get("taskId"));
+            row.put("hasPackageAccess",packageAccess);
         }
         return normalise(rows);
     }
@@ -293,6 +436,8 @@ public class PersistentDataSpaceService {
         String name=required(body,"productName"),allowed=text(body,"allowedUse",String.valueOf(source.get("intended_use")));
         if(allowed.isBlank())throw error(HttpStatus.BAD_REQUEST,"必须说明产品允许用途");
         String visibility=text(body,"visibility","INTERNAL");if(!Set.of("PUBLIC","INTERNAL").contains(visibility))throw error(HttpStatus.BAD_REQUEST,"产品可见范围需为PUBLIC或INTERNAL");
+        boolean publicListing="PUBLIC".equals(visibility);
+        String description=text(body,"description",publicListing?"":String.valueOf(source.get("description")));
         UUID product;int revision;
         if(body.containsKey("productId")){
             product=uuid(body.get("productId").toString());var old=one("SELECT product_id FROM ds_product WHERE product_id=? AND source_id=? AND provider_org_id=? FOR UPDATE",product,source.get("source_id"),access.actorOrg());
@@ -300,14 +445,20 @@ public class PersistentDataSpaceService {
             String key=text(body,"idempotencyKey",dataset+":"+HexFormat.of().formatHex(digest(name)));
             if(key.isBlank()||key.length()>128)throw error(HttpStatus.BAD_REQUEST,"发布幂等键需为1至128字符");
             product=UUID.randomUUID();
-            jdbc.update("INSERT INTO ds_product(product_id,source_id,provider_org_id,product_name,description,business_code,visibility,status,created_by,request_key) VALUES (?,?,?,?,?,?,?,'DRAFT',?,?) ON CONFLICT(provider_org_id,request_key) WHERE request_key IS NOT NULL DO NOTHING",product,source.get("source_id"),access.actorOrg(),name,text(body,"description",String.valueOf(source.get("description"))),source.get("business_code"),visibility,SecurityUtils.getUserId(),key);
+            jdbc.update("INSERT INTO ds_product(product_id,source_id,provider_org_id,product_name,description,business_code,visibility,status,created_by,request_key) VALUES (?,?,?,?,?,?,?,'DRAFT',?,?) ON CONFLICT(provider_org_id,request_key) WHERE request_key IS NOT NULL DO NOTHING",product,source.get("source_id"),access.actorOrg(),name,description,source.get("business_code"),visibility,SecurityUtils.getUserId(),key);
             var found=one("SELECT product_id,source_id FROM ds_product WHERE provider_org_id=? AND request_key=? FOR UPDATE",access.actorOrg(),key);
             if(!source.get("source_id").equals(found.get("source_id")))throw error(HttpStatus.CONFLICT,"发布幂等键已用于另一个数据源");product=(UUID)found.get("product_id");
         }
         var existing=jdbc.queryForList("SELECT * FROM ds_product_version WHERE product_id=? ORDER BY revision DESC LIMIT 1",product);
-        var currentProduct=one("SELECT product_name,description,visibility,status FROM ds_product WHERE product_id=? FOR UPDATE",product);
-        String description=text(body,"description",String.valueOf(source.get("description")));
-        boolean sameMetadata=name.equals(currentProduct.get("product_name"))&&description.equals(currentProduct.get("description"))&&visibility.equals(currentProduct.get("visibility"));
+        var currentProduct=one("SELECT product_name,description,visibility,status,public_description_explicit FROM ds_product WHERE product_id=? FOR UPDATE",product);
+        boolean suppliedDescription=body.get("description")!=null;
+        boolean keepPublicDescription=publicListing&&!suppliedDescription&&visibility.equals(currentProduct.get("visibility"));
+        if(keepPublicDescription)
+            description=Objects.toString(currentProduct.get("description"),"");
+        boolean explicitPublicDescription=publicListing&&(suppliedDescription||
+            keepPublicDescription&&Boolean.TRUE.equals(currentProduct.get("public_description_explicit")));
+        boolean sameMetadata=name.equals(currentProduct.get("product_name"))&&description.equals(currentProduct.get("description"))
+            &&visibility.equals(currentProduct.get("visibility"))&&Objects.equals(explicitPublicDescription,currentProduct.get("public_description_explicit"));
         if(!existing.isEmpty()){
             var frozen=existing.get(0);
             if(version.equals(frozen.get("version_id"))&&index.equals(frozen.get("index_version_id"))&&allowed.equals(frozen.get("allowed_use"))&&sameMetadata){
@@ -330,8 +481,9 @@ public class PersistentDataSpaceService {
             INSERT INTO ds_product_version(product_version_id,product_id,revision,dataset_id,version_id,index_version_id,raw_commit_id,manifest_digest,file_count,size_bytes,formats,content_types,allowed_use,quality_report_id,created_by)
             VALUES (?,?,?,?,?,?,?,?,?,?,?::jsonb,?::jsonb,?,?,?)
             """,productVersion,product,revision,dataset,version,index,raw.get("raw_commit_id"),summary.get("manifestDigest"),summary.get("fileCount"),summary.get("sizeBytes"),encode(formats),encode(types),allowed,quality.get("report_id"),SecurityUtils.getUserId());
-        jdbc.update("UPDATE ds_product SET product_name=?,description=?,business_code=?,visibility=?,status='PUBLISHED',updated_at=now() WHERE product_id=?",name,text(body,"description",String.valueOf(source.get("description"))),source.get("business_code"),visibility,product);
-        audit("PUBLISH_PRODUCT_VERSION","PRODUCT",product,map("productVersionId",productVersion,"revision",revision,"datasetId",dataset,"versionId",version,"indexVersionId",index,"manifestDigest",summary.get("manifestDigest"),"qualityReportId",quality.get("report_id")));
+        jdbc.update("UPDATE ds_product SET product_name=?,description=?,business_code=?,visibility=?,public_description_explicit=?,status='PUBLISHED',updated_at=now() WHERE product_id=?",
+            name,description,source.get("business_code"),visibility,explicitPublicDescription,product);
+        audit("PUBLISH_PRODUCT_VERSION","PRODUCT",product,map("productVersionId",productVersion,"revision",revision,"datasetId",dataset,"versionId",version,"indexVersionId",index,"manifestDigest",summary.get("manifestDigest"),"qualityReportId",quality.get("report_id"),"publicDescriptionExplicit",explicitPublicDescription));
         return listProducts().stream().filter(p->productVersion.equals(p.get("productVersionId"))).findFirst().orElseThrow();
     }
     private byte[] digest(String text){try{return MessageDigest.getInstance("SHA-256").digest(text.getBytes(StandardCharsets.UTF_8));}catch(Exception e){throw new IllegalStateException(e);}}

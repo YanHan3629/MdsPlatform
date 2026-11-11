@@ -26,9 +26,11 @@ public record JobRequest(
 ) {
     public record Input(
             @NotNull UUID repoId,
+            UUID commitId,
             @NotNull
             @Size(max = 100, message = "单个 repo 的 paths 最多支持 100 条")
             List<@ValidLogicalPath String> paths
     ) {
+        public Input(UUID repoId,List<String> paths){this(repoId,null,paths);}
     }
 }

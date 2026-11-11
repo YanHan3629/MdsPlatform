@@ -16,20 +16,27 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.UUID;
+import com.fwdrobo.sirius.security.IndexCacheScopeService;
 import java.util.Map;
 
 @Component
 public class SearchServiceClient {
 
+    // A cold query can stream several verified index artifacts before execution.
+    private static final Duration COLD_INDEX_QUERY_TIMEOUT = Duration.ofMinutes(4);
+
     private final ObjectMapper objectMapper;
     private final String baseUrl;
     private final String internalToken;
     private final HttpClient httpClient;
+    private final com.fwdrobo.sirius.security.WorkerEvidenceScopeService evidenceScope;
 
     public SearchServiceClient(@Value("${mm.search.base-url}") String baseUrl,
                                @Value("${mm.internal.token:}") String internalToken,
-                               ObjectMapper objectMapper) {
+                               ObjectMapper objectMapper,com.fwdrobo.sirius.security.WorkerEvidenceScopeService evidenceScope) {
+        this.evidenceScope=evidenceScope;
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         this.internalToken = internalToken;
         this.objectMapper = objectMapper;
@@ -38,12 +45,30 @@ public class SearchServiceClient {
                 .build();
     }
 
+    private String scopedBearer(Object body,String path){
+        if(body!=null){
+            var value=objectMapper.valueToTree(body);
+            String[] keys={"dataset","version","index_version"};String[] camel={"datasetId","versionId","indexVersionId"};String[] snake={"dataset_id","version_id","index_version_id"};
+            UUID[] ids=new UUID[3];
+            for(int i=0;i<3;i++){
+                String first=value.path(camel[i]).asText(""),second=value.path(snake[i]).asText("");
+                if(!first.isBlank()&&!second.isBlank()&&!first.equals(second))throw new IllegalArgumentException("Ambiguous frozen scope");
+                ids[i]=UUID.fromString(first.isBlank()?second:first);
+            }
+            return evidenceScope.bearer(ids[0],ids[1],ids[2]);
+        }
+        var match=java.util.regex.Pattern.compile("^/indexes/([0-9a-fA-F-]{36})/([0-9a-fA-F-]{36})/([0-9a-fA-F-]{36})/capabilities$").matcher(path);
+        if(!match.matches())throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.FORBIDDEN,"SCOPED_SEARCH_REQUEST_REQUIRED");
+        return evidenceScope.bearer(UUID.fromString(match.group(1)),UUID.fromString(match.group(2)),UUID.fromString(match.group(3)));
+    }
+
     /** Preserve validation/service status codes; credentials stay server-side. */
     public org.springframework.http.ResponseEntity<byte[]> scopedJson(String path, Object body) {
         try {
             HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(baseUrl + "/internal/v1" + path))
-                    .timeout(java.time.Duration.ofSeconds(120))
-                    .header("Accept", "application/json").header("X-MM-Internal-Token", internalToken);
+                    .timeout("/search/execute".equals(path) ? COLD_INDEX_QUERY_TIMEOUT : Duration.ofMinutes(2))
+                    .header("Accept", "application/json").header("X-MM-Internal-Token", internalToken)
+                    .header("Authorization",scopedBearer(body,path));
             if (body == null) builder.GET();
             else builder.header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body), StandardCharsets.UTF_8));
@@ -70,8 +95,9 @@ public class SearchServiceClient {
             writeTextPart(buffer, boundary, "plan", plan, "\r\n");
             buffer.write(closing);
             var request = HttpRequest.newBuilder(URI.create(baseUrl + "/internal/v1/search/image-candidates"))
-                    .timeout(java.time.Duration.ofSeconds(120))
+                    .timeout(COLD_INDEX_QUERY_TIMEOUT)
                     .header("X-MM-Internal-Token", internalToken)
+                    .header("Authorization",evidenceScope.bearer(dataset,version,index))
                     .header("Content-Type", "multipart/form-data; boundary=" + boundary)
                     .POST(HttpRequest.BodyPublishers.ofByteArray(buffer.toByteArray())).build();
             var response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
@@ -99,6 +125,7 @@ public class SearchServiceClient {
                 .header("Content-Type", "application/json")
                 .header("Accept", "application/json")
                 .header("X-MM-Internal-Token", internalToken)
+                .header("Authorization",scopedBearer(req,null))
                 .POST(HttpRequest.BodyPublishers.ofString(requestBody, StandardCharsets.UTF_8))
                 .build();
 
@@ -116,7 +143,24 @@ public class SearchServiceClient {
         }
     }
 
-    public void preload(UUID datasetId, UUID versionId, UUID indexVersionId) {
+    public void preload(UUID datasetId, UUID versionId, UUID indexVersionId,String authorization,String authorityKind) {
+        preload(datasetId, versionId, indexVersionId, authorization, authorityKind, Duration.ofSeconds(120));
+    }
+
+    public void preloadPrepared(IndexCacheScopeService.Ticket ticket) {
+        var scope = ticket.scope();
+        var credential = ticket.credential();
+        if (!"ORIGINAL_BUILD".equals(scope.kind()) || !"HUMAN".equals(credential.authorityKind())) {
+            throw new IllegalArgumentException("Original build authority is required");
+        }
+        preload(scope.dataset(), scope.version(), scope.index(), credential.authorization(),
+                credential.authorityKind(), IndexCacheScopeService.PREPARED_PRELOAD_TIMEOUT);
+    }
+
+    private void preload(UUID datasetId, UUID versionId, UUID indexVersionId,
+                         String authorization, String authorityKind, Duration timeout) {
+        if(authorization==null||!authorization.startsWith("Bearer ")||!java.util.Set.of("HUMAN","SERVICE").contains(authorityKind))
+            throw new IllegalArgumentException("Scoped index preload authority is required");
         String requestBody;
         try {
             requestBody = objectMapper.writeValueAsString(
@@ -127,6 +171,8 @@ public class SearchServiceClient {
         }
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/internal/v1/indexes/preload"))
+                .timeout(timeout)
+                .header("Authorization",authorization).header("X-MDS-Index-Authority",authorityKind)
                 .version(HttpClient.Version.HTTP_1_1)
                 .header("Content-Type", "application/json")
                 .header("Accept", "application/json")
@@ -137,7 +183,7 @@ public class SearchServiceClient {
             HttpResponse<String> response = httpClient.send(
                     request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                throw new RuntimeException(response.statusCode() + " " + response.body());
+                throw new RuntimeException("scoped index preload rejected HTTP " + response.statusCode());
             }
         } catch (IOException exception) {
             throw new RuntimeException("call index preload request failed", exception);
@@ -162,6 +208,7 @@ public class SearchServiceClient {
                 .header("Content-Type", "multipart/form-data; boundary=" + boundary)
                 .header("Accept", "application/json")
                 .header("X-MM-Internal-Token", internalToken)
+                .header("Authorization",evidenceScope.bearer(datasetId,versionId,indexVersionId))
                 .POST(HttpRequest.BodyPublishers.ofByteArray(requestBody))
                 .build();
 

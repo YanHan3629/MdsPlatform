@@ -44,7 +44,7 @@ public class DockerCli {
         boolean finished = p.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS);
         if (!finished) {
             p.destroyForcibly();
-            throw new RuntimeException("docker cmd timeout: " + String.join(" ", cmd));
+            throw new RuntimeException("container runtime command timed out");
         }
 
         String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);

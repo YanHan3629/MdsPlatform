@@ -13,7 +13,11 @@ import com.fwdrobo.sirius.entity.mm.MmIndexVersion;
 import com.fwdrobo.sirius.handler.JsonbTypeHandler;
 import com.fwdrobo.sirius.mapper.MmDatasetVersionMapper;
 import com.fwdrobo.sirius.mapper.MmIndexVersionMapper;
+import com.fwdrobo.sirius.security.AuthorizationService;
+import com.fwdrobo.sirius.security.IdentitySessionService;
+import com.fwdrobo.sirius.security.JwtService;
 import com.fwdrobo.sirius.util.ExceptionUtils;
+import io.jsonwebtoken.Claims;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -47,6 +51,12 @@ public class MmIndexService {
     private final String internalToken;
     private final JdbcTemplate jdbc;
     private final ApplicationEventPublisher events;
+    private final DatasetAccessService access;
+    private final AuthorizationService authorization;
+    private final IdentitySessionService sessions;
+    private final JwtService jwt;
+    @org.springframework.beans.factory.annotation.Autowired @org.springframework.context.annotation.Lazy
+    private com.fwdrobo.sirius.security.ControlledViewPublicationAuthority publications;
 
     public MmIndexService(MmDatasetService mmDatasetService,
                           MmDatasetVersionService mmDatasetVersionService,
@@ -63,7 +73,12 @@ public class MmIndexService {
                           @Value("${app.docker.host}") String backendBaseUrl,
                           @Value("${mm.internal.token:}") String internalToken,
                           JdbcTemplate jdbc,
-                          ApplicationEventPublisher events) {
+                          ApplicationEventPublisher events,DatasetAccessService access,AuthorizationService authorization,
+                          IdentitySessionService sessions,JwtService jwt) {
+        this.access=access;
+        this.authorization=authorization;
+        this.sessions=sessions;
+        this.jwt=jwt;
         this.mmDatasetService = mmDatasetService;
         this.mmDatasetVersionService = mmDatasetVersionService;
         this.mmDatasetVersionMapper = mmDatasetVersionMapper;
@@ -82,9 +97,30 @@ public class MmIndexService {
         this.events = events;
     }
 
-    @Transactional
+    @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> buildIndex(UUID datasetId, UUID versionId, MmBuildIndexReq req, String token) throws Exception {
+        authorization.lockIdentityMutation();
+        Claims origin=jwt.parseClaims(token,JwtService.TokenType.ACCESS);
+        sessions.authenticateAccess(origin);
+        return buildIndex(datasetId,versionId,req,origin);
+    }
+
+    private Map<String, Object> buildIndex(UUID datasetId, UUID versionId, MmBuildIndexReq req, Claims origin) throws Exception {
+        try(var operation=access.fixedOperation("dataset.index.build","VIEW_BUILD")) {
+        access.requireDatasetWrite(datasetId);
+        jdbc.execute("SELECT pg_advisory_xact_lock(805014630400001::bigint)");
+        // One repository cannot host concurrent output writers from different
+        // source versions. Lock the dataset before reading either version.
+        if(jdbc.queryForList("SELECT dataset_id FROM mm_dataset WHERE dataset_id=? FOR UPDATE",datasetId).isEmpty())
+            throw ExceptionUtils.notFound("dataset 不存在");
         MmDataset dataset = mmDatasetService.getDatasetOrNotFound(datasetId);
+        // Reconcile pre-migration terminal attempts only when this authorized
+        // caller explicitly requests another build; historical rows stay intact.
+        for(var terminal:jdbc.queryForList("""
+            SELECT DISTINCT j.run_id FROM job_run j JOIN mm_index_version i ON i.build_run_id=j.run_id AND i.build_job_id=j.job_id
+            WHERE i.dataset_id=? AND i.index_status IN('QUEUED','BUILDING','PREWARMING')
+              AND j.run_status IN('FAILED','CANCELING','CANCELED')
+            """,datasetId))jdbc.queryForObject("SELECT settle_failed_index_execution(?)",Object.class,terminal.get("run_id"));
         // Take the version lock before MyBatis reads it, so a waiter does not
         // reuse its session's cached pre-lock state after another build starts.
         if (jdbc.queryForList("SELECT version_id FROM mm_dataset_version WHERE version_id=? AND dataset_id=? FOR UPDATE", versionId, datasetId).isEmpty()) {
@@ -124,6 +160,12 @@ public class MmIndexService {
         if ("INDEXING".equals(version.getVersionStatus())) {
             throw ExceptionUtils.conflict("当前版本已有索引任务正在构建，请等待完成后再显式重建或变更配置");
         }
+        if(Boolean.TRUE.equals(jdbc.queryForObject("""
+            SELECT EXISTS(SELECT 1 FROM mm_index_version WHERE dataset_id=? AND index_status IN('QUEUED','BUILDING','PREWARMING'))
+            """,Boolean.class,datasetId)))
+            throw ExceptionUtils.conflict("该数据集另有索引任务尚未结束，请等待完成后再构建");
+        UUID newIndexId=UUID.randomUUID();
+        ArtifactCommitResponse indexCommit=artifactCommitService.createEmptyIndexDraft(dataset.getIndexRepoId(),datasetId,newIndexId);
         MmMetadataImportService.ImportSummary summary = mmMetadataImportService.importFromDatasetVersion(dataset, version);
         version.setSampleCount((long) summary.assetCount());
         version.setImageCount((long) summary.imageCount());
@@ -141,10 +183,9 @@ public class MmIndexService {
                           AND NOT EXISTS(SELECT 1 FROM mm_index_registration r WHERE r.index_version_id=i.index_version_id AND r.registration_status<>'READY')
                         ORDER BY CASE WHEN i.dataset_version_id=? THEN 0 ELSE 1 END,i.ready_at DESC NULLS LAST,i.created_at DESC LIMIT 1
                         """, resultSet -> resultSet.next() ? resultSet.getObject(1, UUID.class) : null, datasetId,versionId);
-        ArtifactCommitResponse indexCommit = artifactCommitService.getOrCreateDraft(dataset.getIndexRepoId());
 
         MmIndexVersion indexVersion = new MmIndexVersion();
-        indexVersion.setIndexVersionId(UUID.randomUUID());
+        indexVersion.setIndexVersionId(newIndexId);
         indexVersion.setDatasetId(datasetId);
         indexVersion.setDatasetVersionId(versionId);
         indexVersion.setIndexRepoId(dataset.getIndexRepoId());
@@ -170,13 +211,16 @@ public class MmIndexService {
         jobEnvironment.put("versionId", versionId.toString());
         jobEnvironment.put("MDS_INPUT_REPO_ID", dataset.getRawRepoId().toString());
         jobEnvironment.put("MDS_INPUT_COMMIT_ID", version.getRawCommitId().toString());
+        jobEnvironment.put("MDS_OUTPUT_REPO_ID",dataset.getIndexRepoId().toString());
+        jobEnvironment.put("MDS_OUTPUT_COMMIT_ID",indexCommit.getCommitId().toString());
         jobEnvironment.put("indexVersionId", indexVersion.getIndexVersionId().toString());
         jobEnvironment.put("modelName", buildModelName);
         jobEnvironment.put("INDEX_PROCESSING_CONFIG_JSON",com.fwdrobo.sirius.util.IndexProcessingConfig.json(config));
         jobEnvironment.put("indexType", req.indexType());
         jobEnvironment.put("BACKEND_BASE_URL", backendBaseUrl);
-        jobEnvironment.put("BACKEND_BEARER_TOKEN", token == null ? "" : token);
-        jobEnvironment.put("MM_INTERNAL_TOKEN", internalToken);
+        // The durable definition contains only a placeholder; the launcher
+        // injects a run-scoped, parent-session-bound credential in memory.
+        jobEnvironment.put("BACKEND_BEARER_TOKEN", "");
         jobEnvironment.put("OMP_NUM_THREADS", "4");
         jobEnvironment.put("OPENBLAS_NUM_THREADS", "4");
         jobEnvironment.put("MKL_NUM_THREADS", "4");
@@ -188,8 +232,10 @@ public class MmIndexService {
             jobEnvironment.put("PREVIOUS_INDEX_COMMIT_ID", previousIndexCommitId.toString());
             jobEnvironment.put("PREVIOUS_ASSET_DIR", "/tmp/previous/professional/assets");
         }
-        jobEnvironment.put("backendCallbackReady", "/api/mm/internal/datasets/" + datasetId + "/versions/" + versionId + "/indexes/" + indexVersion.getIndexVersionId() + "/ready");
-        jobEnvironment.put("backendCallbackFailed", "/api/mm/internal/datasets/" + datasetId + "/versions/" + versionId + "/indexes/" + indexVersion.getIndexVersionId() + "/failed");
+        jobEnvironment.put("backendCallbackReady", "/api/mm/worker/datasets/" + datasetId + "/versions/" + versionId + "/indexes/" + indexVersion.getIndexVersionId() + "/ready");
+        jobEnvironment.put("backendCallbackFailed", "/api/mm/worker/datasets/" + datasetId + "/versions/" + versionId + "/indexes/" + indexVersion.getIndexVersionId() + "/failed");
+        String executionCommand=publications.managedDataset(datasetId)?publications.command():indexBuilderCmd;
+        if(publications.managedDataset(datasetId))publications.fixedProgram(datasetId,indexBuilderImage,executionCommand,jobEnvironment);
         jobParams.put("env", jobEnvironment);
         jobParams.put("resources", Map.of(
                 "cpus", "4",
@@ -204,12 +250,12 @@ public class MmIndexService {
                 List.of(new JobRequest.Input(dataset.getRawRepoId(), List.of())),
                 List.of(dataset.getIndexRepoId()),
                 indexBuilderImage,
-                indexBuilderCmd,
+                executionCommand,
                 false,
                 jobParams
         );
         UUID jobId = jobService.createJob(jobRequest, null);
-        JobRun run = containerService.runJob(jobId, token);
+        JobRun run = containerService.runIndexJob(jobId, origin,datasetId,versionId,indexVersion.getIndexVersionId());
         indexVersion.setBuildJobId(jobId);
         indexVersion.setBuildRunId(run.getRunId());
         indexVersion.setIndexStatus("BUILDING");
@@ -227,6 +273,13 @@ public class MmIndexService {
                 "importedImageCount", summary.imageCount(),
                 "importedTextCount", summary.textCount()
         );
+        }
+    }
+
+    public MmIndexVersionResp getIndexStatusExact(UUID indexVersionId) {
+        MmIndexVersion result=mmIndexVersionMapper.selectById(indexVersionId);
+        if(result==null)throw ExceptionUtils.notFound("index version 不存在");
+        return toResp(result);
     }
 
     public MmIndexVersionResp getIndexStatus(UUID datasetId, UUID versionId) {
@@ -296,11 +349,24 @@ public class MmIndexService {
     }
 
     /** A snapshot event must adopt a later explicit build, not overwrite its config. */
-    @Transactional
-    public Map<String,Object> buildIndexForIngestion(UUID datasetId,UUID versionId,UUID taskId,MmBuildIndexReq request,String token)throws Exception{
-        mmDatasetService.getDatasetOrNotFound(datasetId);
-        if(jdbc.queryForList("SELECT version_id FROM mm_dataset_version WHERE version_id=? AND dataset_id=? FOR UPDATE",versionId,datasetId).isEmpty())
-            throw ExceptionUtils.badRequest("dataset 与 version 不匹配");
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String,Object> buildIndexForIngestion(UUID datasetId,UUID versionId,UUID taskId,MmBuildIndexReq request,Claims origin)throws Exception{
+        authorization.lockIdentityMutation();
+        var actor=sessions.authenticateAccess(origin);
+        try(var operation=access.fixedOperation("dataset.index.build","VIEW_BUILD")){
+            access.requireDatasetWrite(datasetId);
+        }
+        jdbc.execute("SELECT pg_advisory_xact_lock(805014630400001::bigint)");
+        jdbc.queryForList("SELECT dataset_id FROM mm_dataset WHERE dataset_id=? FOR UPDATE",datasetId);
+        if(jdbc.queryForList("""
+                SELECT v.version_id FROM mm_dataset_version v
+                JOIN mm_ingest_task t ON t.dataset_id=v.dataset_id AND t.dataset_version_id=v.version_id
+                 AND t.raw_commit_id=v.raw_commit_id
+                WHERE v.version_id=? AND v.dataset_id=? AND t.task_id=? AND t.task_status='PROCESSING'
+                  AND t.org_id=? AND t.created_by=? AND t.origin_session_id=?
+                FOR UPDATE OF v
+                """,versionId,datasetId,taskId,actor.orgId(),actor.userId(),UUID.fromString(origin.get("sid",String.class))).isEmpty())
+            throw ExceptionUtils.notFound("INDEX_ORIGIN_SNAPSHOT_NOT_AVAILABLE");
         var existing=jdbc.queryForList("""
             SELECT i.index_version_id,i.index_status FROM mm_index_version i
             JOIN mm_ingest_task t ON t.task_id=? AND t.dataset_id=i.dataset_id AND t.dataset_version_id=i.dataset_version_id
@@ -311,7 +377,7 @@ public class MmIndexService {
             """,taskId,datasetId,versionId);
         if(!existing.isEmpty())return Map.of("indexVersionId",existing.get(0).get("index_version_id"),
             "indexStatus",existing.get(0).get("index_status"),"reused",true,"message","adopted the existing frozen-snapshot build");
-        return buildIndex(datasetId,versionId,request,token);
+        return buildIndex(datasetId,versionId,request,origin);
     }
 
     @Transactional
@@ -331,7 +397,7 @@ public class MmIndexService {
     }
 
     public MmResolvedIndexBundleResp resolveBundle(UUID datasetId, UUID versionId, UUID indexVersionId) throws Exception {
-        MmDataset dataset = mmDatasetService.getDatasetOrNotFound(datasetId);
+        MmDataset dataset = mmDatasetService.getReadableDatasetOrNotFound(datasetId);
         MmDatasetVersion version = mmDatasetVersionService.getVersionOrNotFound(versionId);
         if (!datasetId.equals(version.getDatasetId())) {
             throw ExceptionUtils.badRequest("dataset 与 version 不匹配");

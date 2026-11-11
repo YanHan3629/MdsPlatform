@@ -1,6 +1,6 @@
 (() => {
   const session = window.dataSpaceSession;
-  let capabilities = null, capabilityKey = '', loadSequence = 0, requestSequence = 0, controller = null;
+  let capabilities = null, capabilityKey = '', scopeKey = '', loadSequence = 0, requestSequence = 0, controller = null;
   let conditions = [], conditionFields = [], authRevision = session.revision;
   const operationLabels = {search:'浏览 / 检索',filter:'条件筛选',sort:'排序',count:'计数',sum:'求和',min:'最小值',max:'最大值',average:'样本平均',time_weighted_average:'时间加权平均',duration_above:'超阈值时长',compare_periods:'时段比较',trend_start_end:'起止趋势',trend_regression:'回归趋势',trend_monotonic:'单调趋势',similar_shape:'同空间近似相似'};
   const operators = {eq:'等于',in:'集合（多个值 OR）',gt:'大于',gte:'大于等于',lt:'小于',lte:'小于等于',between:'闭区间',is_null:'已记录为 null',not_null:'已记录且非 null',contains:'数组包含成员'};
@@ -12,7 +12,17 @@
   }
   function label(id,title,content,full=false) {return `<label${full?' class="full"':''}>${esc(title)}${content.replace('{id}',id)}</label>`;}
   const selectHtml = id => `<select id="${id}"></select>`;
-  function invalidate(){controller?.abort();requestSequence++;}
+  function invalidate(){
+    if(controller){
+      controller.abort();controller=null;
+      $('#retrievalProgress').textContent='检索条件已变化，请重新执行。';
+    }
+    requestSequence++;
+  }
+  function clearResults(){
+    session.clearSources($('#retrievalResults'));
+    $('#retrievalApplied').textContent='';delete $('#retrievalApplied').dataset.request;
+  }
   function type(){return $('#retrievalType').value||'all';}
   function assets(){return(capabilities?.assets||[]).filter(a=>a.scope===$('#retrievalScope').value&&(type()==='all'||a.contentTypes.includes(type()))&&(!$('#retrievalFormat').value||a.originalFormat===$('#retrievalFormat').value));}
   function table(){return(capabilities?.tables||[]).find(t=>t.tableId===$('#retrievalTable')?.value);}
@@ -145,7 +155,7 @@
   }
   function saveDraft(){
     const values=Object.fromEntries([...$('#retrievalForm').querySelectorAll('[id]')].filter(e=>['INPUT','SELECT','TEXTAREA'].includes(e.tagName)&&e.type!=='file').map(e=>[e.id,e.value]));
-    sessionStorage.setItem('retrievalDraft',JSON.stringify({scope:session.scope?.indexVersionId,values,conditions,hadFile:!!$('#retrievalQueryImage')?.files.length}));
+    sessionStorage.setItem('retrievalDraft',JSON.stringify({scope:session.scopeFor('data.search')?.indexVersionId,values,conditions,hadFile:!!$('#retrievalQueryImage')?.files.length}));
   }
   function clearScopeForm(){
     conditions=[];conditionFields=[];$('#retrievalForm').reset();
@@ -155,15 +165,19 @@
     select('retrievalFormat',[],'全部适用格式','');
   }
   async function load(){
-    const scope=session.scope, seq=++loadSequence;
-    if(authRevision!==session.revision){authRevision=session.revision;capabilities=null;capabilityKey='';clearScopeForm();invalidate();$('#retrievalResults').replaceChildren();$('#retrievalApplied').textContent='';delete $('#retrievalApplied').dataset.request;$('#retrievalProgress').textContent='等待检索';}
-    select('retrievalDataset',session.datasets.map(d=>({value:d.indexVersionId,label:`${d.datasetName} / ${d.versionName} / ${d.isOwnerCandidate?'私有候选（未启用）':d.isActiveIndex?'当前索引':'产品冻结索引'} ${d.indexVersionId.slice(0,8)}`})),'选择数据集',scope?.indexVersionId||'');
+    const scope=session.scopeFor('data.search'), seq=++loadSequence;
+    const nextScope=scope?.indexVersionId||'';
+    if(authRevision!==session.revision||scopeKey!==nextScope){
+      authRevision=session.revision;scopeKey=nextScope;capabilities=null;capabilityKey='';
+      clearScopeForm();invalidate();clearResults();$('#retrievalProgress').textContent='等待检索';
+    }
+    select('retrievalDataset',session.datasetsFor('data.search').map(d=>({value:d.indexVersionId,label:`${d.datasetName} / ${d.versionName} / ${d.isOwnerCandidate?'私有候选（未启用）':d.isActiveIndex?'当前索引':'产品冻结索引'} ${d.indexVersionId.slice(0,8)}`})),'选择数据集',scope?.indexVersionId||'');
     if(!scope){capabilities=null;capabilityKey='';clearScopeForm();$('#retrievalCapabilityStatus').textContent='请登录并选择可用索引。';$('#retrievalSubmit').disabled=true;return;}
     if(capabilityKey===scope.indexVersionId)return;
     $('#retrievalSubmit').disabled=true;$('#retrievalCapabilityStatus').textContent='正在核对当前快照的实际能力…';
     try{
       const result=await(await session.request(`/capabilities/${scope.datasetId}/${scope.versionId}/${scope.indexVersionId}`)).json();
-      if(seq!==loadSequence||session.scope?.indexVersionId!==scope.indexVersionId)return;
+      if(seq!==loadSequence||session.scopeFor('data.search')?.indexVersionId!==scope.indexVersionId)return;
       capabilities=result.filters;capabilityKey=scope.indexVersionId;conditions=[];
       select('retrievalType',[{value:'all',label:'综合检索'},...capabilities.dataTypes.filter(t=>t.assetCount).map(t=>({value:t.id,label:t.label}))],null);
       $('#retrievalCapabilityStatus').textContent=`${scope.versionName} · ${capabilities.assets.length}个原始文件 · 枚举来自当前快照`;
@@ -249,9 +263,11 @@
   }
   async function submit(event){
     event.preventDefault();if(!session.authenticated)return toast('请先登录数据空间账号');
-    invalidate();$('#retrievalResults').replaceChildren();$('#retrievalApplied').textContent='';delete $('#retrievalApplied').dataset.request;
+    const scope=session.scopeFor('data.search');if(!scope)return toast('请选择数据集');
+    if(!capabilities||capabilityKey!==scope.indexVersionId)return toast('请等待当前快照能力加载完成');
+    invalidate();clearResults();
     let query;try{query=plan();}catch(e){$('#retrievalProgress').textContent=`条件无效：${e.message}`;return;}
-    const scope=session.scope;if(!scope)return toast('请选择数据集');controller=new AbortController();const seq=requestSequence,revision=session.revision;
+    const seq=requestSequence,revision=session.revision;
     const image=$('#retrievalQueryImage')?.files[0];
     let path='/retrieval/execute', body=JSON.stringify({datasetId:scope.datasetId,versionId:scope.versionId,indexVersionId:scope.indexVersionId,plan:query}),headers={'Content-Type':'application/json'};
     if(image){
@@ -259,7 +275,8 @@
       path='/retrieval/image-to-text';body=new FormData();headers={};
       ['datasetId','versionId','indexVersionId'].forEach(k=>body.set(k,scope[k]));body.set('plan',JSON.stringify(query));body.set('file',image);
     }
-    $('#retrievalProgress').textContent='正在执行检索…';$('#retrievalResults').replaceChildren();
+    controller=new AbortController();
+    $('#retrievalProgress').textContent='正在执行检索…';
     const described=conditions.map(c=>{const f=conditionFields.find(f=>f.name===c.field&&f.source===c.source);return `${f?.description||c.field}${f?.type==='mixed'&&!['is_null','not_null'].includes(c.op)?'（'+(valueTypeLabels[valueType(c,f)]||valueType(c,f))+'）':''} ${operators[c.op]} ${c.value||'空值'}`;});
     $('#retrievalApplied').textContent=`${scope.datasetName} / ${scope.versionName} · ${operationLabels[query.operation]}${query.formats.length?' · '+query.formats.join('、'):''}${table()?' · '+table().logicalPath:''} · 生效条件：${described.join('；')||'无额外硬条件'}${query.timeRange?' · 左闭右开窗口 '+query.timeRange.start+' 至 '+query.timeRange.end:''}`;
     $('#retrievalApplied').dataset.request=JSON.stringify({datasetId:scope.datasetId,versionId:scope.versionId,indexVersionId:scope.indexVersionId,plan:query});
@@ -277,9 +294,10 @@
       $('#retrievalResults').replaceChildren(...output.childNodes);
       for(const message of result.limitations||[]){const p=document.createElement('p');p.textContent=message;$('#retrievalResults').append(p);}
     }catch(e){if(seq===requestSequence&&revision===session.revision&&e.name!=='AbortError')$('#retrievalProgress').textContent=`检索失败：${e.message}`;}
+    finally{if(seq===requestSequence)controller=null;}
   }
   document.addEventListener('DOMContentLoaded',()=>{
-    window.addEventListener('dataspace-scope',load);$('#retrievalDataset').onchange=()=>{invalidate();session.selectIndex($('#retrievalDataset').value);};
+    window.addEventListener('dataspace-scope',load);$('#retrievalDataset').onchange=()=>{invalidate();session.selectIndex($('#retrievalDataset').value,'data.search');};
     $('#retrievalType').onchange=()=>renderType(true);$('#retrievalScope').onchange=()=>renderType(true);$('#retrievalFormat').onchange=()=>{invalidate();conditions=[];renderSpecific();saveDraft();};
     $('#retrievalOperation').onchange=()=>{invalidate();renderSpecific();saveDraft();};
     $('#retrievalForm').oninput=saveDraft;$('#retrievalForm').onsubmit=submit;

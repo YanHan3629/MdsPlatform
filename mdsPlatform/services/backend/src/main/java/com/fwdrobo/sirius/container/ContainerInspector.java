@@ -23,6 +23,8 @@ public class ContainerInspector {
     private final JobRunMapper repo;
     private final TransactionTemplate tx;
     private final TrialLimitService trialLimitService;
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.springframework.jdbc.core.JdbcTemplate jdbc;
 
     public ContainerInspector(
             DockerCli dockerCli,
@@ -58,24 +60,26 @@ public class ContainerInspector {
             if (r.exitCode() != 0) {
                 String err = r.stderr();
                 tx.executeWithoutResult(status -> {
+                    JobRun live=lockedRun(runId);if(live==null)return;
+                    if(preserveConfirmedTerminalStop(live))return;
                     if (err.contains("No such object")) {
-                        jr.setContainerStatus(ContainerStatus.MISSING);
-                        jr.setDockerStatus(null);
+                        live.setContainerStatus(ContainerStatus.MISSING);
+                        live.setDockerStatus(null);
                         // canceling -> canceled；非终态 -> failed
-                        RunStatus cur = jr.getRunStatus();
-                        if (cur == RunStatus.CANCELING) jr.setRunStatus(RunStatus.CANCELED);
-                        else if (!StatusMapper.isTerminalOrCanceling(cur)) jr.setRunStatus(RunStatus.FAILED);
-                        jr.setFinishedAt(OffsetDateTime.now());
+                        RunStatus cur = live.getRunStatus();
+                        if (cur == RunStatus.CANCELING) live.setRunStatus(RunStatus.CANCELED);
+                        else if (!StatusMapper.isTerminalOrCanceling(cur)) live.setRunStatus(RunStatus.FAILED);
+                        if(live.getFinishedAt()==null)live.setFinishedAt(OffsetDateTime.now());
                     } else {
-                        jr.setContainerStatus(ContainerStatus.UNKNOWN);
-                        jr.setErrorMessage("inspect failed: " + err);
-                        RunStatus cur = jr.getRunStatus();
-                        if (!StatusMapper.isTerminalOrCanceling(cur)) jr.setRunStatus(RunStatus.FAILED);
+                        live.setContainerStatus(ContainerStatus.UNKNOWN);
+                        live.setErrorMessage("TASK_INSPECTION_FAILED");
+                        RunStatus cur = live.getRunStatus();
+                        if (!StatusMapper.isTerminalOrCanceling(cur)) live.setRunStatus(RunStatus.FAILED);
                     }
-                    jr.setLastSeenAt(OffsetDateTime.now());
-                    repo.updateContainerByRunId(jr);
-                    if (isTerminalStatus(jr.getRunStatus())) {
-                        trialLimitService.releaseRunRuntimeQuotaIfNeeded(jr);
+                    live.setLastSeenAt(OffsetDateTime.now());
+                    repo.updateContainerByRunId(live);
+                    if (isTerminalStatus(live.getRunStatus())) {
+                        trialLimitService.releaseRunRuntimeQuotaIfNeeded(live);
                     }
                 });
                 return;
@@ -86,20 +90,27 @@ public class ContainerInspector {
             RunStatus rs = StatusMapper.mapToRunStatus(st.dockerStatus(), st.exitCode());
 
             tx.executeWithoutResult(status -> {
-                jr.setDockerStatus(st.dockerStatus());
-                jr.setExitCode(st.exitCode());
-                jr.setStartedAt(st.startedAt());
-                jr.setFinishedAt(st.finishedAt());
-                jr.setContainerStatus(cs);
-                RunStatus cur = jr.getRunStatus();
-                if (!StatusMapper.isTerminalOrCanceling(cur)) {
-                    jr.setRunStatus(rs);
+                JobRun live=lockedRun(runId);if(live==null)return;
+                    if(preserveConfirmedTerminalStop(live))return;
+                // The observation began before this transaction. A cancellation
+                // or terminal result committed meanwhile takes priority.
+                if(StatusMapper.isTerminalOrCanceling(live.getRunStatus())&&rs==RunStatus.RUNNING){
+                    live.setLastSeenAt(OffsetDateTime.now());repo.updateStatusAndTimes(live);return;
                 }
-                jr.setErrorMessage(null);
-                jr.setLastSeenAt(OffsetDateTime.now());
-                repo.updateContainerByRunId(jr);
-                if (isTerminalStatus(jr.getRunStatus())) {
-                    trialLimitService.releaseRunRuntimeQuotaIfNeeded(jr);
+                live.setDockerStatus(st.dockerStatus());
+                live.setExitCode(st.exitCode());
+                if(live.getStartedAt()==null)live.setStartedAt(st.startedAt());
+                if(live.getFinishedAt()==null)live.setFinishedAt(st.finishedAt());
+                live.setContainerStatus(cs);
+                RunStatus cur = live.getRunStatus();
+                if(cur==RunStatus.CANCELING&&("exited".equals(st.dockerStatus())||"dead".equals(st.dockerStatus())))
+                    live.setRunStatus(RunStatus.CANCELED);
+                else if(!StatusMapper.isTerminalOrCanceling(cur))live.setRunStatus(rs);
+                if(!StatusMapper.isTerminalOrCanceling(cur))live.setErrorMessage(null);
+                live.setLastSeenAt(OffsetDateTime.now());
+                repo.updateContainerByRunId(live);
+                if (isTerminalStatus(live.getRunStatus())) {
+                    trialLimitService.releaseRunRuntimeQuotaIfNeeded(live);
                 }
             });
         } catch (Exception ex) {
@@ -110,6 +121,22 @@ public class ContainerInspector {
     /**
      * 判断运行状态是否终态。
      */
+    private JobRun lockedRun(UUID run){
+        jdbc.execute("SELECT pg_advisory_xact_lock(805014630400001::bigint)");
+        if(jdbc.queryForList("SELECT run_id FROM job_run WHERE run_id=? FOR UPDATE",run).isEmpty())return null;
+        return repo.selectByRunId(run).orElse(null);
+    }
+
+    /** A later exited/missing/error observation cannot undo a confirmed stop. */
+    private boolean preserveConfirmedTerminalStop(JobRun live){
+        if(!isTerminalStatus(live.getRunStatus())||
+            !(live.getContainerStatus()==ContainerStatus.STOPPED||live.getContainerStatus()==ContainerStatus.REMOVED))return false;
+        live.setLastSeenAt(OffsetDateTime.now());
+        repo.updateStatusAndTimes(live);
+        trialLimitService.releaseRunRuntimeQuotaIfNeeded(live);
+        return true;
+    }
+
     private boolean isTerminalStatus(RunStatus runStatus) {
         return runStatus == RunStatus.SUCCEEDED
                 || runStatus == RunStatus.FAILED

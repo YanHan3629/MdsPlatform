@@ -9,8 +9,10 @@ import hashlib,json,re,time
 from services.native_evidence_read import source_from_bundle
 from services.read_receipt import digest,verify
 
-VERSION='native-record-lookup-2026-10-26.6'
-SUPPORTED_READ_VERSIONS=frozenset({VERSION,'native-record-lookup-2026-10-26.1','native-record-lookup-2026-10-26.2','native-record-lookup-2026-10-26.3','native-record-lookup-2026-10-26.4','native-record-lookup-2026-10-26.5'})
+VERSION='native-record-lookup-2026-11-06.8'
+CSV_SET_VERSION='native-csv-record-set-2026-11-07.1'
+CSV_SET_RECORD_TYPE_FIELD='record_type'
+SUPPORTED_READ_VERSIONS=frozenset({VERSION,CSV_SET_VERSION,'native-record-lookup-2026-11-05.7','native-record-lookup-2026-10-26.6','native-record-lookup-2026-10-26.1','native-record-lookup-2026-10-26.2','native-record-lookup-2026-10-26.3','native-record-lookup-2026-10-26.4','native-record-lookup-2026-10-26.5'})
 MAX_ROWS=128
 MAX_SOURCES=4
 MAX_FIELDS=4
@@ -142,7 +144,7 @@ class Reader:
             'clientReadReceiptSha256':digest(bundle['clientReadReceipt']),'coverage':bundle['coverage']})
         return bundle
 
-def _scan(reader,asset,table,key,fields,*,allow_missing=False):
+def _scan(reader,asset,table,key,fields,*,allow_missing=False,allow_multiple=False):
     count=table.get('rowCount')
     if type(count) is not int or count<0 or count>MAX_ROWS:raise ValueError('EVIDENCE_RECORD_SCOPE_TOO_LARGE: 该表超出本次完整记录扫描容量，不能用样本代替全范围核对。')
     if not count and not allow_missing:raise ValueError('UNKNOWN_ENTITY: 指定来源的当前数组或工作表为空，不能生成记录值。')
@@ -173,8 +175,8 @@ def _scan(reader,asset,table,key,fields,*,allow_missing=False):
     if not matches:
         if allow_missing:return None,bundles
         raise ValueError('UNKNOWN_ENTITY: 完整读取指定来源后没有找到该类型和原值的记录键。')
-    if len(matches)!=1:raise ValueError('NEEDS_CLARIFICATION: 指定键在来源中对应多条记录，请补充实际主键或时间范围。')
-    return matches[0],bundles
+    if len(matches)!=1 and not allow_multiple:raise ValueError('NEEDS_CLARIFICATION: 指定键在来源中对应多条记录，请补充实际主键或时间范围。')
+    return (matches if allow_multiple else matches[0]),bundles
 
 def validate_discovery_question(question,filters,candidates):
     """Closed phrase scope: do not discard an extra object/time/field condition."""
@@ -183,18 +185,19 @@ def validate_discovery_question(question,filters,candidates):
         raise ValueError('EVIDENCE_RECORD_RELATION_UNSUPPORTED: 当前自动定位不支持为不同来源分别指定字段，请明确相同字段的核对范围。')
     terms=set()
     for candidate in candidates:
-        terms.add(str(candidate['selector']['value']))
+        selector=candidate['selector'];terms.add(selector['value'] if selector['sourceType']=='string' else canonical(selector['value']))
         table,=[table for table in filters.get('tables',[]) if table['tableId']==candidate['tableId']]
         for field in table.get('fields',[]):
             if field['name'] not in {*candidate['fields'],candidate['selector']['field']}:continue
             terms.add(field['name'])
             terms.update(label for label in (field.get('description'),field.get('sourceDescription')) if label and '来源为本文件实际字段' not in label)
             if field['name'] in FIELD_WORDS:terms.update(FIELD_WORDS[field['name']].split('|'))
-    remaining=question
+    # A terminal presentation instruction carries no record, field or time condition.
+    remaining=re.sub(r'(?<=[。；;？！!?])\s*请保留原始字段值并标明来源[。.!！]?\s*$','',question)
     for term in sorted(terms,key=lambda value:(-len(value),value)):
         remaining=re.sub(r'(?<![A-Za-z0-9_.-])'+re.escape(term)+r'(?![A-Za-z0-9_.-])',' ',remaining)
     remaining=re.sub(r'\b(?:CSV|JSONL?|XLSX)\b',' ',remaining,flags=re.I)
-    words=('是否一致','是否相同','是否一样','原始记录','原始数值','原始值','声明值','所声明','两份资料','两个来源','两份','两个',
+    words=('请用一句话回答','不要外推','是否一致','是否相同','是否一样','原始记录','原始数值','原始值','声明值','所声明','两份资料','两个来源','两份','两个',
         '帮我','读取','读出','核对','比较','对比','分别','各自','资料','文件','记录','数据','来源','原件','数值','字段','是否','一致','相同','一样',
         '只依据','仅依据','依据','根据','参考','并','什么','请','在','中','里','内','和','与','及','的','为','是','吗','一下')
     remaining=re.sub('|'.join(re.escape(word) for word in sorted(words,key=len,reverse=True)),' ',remaining)
@@ -231,12 +234,23 @@ def discover_record_sources(question,filters,intent):
             'scope':'All plausible frozen schemas are considered; complete native scans still prove record existence and uniqueness.'}}
 
 def direct_record_question(client,scope,question,filters,intent):
-    if not re.search(r'分别|核对|比较|对比|一致|相同',question):return None
+    comparison=bool(re.search(r'分别|核对|比较|对比|一致|相同',question))
     available=[asset for asset in filters.get('assets',[]) if asset.get('scope')=='corpus' and asset.get('nativeEvidence')]
     named=[asset for asset in available if literal(question,asset['logicalPath']) or literal(question,asset['logicalPath'].rsplit('/',1)[-1])]
     named=[asset for asset in named if not intent.allowed or asset['originalFormat'] in intent.allowed]
-    discovery={'method':'explicit-named-sources'};automatic=False
-    if len(named)<2:
+    # Only a named CSV or workbook with a registered, explicit typed equality key
+    # enters the single-source path. Coordinates and source discovery retain
+    # their existing planners; additional conditions must still be resolved.
+    single=(len(named)==1 and named[0]['originalFormat'] in {'CSV','XLSX'}
+        and not re.search(r'分别|比较|对比|一致|相同',question)
+        and any(explicit_key_binding(question,key)
+            for table in filters.get('tables',[]) if str(table['assetId'])==named[0]['assetId']
+            for key in key_candidates(question,table,[])))
+    if not comparison and not single:return None
+    single_mode=('SINGLE_EXPLICIT_XLSX' if named[0]['originalFormat']=='XLSX' else 'SINGLE_EXPLICIT_CSV') if single else 'MULTI_SOURCE_COMPARE'
+    single_method=('explicit-single-xlsx-key' if named[0]['originalFormat']=='XLSX' else 'explicit-single-csv-key') if single else 'explicit-named-sources'
+    discovery={'method':single_method};automatic=False
+    if len(named)<2 and not single:
         if named:return None
         if re.search(r'[\w.-]+\.(?:csv|xlsx|jsonl?|txt|pdf|jpe?g|png|svg|obj|step|stp)\b',question,re.I):
             raise ValueError('NEEDS_CLARIFICATION: 有指定资料未能在当前授权快照中定位。')
@@ -291,21 +305,38 @@ def direct_record_question(client,scope,question,filters,intent):
         metadata=reader.metadata(asset)
         registered=any(entry['kind']=='table_schema' and entry.get('selector',{}).get('tableId')==table['tableId'] or entry['kind']=='json_empty_table_schemas' and table['tableId'] in entry.get('selector',{}).get('tableIds',[]) for entry in metadata.get('representations',[]))
         if not registered:raise ValueError('EVIDENCE_INDEX_REBUILD_REQUIRED: 当前冻结索引尚未注册所需原生记录表，请选择已验证的候选索引。')
-        row,scans=_scan(reader,asset,table,key,fields,allow_missing=automatic)
+        csv_set_allowed=single and single_mode=='SINGLE_EXPLICIT_CSV'
+        found,scans=_scan(reader,asset,table,key,fields,allow_missing=automatic,allow_multiple=csv_set_allowed)
+        found_rows=found if isinstance(found,list) else [] if found is None else [found]
         scan_results.append({'assetId':asset['assetId'],'logicalPath':asset['logicalPath'],'tableId':table['tableId'],
-            'status':'UNIQUE_EXACT_KEY_FOUND' if row is not None else 'COMPLETE_SCAN_KEY_ABSENT',
+            'status':'MULTIPLE_EXACT_KEY_ROWS_FOUND' if len(found_rows)>1 else 'UNIQUE_EXACT_KEY_FOUND' if found_rows else 'COMPLETE_SCAN_KEY_ABSENT',
             'readIds':[scan['readId'] for scan in scans],'readOutputSha256s':[scan['readOutputSha256'] for scan in scans],
             'receiptSha256s':[digest(scan['clientReadReceipt']) for scan in scans],'registeredRows':table['rowCount']})
-        if row is None:continue
-        if any(field not in row['values'] for field in plan['requestedFields']):raise ValueError('EVIDENCE_RECORD_FIELD_ABSENT: 匹配记录未记录被问字段，不能补成 null 或零。')
-        matched.append({**plan,'metadata':metadata,'row':row,'scans':scans})
-    if len(matched)<2:raise ValueError('UNKNOWN_ENTITY: 完整读取全部候选来源后，未找到至少两份可核对的同键记录。')
+        if not found_rows:continue
+        if len(found_rows)>1:
+            if not csv_set_allowed:raise ValueError('NEEDS_CLARIFICATION: 本路径需要唯一记录。')
+            if len(found_rows)>MAX_SOURCES:raise ValueError('EVIDENCE_RECORD_SOURCE_BUDGET: 匹配记录超过完整逐行证据容量，请限定记录范围；不能抽样代替全部匹配行。')
+            if estimated+len(found_rows)-1>MAX_READS:raise ValueError('EVIDENCE_RECORD_READ_BUDGET: 完整匹配行逐行精读超出次数限制。')
+            single_mode='SINGLE_EXPLICIT_CSV_SET';discovery={'method':'explicit-single-csv-set-key','completeMatchedRowSet':True}
+        set_rows=sorted(row['rawRow'] for row in found_rows)
+        for row in found_rows:
+            if any(field not in row['values'] for field in plan['requestedFields']):raise ValueError('EVIDENCE_RECORD_FIELD_ABSENT: 匹配记录未记录被问字段，不能补成 null 或零。')
+            matched.append({**plan,'metadata':metadata,'row':row,'scans':scans,'setRows':set_rows})
+    if len(matched)<(1 if single else 2):raise ValueError('UNKNOWN_ENTITY: 完整读取全部指定来源后，没有找到所需的唯一同键记录。')
     if len(matched)>MAX_SOURCES:raise ValueError('EVIDENCE_RECORD_SOURCE_BUDGET: 完整扫描后实际匹配来源数超限，请限定来源范围。')
     if automatic:discovery.update(scanResults=scan_results,completeCandidateScans=True,matchingSourceCount=len(matched))
+    set_mode=single_mode=='SINGLE_EXPLICIT_CSV_SET'
+    read_version=CSV_SET_VERSION if set_mode else VERSION
     plans=matched
+    required_paths=sorted({entry['asset']['logicalPath'] for entry in plans}) if set_mode else sorted(entry['asset']['logicalPath'] for entry in plans)
     for plan in plans:
         asset=plan['asset'];table=plan['table'];key=plan['key'];row=plan['row'];scans=plan['scans'];metadata=plan['metadata']
         fields=list(dict.fromkeys([key['field'],*plan['requestedFields']]))
+        record_type=CSV_SET_RECORD_TYPE_FIELD
+        use_record_type=(set_mode and record_type not in fields
+            and any(field['name']==record_type for field in table['fields']))
+        if use_record_type:
+            fields.append(record_type)
         operation={'operation':'read_table','tableId':table['tableId'],'rowStart':row['rawRow'],'rowEnd':row['rawRow'],'fields':fields,'limit':1}
         bundle=reader.read(asset,operation)
         candidate={'assetId':asset['assetId'],'dataVersion':str(scope[1]),'indexVersion':str(scope[2]),'evidenceId':bundle['evidenceId'],
@@ -315,13 +346,18 @@ def direct_record_question(client,scope,question,filters,intent):
         context=json.loads(candidate['nativeModelContext'])
         key_context,=[fact for fact in context['facts'] if fact['field']==key['field']]
         context['recordBindings']={key['field']:key_context['value']}
+        if use_record_type:
+            type_context,=[fact for fact in context['facts'] if fact['field']==record_type]
+            context['recordBindings'][record_type]=type_context['value']
         candidate['nativeModelContext']=json.dumps(context,ensure_ascii=False,separators=(',',':'))
         candidate['modelFactIds']=[fact['factId'] for fact in bundle['facts']]
-        candidate['provenance'].update(recordReadVersion=VERSION,validatedRecordQuestion=question,explicitSourcePath=asset['logicalPath'],sourceDiscovery=discovery,
+        candidate['provenance'].update(recordReadVersion=read_version,recordLookupMode=single_mode,validatedRecordQuestion=question,explicitSourcePath=asset['logicalPath'],sourceDiscovery=discovery,
             recordSelector=key,recordTableId=table['tableId'],requestedRecordFields=plan['requestedFields'],recordScanBundles=scans,
-            requiredRelationSourcePaths=sorted(entry['asset']['logicalPath'] for entry in plans),formatDiversityContribution=False)
+            requiredRelationSourcePaths=required_paths,formatDiversityContribution=False)
+        if set_mode:candidate['provenance']['recordSetRows']=plan['setRows']
+        if use_record_type:candidate['provenance']['recordSetTypeField']=record_type
         evidence.append(candidate);required.append(candidate['evidenceId'])
     return {'evidence':evidence,'nativeReads':reader.reads,'status':'OK','planningMethod':'bounded-native-record-plan',
-        'recordPlan':{'version':VERSION,'sourceDiscovery':discovery,'requiredEvidenceIds':required,'requiredSourcePaths':sorted(plan['asset']['logicalPath'] for plan in plans),
+        'recordPlan':{'version':read_version,'lookupMode':single_mode,'sourceDiscovery':discovery,'requiredEvidenceIds':required,'requiredSourcePaths':required_paths,
             'requestedFields':plans[0]['requestedFields'],'selector':plans[0]['key'],'actualReadCount':len(reader.reads),'actualReadBytes':reader.bytes,'actualMetadataBytes':reader.metadata_bytes,
             'completeScansRequired':True,'scope':'Exact typed same-key records only; no inferred relation, unit conversion, aggregate or semantic endorsement.'}}

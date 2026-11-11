@@ -1,6 +1,6 @@
 # 产业链数据空间平台
 
-面向产业链多方数据共享、检索与分析的完整项目。数据空间前端、Spring Boot 后端、多模态检索、统一模态索引、多模态问答和 Qwen3.5 模型服务通过一套 Docker Compose 运行。
+面向产业链多方数据共享、检索与分析的完整项目。目前通过同济 HPC 的 Singularity 和 Slurm 运行；Windows 作为 SSH 控制端及浏览器客户端。仓库同时保留历史 Docker Compose 配置。
 
 ## 技术栈
 
@@ -11,9 +11,29 @@
 | 多模态检索与索引 | FastAPI / CLIP / BGE-small-zh-v1.5（CPU）/ FAISS |
 | 多模态问答 | FastAPI / Qwen3.5-0.8B / vLLM |
 | 存储 | PostgreSQL 16 / MinIO / Redis |
-| 部署 | Docker Compose，项目名 `multimodal-dataspace` |
+| 部署 | 同济 HPC：Singularity + Slurm；历史本地配置：Docker Compose |
 
 ## 快速启动
+
+先连接校园网／VPN，准备已配置公钥和主机密钥的 SSH。在仓库根目录打开 PowerShell：
+
+```powershell
+.\deploy\hpc\session.ps1 -Action Start -Mode GPU -Minutes 60 -Server 192.168.212.245
+# 记录返回的实际作业号；PENDING 时等待，不重复提交。
+.\deploy\hpc\session.ps1 -Action Status -JobId <作业号> -Server 192.168.212.245
+# ready=True 后执行，并保持隧道窗口开启。
+.\deploy\hpc\session.ps1 -Action Connect -JobId <作业号> -Server 192.168.212.245
+```
+
+打开 <http://127.0.0.1:18888/data-space/index.html>。不使用问答时可选 `-Mode CPU`。使用结束后另开 PowerShell，执行 `session.ps1 -Action Stop -JobId <作业号> -Server 192.168.212.245`，再用 Status 确认释放。只关闭网页或隧道不会停止计算作业。
+
+**Start 只启动远端已安装版本。目标 04 已有隔离环境验收记录，但正式部署尚未切换；默认入口仍使用原正式部署，不能据此认为新权限功能已上线。** 新版本需先按[运行绑定与发布核验](deploy/hpc/运行绑定与发布核验.md)安装、迁移并核验；独立部署的 Start、Status、Connect、Stop 均需指定同一个 `-WorkspaceRoot`。不要把测试目录当作正式实例。地址变更时使用已核实的登录域名或地址，保持主机密钥校验。
+
+完整说明及管理员初始化见[HPC 使用说明](deploy/hpc/使用说明.md)和[账号与权限操作手册](deploy/hpc/账号与权限操作.md)。
+
+### 历史本地 Docker 启动方式
+
+以下仅供维护历史本地部署，当前算力平台验收不使用该入口。
 
 前置条件：Docker Desktop（Linux 容器与 NVIDIA GPU 支持）、支持 `include` 的 Docker Compose v2、Java 17 和 Maven。本地 Qwen 模型放在 `mdsPlatform/services/qa-service/Qwen3.5-0.8B/`，CLIP 模型沿用检索与索引服务各自的模型目录。文本专业索引使用固定版本的 BGE-small-zh-v1.5（仅 CPU，约 96 MB 权重）；首次构建镜像时会下载并核对 SHA-256，模型文件不纳入 Git。
 
@@ -43,69 +63,15 @@ docker compose logs --tail 100 qa-service vllm
 
 ## 账号创建与使用
 
-### 创建账号（管理员操作）
+当前不开放匿名账号注册。平台管理员与获委派的企业成员管理者在“账号与权限”页创建成员，指定已确认企业和有效类型；新成员首次登录激活并改密。平台管理资格不会自动取得企业原件或问答数据。
 
-当前不开放匿名注册，也没有登录账号的自助注册页面。账号由具有 `ADMIN` 或 `SUPER_ADMIN` 角色的管理员通过 `POST /api/auth/register` 创建；驾驶舱中的“企业 / 组织注册认证”和“注册空间”不是登录账号创建入口。
+支持制造、供应、仓储、承运、客户/渠道、安装/售后六类可编辑业务配置，以及完整只读配置。操作能力与资源授权分别校验，相同企业或类型不产生全库访问权限。
 
-首次初始化数据库会创建 `admin` 超级管理员。请向部署维护者获取有效密码，仓库不保存本地测试账号凭据。沿用已有外部数据库启动时，账号和密码保持不变，不会重新初始化。
+首次管理员通过 HPC CPU 作业内的受控命令初始化，不接受公开静态默认凭据。命令、实例识别、已有库升级、恢复和交接见[账号与权限操作说明](deploy/hpc/账号与权限操作说明.md)。不要清库、重跑旧迁移或重放初次快照。
 
-新账号必须指定所属组织 `orgId` 和角色 ID 列表 `roles`，两者使用数据库中实际存在的 UUID，不能把 `MEMBER` 等角色代码当作角色 ID。建议为普通使用者选择目标组织内的最小权限角色，不要直接授予管理员权限。账号应加入目标数据所在组织；另建组织不会自动获得已有数据的访问权限。
+本轮实施和验收使用 Singularity + Slurm，本机仅作 SSH 控制和浏览器客户端。按[HPC 使用说明](deploy/hpc/使用说明.md)连接当前作业，访问 http://127.0.0.1:18888/data-space/index.html。候选代码、正式部署及本地工作区分别核验，文档更新不表示正式切换完成。
 
-在 PowerShell 中登录管理员账号并查看其组织及可用角色（密码通过交互输入，不写入命令或文件）：
-
-```powershell
-$dataspaceApi = 'http://localhost:8888'
-$adminCredential = Get-Credential -Message '输入已有数据空间管理员账号'
-$adminLogin = Invoke-RestMethod -Method Post -Uri "$dataspaceApi/api/auth/login" `
-    -ContentType 'application/json; charset=utf-8' -Body (@{
-        userName = $adminCredential.UserName
-        password = $adminCredential.GetNetworkCredential().Password
-    } | ConvertTo-Json)
-$adminHeaders = @{ Authorization = "Bearer $($adminLogin.token)" }
-$adminLogin.user.org
-$availableRoles = Invoke-RestMethod -Uri "$dataspaceApi/api/roles" -Headers $adminHeaders
-$availableRoles | Select-Object roleId, roleCode, roleName, orgId
-```
-
-将下方占位内容替换为目标组织及该组织角色的真实 UUID，再创建账号。需要查询其他组织时，超级管理员可调用 `GET /api/orgs?page=1&size=20`。
-
-```powershell
-$newCredential = Get-Credential -Message '输入要创建的新账号用户名和密码'
-$registerBody = @{
-    userName = $newCredential.UserName
-    password = $newCredential.GetNetworkCredential().Password
-    orgId = '<目标组织 UUID>'
-    roles = @('<目标角色 UUID>')
-} | ConvertTo-Json
-Invoke-RestMethod -Method Post -Uri "$dataspaceApi/api/auth/register" `
-    -Headers $adminHeaders -ContentType 'application/json; charset=utf-8' -Body $registerBody
-```
-
-用户名不可重复。密码至少 8 位，只允许英文字母、数字及 `-_@*#$%&`，且大写字母、小写字母、数字、上述符号四类中至少包含两类；`!` 等其他符号不被接受。注册成功返回账号信息，不返回登录令牌，需要使用新账号另行登录。
-
-### 登录与调用接口
-
-打开 `http://localhost:8888/data-space/index.html#qa`，输入创建好的用户名和密码登录。在当前组织的数据集列表中选择已有 READY 索引的数据集，即可检索和问答；新数据通过该页“上传与自动索引”区域上传并发布，等待索引就绪后使用。
-
-也可在上面的 PowerShell 会话中使用新账号调用 API：
-
-```powershell
-$userLogin = Invoke-RestMethod -Method Post -Uri "$dataspaceApi/api/auth/login" `
-    -ContentType 'application/json; charset=utf-8' -Body (@{
-        userName = $newCredential.UserName
-        password = $newCredential.GetNetworkCredential().Password
-    } | ConvertTo-Json)
-$userHeaders = @{ Authorization = "Bearer $($userLogin.token)" }
-Invoke-RestMethod -Uri "$dataspaceApi/api/data-space/qa/datasets" -Headers $userHeaders
-```
-
-登录接口的用户名字段为 `userName`。响应包含 `token`、`refreshToken`、有效期以及用户组织和角色；受保护的 API 使用 `Authorization: Bearer <token>`。不要将密码、令牌或包含它们的响应提交到 Git。
-
-页面会话失效后需重新登录。API 客户端可通过 `POST /api/auth/refresh` 提交 `{"refreshToken":"<刷新令牌>"}` 换取新令牌；通过带登录令牌的 `PATCH /api/users/me/password` 提交 `oldPassword` 和 `newPassword` 修改密码，新密码遵守同一规则。
-
-页面“退出登录”只清除当前浏览器会话。需要使账号已有令牌失效时，应携带登录令牌调用 `POST /api/auth/logout`；修改密码本身不会自动撤销已有令牌，建议修改后调用该接口，再以新密码登录。
-
-常见问题：`401` 请检查账号密码或重新登录；`403` 请检查操作所需角色及数据所属组织；注册返回 `409` 表示用户名重复。数据集列表为空时，先核对账号组织及索引是否 READY，不要通过新建组织来绕过数据权限。
+本地 Docker 与同济 HPC 分别保存账号、数据和授权。维护既有实例前，请按[账号与权限操作手册](deploy/hpc/账号与权限操作.md)核对工作区和平台管理资格。
 
 ## 数据空间问答
 

@@ -1,9 +1,11 @@
 package com.fwdrobo.sirius.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fwdrobo.sirius.dto.file.FileResp;
 import com.fwdrobo.sirius.dto.file.ListFilesQuery;
+import com.fwdrobo.sirius.dto.file.ListGetResp;
 import com.fwdrobo.sirius.entity.mm.MmAsset;
 import com.fwdrobo.sirius.entity.mm.MmAssetText;
 import com.fwdrobo.sirius.entity.mm.MmDataset;
@@ -16,12 +18,15 @@ import com.fwdrobo.sirius.util.ExceptionUtils;
 import com.fwdrobo.sirius.util.MmDeterministicIdUtils;
 import com.fwdrobo.sirius.util.PathUtils;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -33,6 +38,7 @@ import java.util.UUID;
 public class MmMetadataImportService {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final int FILE_LIST_PAGE_SIZE = 1000;
     private static final int ASSET_UPSERT_BATCH_SIZE = 1000;
     private static final int ASSET_TEXT_INSERT_BATCH_SIZE = 1000;
     private static final Set<String> BUSINESS_FORMATS = Set.of(
@@ -50,14 +56,9 @@ public class MmMetadataImportService {
         this.mmAssetTextMapper = mmAssetTextMapper;
     }
 
-    @Transactional
+    @Transactional(rollbackFor = Exception.class)
     public ImportSummary importFromDatasetVersion(MmDataset dataset, MmDatasetVersion version) throws Exception {
-        List<FileResp> files = fileService.listFiles(ListFilesQuery.builder()
-                .repoId(dataset.getRawRepoId())
-                .commitId(version.getRawCommitId())
-                .pageIdx(1)
-                .pageSize(20000)
-                .build()).getFileRespList();
+        List<FileResp> files = listCompleteSnapshot(dataset, version);
 
         if (files == null || files.isEmpty()) {
             throw ExceptionUtils.badRequest("当前版本没有可导入的文件");
@@ -152,6 +153,46 @@ public class MmMetadataImportService {
         return new ImportSummary(coco.annotationsPath(), assets.size(), imageCount, texts.size());
     }
 
+    /** Validate the complete ordered listing before replacing any asset metadata. */
+    private List<FileResp> listCompleteSnapshot(MmDataset dataset, MmDatasetVersion version) throws Exception {
+        List<FileResp> files = new ArrayList<>();
+        Set<UUID> fileIds = new HashSet<>();
+        Set<String> paths = new HashSet<>();
+        long declaredTotal = -1;
+        String previousPath = null;
+        for (int pageIndex = 1; ; pageIndex++) {
+            ListGetResp page = fileService.listFiles(ListFilesQuery.builder()
+                    .repoId(dataset.getRawRepoId()).commitId(version.getRawCommitId())
+                    .pageIdx(pageIndex).pageSize(FILE_LIST_PAGE_SIZE).build());
+            if (page == null || !dataset.getRawRepoId().equals(page.getArtifactId())
+                    || !version.getRawCommitId().equals(page.getCommitId())
+                    || page.getPageIdx() != pageIndex || page.getPageSize() != FILE_LIST_PAGE_SIZE
+                    || page.getTotal() < 0 || page.getFileRespList() == null) {
+                throw ExceptionUtils.conflict("METADATA_FILE_LIST_INCONSISTENT");
+            }
+            if (declaredTotal < 0) declaredTotal = page.getTotal();
+            if (page.getTotal() != declaredTotal || files.size() > declaredTotal
+                    || page.getFileRespList().size() != Math.min(FILE_LIST_PAGE_SIZE, declaredTotal - files.size())) {
+                throw ExceptionUtils.conflict("METADATA_FILE_LIST_INCONSISTENT");
+            }
+            for (FileResp file : page.getFileRespList()) {
+                if (file == null || file.getFileId() == null || file.getLogicalPath() == null
+                        || file.getLogicalPath().isBlank()) {
+                    throw ExceptionUtils.conflict("METADATA_FILE_LIST_INCONSISTENT");
+                }
+                String logicalPath = PathUtils.normalizePath(file.getLogicalPath());
+                if (!fileIds.add(file.getFileId()) || !paths.add(logicalPath)
+                        || previousPath != null && previousPath.compareTo(file.getLogicalPath()) >= 0) {
+                    throw ExceptionUtils.conflict("METADATA_FILE_LIST_INCONSISTENT");
+                }
+                // Inherited snapshots legitimately reuse a file uploaded in an older commit.
+                previousPath = file.getLogicalPath();
+                files.add(file);
+            }
+            if (files.size() == declaredTotal) return files;
+        }
+    }
+
     private CocoMetadata loadOptionalCocoMetadata(MmDataset dataset,
                                                   MmDatasetVersion version,
                                                   List<FileResp> files) throws Exception {
@@ -164,9 +205,14 @@ public class MmMetadataImportService {
             try (var stream = fileService.downloadContent(
                     dataset.getRawRepoId(), version.getRawCommitId(), logicalPath)) {
                 root = MAPPER.readTree(stream.inputStream());
-            } catch (Exception exception) {
-                log.debug("skip non-readable JSON while looking for optional COCO metadata: {}", logicalPath);
+            } catch (JsonProcessingException invalidJson) {
+                log.debug("skip non-COCO JSON syntax while looking for optional metadata: {}", logicalPath);
                 continue;
+            } catch (ResponseStatusException denied) {
+                throw denied;
+            } catch (Exception unavailable) {
+                throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                        "METADATA_SOURCE_READ_UNAVAILABLE", unavailable);
             }
             JsonNode images = root == null ? null : root.get("images");
             JsonNode annotations = root == null ? null : root.get("annotations");

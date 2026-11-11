@@ -9,5 +9,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 app = FastAPI(title="multimodal-qa-service", version="1.0.0")
 
+from core.worker_authority import install_guard
+install_guard(app,"qa")
+
 app.include_router(health_router)
 app.include_router(qa_router, prefix="/api/v1")

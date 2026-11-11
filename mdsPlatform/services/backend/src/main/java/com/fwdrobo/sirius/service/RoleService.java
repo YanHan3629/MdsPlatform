@@ -1,175 +1,94 @@
 package com.fwdrobo.sirius.service;
-
-import com.fwdrobo.sirius.dto.permission.RoleReq;
-import com.fwdrobo.sirius.entity.permission.Permission;
-import com.fwdrobo.sirius.entity.permission.PermissionTree;
-import com.fwdrobo.sirius.entity.permission.Role;
-import com.fwdrobo.sirius.mapper.PermissionMapper;
-import com.fwdrobo.sirius.mapper.RoleMapper;
-import com.fwdrobo.sirius.util.ExceptionUtils;
-import com.fwdrobo.sirius.util.SecurityUtils;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.BeanUtils;
+import com.fwdrobo.sirius.dto.permission.RoleReq;
+import com.fwdrobo.sirius.entity.permission.*;
+import com.fwdrobo.sirius.mapper.*;
+import com.fwdrobo.sirius.security.*;
+import com.fwdrobo.sirius.security.IdentityManagementService.*;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-
-import java.time.OffsetDateTime;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.stream.Collectors;
-
 @Service
 public class RoleService {
-
-    private final RoleMapper roleMapper;
-    private final PermissionMapper permissionMapper;
-
-    public RoleService(RoleMapper roleMapper, PermissionMapper permissionMapper) {
-        this.roleMapper = roleMapper;
-        this.permissionMapper = permissionMapper;
+    private final RoleMapper roleMapper;private final PermissionMapper permissionMapper;private final JdbcTemplate jdbc;
+    private final IdentityManagementService management;private final AuthorizationService auth;private final ObjectMapper mapper;
+    public RoleService(RoleMapper roleMapper,PermissionMapper permissionMapper,JdbcTemplate jdbc,
+            IdentityManagementService management,AuthorizationService auth,ObjectMapper mapper) {
+        this.roleMapper=roleMapper;this.permissionMapper=permissionMapper;this.jdbc=jdbc;this.management=management;this.auth=auth;this.mapper=mapper;
     }
-
-    public Role get(UUID roleId) {
-        Role role = roleMapper.selectById(roleId);
-        if (role == null) throw ExceptionUtils.badRequest("角色不存在");
-        return role;
+    private void read(UUID id){get(id);}
+    private Map<String,Object> metadata(UUID id){read(id);return jdbc.queryForMap("SELECT * FROM role WHERE role_id=? AND type_state<>'DELETED'",id);}
+    public Role get(UUID id){
+        return management.legacyRoles(id).stream().findFirst()
+            .orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"TYPE_NOT_AVAILABLE"));
     }
-
-    public List<Role> selectRoles() {
-        return roleMapper.selectAll();
-    }
-
-    @Transactional
-    public UUID create(RoleReq req) {
-        Role exists = roleMapper.selectByOrgIdAndCode(req.getOrgId(), req.getRoleCode());
-        if (exists != null) throw ExceptionUtils.badRequest("roleCode已存在");
-
-        Role role = new Role();
-        BeanUtils.copyProperties(req, role);
-        role.setIsBuiltin(false);
-        role.setCreatedAt(OffsetDateTime.now());
-        role.setCreatedBy(SecurityUtils.getUserId());
-
-        UUID roleId = roleMapper.insert(role);
-
-        setRolePermissions(roleId, req.getPermissionIds());
-
-        return roleId;
-    }
-
-    @Transactional
-    public void update(UUID roleId, RoleReq req) {
-        if (roleId == null) throw ExceptionUtils.badRequest("roleId不能为空");
-        if (req == null) throw ExceptionUtils.badRequest("参数不能为空");
-
-        Role db = roleMapper.selectById(roleId);
-        if (db == null) throw ExceptionUtils.badRequest("角色不存在");
-
-        // 内置保护：不允许改 code
-        if (Boolean.TRUE.equals(db.getIsBuiltin()) && req.getRoleCode() != null
-                && !req.getRoleCode().equals(db.getRoleCode())) {
-            throw ExceptionUtils.badRequest("系统内置角色不允许修改 role_code");
+    public List<Role> selectRoles(){return management.legacyRoles(null);}
+    private List<String> operations(List<UUID> ids){
+        if(ids==null)return List.of();var unique=new LinkedHashSet<>(ids);var out=new ArrayList<String>();
+        for(UUID id:unique){
+            var rows=jdbc.queryForList("SELECT operation_code FROM ds_operation WHERE permission_id=?",String.class,id);
+            if(rows.size()!=1||!OperationCatalog.isBusiness(rows.get(0)))throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"IMPLEMENTED_BUSINESS_PERMISSION_REQUIRED");
+            out.add(rows.get(0));
         }
-
-        // 如果改 code，检查唯一性
-        if (!blank(req.getRoleCode()) && !req.getRoleCode().equals(db.getRoleCode())) {
-            Role exists = roleMapper.selectByOrgIdAndCode(db.getOrgId(), req.getRoleCode());
-            if (exists != null) throw ExceptionUtils.badRequest("roleCode已存在");
+        return out;
+    }
+    private List<String> tags(Object raw) {
+        try{return raw==null?List.of():mapper.readValue(raw.toString(),mapper.getTypeFactory().constructCollectionType(List.class,String.class));}
+        catch(Exception e){throw new IllegalStateException("Stored type tags invalid");}
+    }
+    private List<UUID> orgIds(Object raw){
+        try{return raw==null?List.of():Arrays.stream((Object[])((java.sql.Array)raw).getArray()).map(x->UUID.fromString(x.toString())).toList();}
+        catch(Exception e){throw new IllegalStateException("Stored type applicability invalid");}
+    }
+    private TypeChange change(RoleReq req,Map<String,Object> old){
+        boolean fresh=old==null;
+        List<String> ops=req.getPermissionIds()!=null?operations(req.getPermissionIds()):fresh?List.of():
+            jdbc.queryForList("SELECT o.operation_code FROM role_permission rp JOIN ds_operation o ON o.permission_id=rp.per_id WHERE rp.role_id=?",String.class,old.get("role_id"));
+        return new TypeChange(fresh?req.getOrgId():(UUID)old.get("org_id"),
+            req.getRoleCode()!=null?req.getRoleCode():fresh?null:(String)old.get("role_code"),
+            req.getRoleName()!=null?req.getRoleName():fresh?null:(String)old.get("role_name"),
+            req.getDescription()!=null?req.getDescription():fresh?"":(String)old.get("description"),
+            req.getScope()!=null?req.getScope():fresh?"ENTERPRISE":(String)old.get("type_scope"),
+            req.getIndustryTags()!=null?req.getIndustryTags():fresh?List.of():tags(old.get("industry_tags")),
+            req.getApplicableOrgIds()!=null?req.getApplicableOrgIds():fresh?List.of():orgIds(old.get("applicable_org_ids")),
+            req.getReadOnly()!=null?req.getReadOnly():!fresh&&Boolean.TRUE.equals(old.get("read_only_profile")),ops,
+            req.getState()!=null?req.getState():fresh?"ACTIVE":(String)old.get("type_state"),req.getExpectedVersion());
+    }
+    public UUID create(RoleReq req){auth.requirePlatformManagement("identity.type.manage");return management.createType(change(req,null));}
+    public void update(UUID id,RoleReq req){auth.requirePlatformManagement("identity.type.manage");management.updateType(id,change(req,metadata(id)));}
+    public void delete(UUID id){delete(id,null,null,null);}
+    public void delete(UUID id,Long version,UUID replacement,Long replacementVersion){management.deleteType(id,version,replacement,replacementVersion);}
+    public List<Role> getRolesByUserId(UUID uid){
+        var a=auth.actor();
+        if(!a.userId().equals(uid)){
+            var orgs=jdbc.queryForList("SELECT org_id FROM fwd_user WHERE user_id=?",UUID.class,uid);
+            if(orgs.size()!=1)throw new ResponseStatusException(HttpStatus.NOT_FOUND,"MEMBER_SCOPE_NOT_AVAILABLE");
+            auth.requireMemberManagement(orgs.get(0),"identity.member.read");auth.requireNoManagementEscalation(a,uid);
         }
-
-        Role upd = new Role();
-        upd.setRoleId(roleId);
-        upd.setRoleCode(req.getRoleCode());
-        upd.setRoleName(req.getRoleName());
-        upd.setUpdatedAt(OffsetDateTime.now());
-        upd.setUpdatedBy(SecurityUtils.getUserId());
-        roleMapper.update(upd);
-
-        if (req.getPermissionIds() != null) {
-            setRolePermissions(roleId, req.getPermissionIds());
-        }
+        return roleMapper.selectRolesByUserId(uid);
     }
-
-    @Transactional
-    public void delete(UUID roleId) {
-        if (roleId == null) return;
-
-        Role db = roleMapper.selectById(roleId);
-        if (db == null) return;
-
-        if (Boolean.TRUE.equals(db.getIsBuiltin())) {
-            throw ExceptionUtils.badRequest("系统内置角色不允许删除");
-        }
-
-        roleMapper.deleteRolePermissions(roleId);
-        roleMapper.deleteById(roleId);
+    public List<Role> getRolesByIds(List<UUID> ids){if(ids==null)return List.of();return ids.stream().map(this::get).toList();}
+    public void insertUserRoles(UUID uid,List<UUID> ids){setUserRoles(uid,ids);}
+    public void setUserRoles(UUID uid,List<UUID> ids){management.assignTypes(uid,new TypeAssignment(ids,ids==null||ids.isEmpty()?null:ids.get(0),null));}
+    public List<UUID> listRolePermissionIds(UUID id){read(id);return roleMapper.selectPerIdsByRoleId(id);}
+    public void setRolePermissions(UUID id,List<UUID> ids){setRolePermissions(id,ids,null);}
+    public void setRolePermissions(UUID id,List<UUID> ids,Long version){
+        auth.requirePlatformManagement("identity.type.manage");var req=new RoleReq();req.setPermissionIds(ids);req.setExpectedVersion(version);
+        management.updateType(id,change(req,metadata(id)));
     }
-
-    public List<Role> getRolesByUserId(UUID userId) {
-        return roleMapper.selectRolesByUserId(userId);
-    }
-
-    public List<Role> getRolesByIds(List<UUID> roleIds) {
-        return roleMapper.selectByIds(roleIds);
-    }
-
-    public void insertUserRoles(UUID userId, List<UUID> roleIds) {
-        roleMapper.insertUserRoles(userId, roleIds);
-    }
-
-    /**
-     * 覆盖更新用户角色：先删除原角色，再写入新角色。
-     */
-    @Transactional
-    public void setUserRoles(UUID userId, List<UUID> roleIds) {
-        if (userId == null) {
-            throw ExceptionUtils.badRequest("userId不能为空");
-        }
-        roleMapper.deleteUserRolesByUserId(userId);
-        List<UUID> uniqueRoleIds = distinct(roleIds);
-        if (uniqueRoleIds.isEmpty()) {
-            return;
-        }
-        roleMapper.insertUserRoles(userId, uniqueRoleIds);
-    }
-
-    public List<UUID> listRolePermissionIds(UUID roleId) {
-        return roleMapper.selectPerIdsByRoleId(roleId);
-    }
-
-    @Transactional
-    public void setRolePermissions(UUID roleId, List<UUID> permissionIds) {
-        List<UUID> unique = distinct(permissionIds);
-
-        // 先清空
-        roleMapper.deleteRolePermissions(roleId);
-
-        if (unique.isEmpty()) return;
-
-        // 批量查 permission，做分类 + parent 推导
-        List<Permission> perms = permissionMapper.selectByIds(unique);
-        if (perms.size() != unique.size()) {
-            throw ExceptionUtils.badRequest("存在无效的 permissionId");
-        }
-
-        List<UUID> opIds = perms.stream()
-                .filter(p -> "operation".equals(p.getCategory()))
-                .map(Permission::getPerId)
-                .collect(Collectors.toList());
-
-        if (!opIds.isEmpty()) {
-            roleMapper.insertRolePermissions(roleId, opIds);
-        }
-    }
-
     public List<PermissionTree> getRolePermissionTree(UUID roleId) {
-        // 查全量权限（feature + operation）
+        read(roleId);
+
+        // Operation definitions are metadata; reading requires management scope.
         List<Permission> all = permissionMapper.selectAll(null);
 
         // 查角色已绑定的 per_id（推荐模式：仅 operation）
         Set<UUID> selectedOpIds = new HashSet<>(roleMapper.selectPerIdsByRoleId(roleId));
-
-        // 建索引：id -> Permission
-        Map<UUID, Permission> byId = new HashMap<>(all.size());
-        for (Permission p : all) byId.put(p.getPerId(), p);
 
         // feature 节点容器（保持稳定顺序）
         Map<UUID, PermissionTree> featureNodes = new LinkedHashMap<>();
@@ -183,14 +102,21 @@ public class RoleService {
         // 挂 operation，并设置 operation.checked
         for (Permission p : all) {
             if (!"operation".equals(p.getCategory())) continue;
-            UUID parentId = p.getParentId();
-            if (parentId == null) continue;
-
-            Permission parent = byId.get(parentId);
-            if (parent == null || !"feature".equals(parent.getCategory())) continue;
-
-            PermissionTree feature = featureNodes.get(parentId);
-            if (feature == null) continue;
+            PermissionTree feature = featureNodes.get(p.getParentId());
+            if (feature == null) {
+                if (!OperationCatalog.isBusiness(p.getPerCode())) continue;
+                String group = OperationCatalog.all().get(p.getPerCode()).group();
+                UUID groupId = UUID.nameUUIDFromBytes(("sirius:operation-group:" + group)
+                    .getBytes(StandardCharsets.UTF_8));
+                feature = featureNodes.computeIfAbsent(groupId, id -> {
+                    PermissionTree node = new PermissionTree();
+                    node.setPerId(id);
+                    node.setPerCode(group);
+                    node.setPerName(group);
+                    node.setCategory("feature");
+                    return node;
+                });
+            }
 
             PermissionTree op = toTreeNode(p);
             op.setChecked(selectedOpIds.contains(p.getPerId()));
@@ -244,4 +170,8 @@ public class RoleService {
     private boolean blank(String s) {
         return s == null || s.trim().isEmpty();
     }
+
+    public Object previewUpdate(UUID id,RoleReq req){return management.preview("TYPE_UPDATE",id,change(req,metadata(id)));}
+    public Object previewPermissions(UUID id,List<UUID> ids,Long version){var req=new RoleReq();req.setPermissionIds(ids);req.setExpectedVersion(version);return previewUpdate(id,req);}
+    public Object previewDelete(UUID id,Long version,UUID replacement,Long replacementVersion){return management.preview("TYPE_DELETE",id,new com.fwdrobo.sirius.security.IdentityManagementService.TypeDeletion(version,replacement,replacementVersion));}
 }

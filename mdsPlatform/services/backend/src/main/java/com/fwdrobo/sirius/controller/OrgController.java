@@ -43,13 +43,11 @@ public class OrgController {
      * 分页查询组织列表。
      */
     @GetMapping
-    @PreAuthorize("hasRole('SUPER_ADMIN')")
     public PageRes<OrgResponse> listOrgs(@Validated @ModelAttribute OrgQuery query) {
         return orgService.listPage(query.page(), query.size());
     }
 
     @PostMapping
-    @PreAuthorize("hasRole('SUPER_ADMIN')")
     public Map<String, Object> create(@RequestBody OrgReq req) {
         UUID orgId = orgService.create(req);
         return Map.of("message", "组织创建成功",
@@ -57,7 +55,6 @@ public class OrgController {
     }
 
     @PatchMapping("/{orgId}")
-    @PreAuthorize("hasRole('SUPER_ADMIN')")
     public Map<String, Object> update(@PathVariable UUID orgId, @RequestBody OrgReq req) {
         orgService.update(orgId, req);
         return Map.of("message", "组织修改成功",
@@ -65,9 +62,9 @@ public class OrgController {
     }
 
     @DeleteMapping("/{orgId}")
-    @PreAuthorize("hasRole('SUPER_ADMIN')")
-    public Map<String, Object> delete(@PathVariable UUID orgId) {
-        orgService.delete(orgId);
+    public Map<String, Object> delete(@PathVariable UUID orgId,
+            @RequestHeader(value="If-Match",required=false) Long version) {
+        orgService.delete(orgId,version);
         return Map.of("message", "组织删除成功",
                 "orgId", orgId);
     }

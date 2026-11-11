@@ -11,6 +11,7 @@ from services.document_contract import READ_VERSION,context_kind
 
 VERSION=READ_VERSION
 MAX_PAGES=4
+MAX_VISUAL_PAGES=2
 MAX_READS=24
 MAX_SECONDS=45
 
@@ -56,6 +57,15 @@ def _read_record(bundle,operation):
         'coverage':bundle['coverage']}
 
 
+def _full_page_item(scope,asset,bundle,question,number):
+    operation={'operation':'read_representation','representationId':bundle['representationId']}
+    item=_item(scope,asset,bundle,question,operation,visual=True)
+    item['provenance']['documentFullView']=True
+    item['nativeRegionRequest']={'page':number,'bbox':bundle['locator']['bbox'],
+        'dpi':160,'maxPixels':1000000}
+    return item
+
+
 def direct_document_question(client,scope,question,filters,intent):
     assets=[asset for asset in filters.get('assets',[]) if asset.get('scope')=='corpus'
         and asset.get('originalFormat') in {'PDF','JPG','PNG'} and asset.get('nativeEvidence')
@@ -88,7 +98,29 @@ def direct_document_question(client,scope,question,filters,intent):
         if not page_numbers<={page['selector']['page'] for page in pages}:raise ValueError('NEEDS_CLARIFICATION: 指定页码不在该冻结文件中。')
         pages=[page for page in pages if page['selector']['page'] in page_numbers]
     if len(pages)>MAX_PAGES:raise ValueError('NEEDS_CLARIFICATION: 文件超过本次四页精读范围，请指定页码或区域。')
+    name=re.escape(asset['logicalPath'].rsplit('/',1)[-1])
+    full_image_only=bool(re.search(
+        r'(?:^|[。！？；!?;\n])\s*(?:请\s*)?(?:只|仅)(?:看|依据|根据|使用)\s*(?:文件\s*)?'+name
+        +r'\s*(?:第\s*\d+\s*页\s*)?(?:的\s*)?(?:完整(?:图像|图片|页面|照片)|整页图像)',question,re.I))
+    if full_image_only and len(pages)>MAX_VISUAL_PAGES:
+        raise ValueError('NEEDS_CLARIFICATION: 完整图像一次最多两页，请指定页码。')
     page_bundles={page['selector']['page']:read({'operation':'read_representation','representationId':page['representationId']}) for page in pages}
+    if full_image_only:
+        evidence=[]
+        for number,bundle in page_bundles.items():
+            item=_full_page_item(scope,asset,bundle,question,number)
+            item['modelFactIds']=[]
+            item['facts']={'text':''}
+            item['nativeHumanContext']='本次只使用完整页面图像。'
+            item['nativeModelContext']=json.dumps({'evidenceId':bundle['evidenceId'],'page':number,
+                'visualObservationRequired':True},ensure_ascii=False,separators=(',',':'))
+            item['provenance']['documentImageOnly']=True
+            item['provenance']['modelFactSelection']={'selectedFactIds':[],'reason':'EXPLICIT_FULL_IMAGE_ONLY',
+                'readFactIds':[fact['factId'] for fact in bundle['facts']]}
+            evidence.append(item)
+        return {'evidence':evidence,'nativeReads':reads,'status':'OK','planningMethod':VERSION,
+            'documentPlan':{'pagesRead':list(page_bundles),'visualOnly':True,'selection':'explicit-full-image-only',
+                'requiredSourcePaths':[asset['logicalPath']],'requiredEvidenceIds':[item['evidenceId'] for item in evidence]}}
     residual=question.replace(asset['logicalPath'].rsplit('/',1)[-1],' ')
     residual=re.sub(r'PDF|PNG|JPG|JPEG|文件|图片|只看|只依据|末页|最后一页|打印|第\s*\d+\s*页',' ',residual,flags=re.I)
     residual=re.sub(r'(?:不要|不用|不能|无需|不应|请勿|而非|而不是)[^，。；;！？?\n]*',' ',residual)
@@ -210,15 +242,12 @@ def direct_document_question(client,scope,question,filters,intent):
     visual=(asset['originalFormat'] in {'JPG','PNG'} and bool(chosen or re.search(visual_terms,residual))) or (
         asset['originalFormat']=='PDF' and bool(re.search(r'图像|图表|图纸|示意图|照片|颜色|外观|标注|看图',residual)))
     if visual:
-        for number,bundle in list(page_bundles.items())[:2]:
-            operation={'operation':'read_representation','representationId':bundle['representationId']}
-            item=_item(scope,asset,bundle,question,operation,visual=True)
-            item['provenance']['documentFullView']=True
+        for number,bundle in list(page_bundles.items())[:MAX_VISUAL_PAGES]:
+            item=_full_page_item(scope,asset,bundle,question,number)
             if not identifiers_confirmed:
                 item['nativeModelContext']=json.dumps({'evidenceId':bundle['evidenceId'],'visualObservationRequired':True,
                     'requestedIdentifiers':identifiers,'textRecognitionDoesNotConfirmTarget':True,
                     'instruction':'需在实际图像中确认标识及关联；无法辨认就说明不确定。'},ensure_ascii=False,separators=(',',':'))
-            item['nativeRegionRequest']={'page':number,'bbox':bundle['locator']['bbox'],'dpi':160,'maxPixels':1000000}
             # Put the complete visual source before OCR crops, so a caption
             # cannot be presented as the only image of a requested appliance.
             evidence.insert(0,item)

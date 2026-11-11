@@ -25,12 +25,18 @@ public record JobResponse(
         List<Input> inputs,
         RunStatus lastRunStatus  // 最近一次运行状态，未运行过时为 null
 ) {
+    public JobResponse {
+        params = com.fwdrobo.sirius.util.JobResponseSanitizer.params(params);
+        cmd = com.fwdrobo.sirius.util.JobResponseSanitizer.text(cmd);
+    }
     public record Input(
             UUID repoId,
             String repoName,
+            @JsonInclude(JsonInclude.Include.NON_NULL) UUID commitId,
             // Empty list means repo-wide input (all files in this repo).
             @JsonInclude(JsonInclude.Include.NON_NULL)
             List<String> paths
     ) {
+        public Input(UUID repoId,String repoName,List<String> paths){this(repoId,repoName,null,paths);}
     }
 }

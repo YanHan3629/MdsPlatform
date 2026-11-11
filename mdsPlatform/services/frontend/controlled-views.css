@@ -1,0 +1,12 @@
+.controlled-view-dialog .card{margin-top:16px;box-shadow:none;border:1px solid var(--line);padding:18px}
+.controlled-view-dialog .cv-steps{display:flex;flex-wrap:wrap;gap:24px;padding-left:22px;color:var(--muted)}
+.controlled-view-dialog .cv-rules{display:grid;gap:14px}.controlled-view-dialog .cv-rule{border:1px solid var(--line);border-radius:14px;padding:16px}
+.controlled-view-dialog .cv-rule h4{margin:0;overflow-wrap:anywhere}.controlled-view-dialog .cv-check{display:flex;gap:10px;align-items:flex-start}
+.controlled-view-dialog .cv-check input{width:auto;flex:none;margin-top:4px}.controlled-view-dialog .cv-file-choices{display:grid;gap:8px}
+.controlled-view-dialog .cv-file-choice{display:flex;gap:10px;padding:10px;border:1px solid var(--line);border-radius:10px;overflow-wrap:anywhere}
+.controlled-view-dialog .cv-file-choice input{width:auto;flex:none}.controlled-view-dialog .cv-warning{padding:12px;border-left:4px solid var(--warn);background:#fffbeb}
+.controlled-view-dialog .cv-file-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)}
+.controlled-view-dialog .cv-file-row span{flex:1 1 300px;overflow-wrap:anywhere}.controlled-view-dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:340px;overflow:auto;background:#f5f7fb;padding:14px;border-radius:10px}
+.controlled-view-dialog img{max-width:100%;max-height:360px;object-fit:contain}.controlled-view-dialog code{overflow-wrap:anywhere}
+.controlled-view-dialog .cv-sheet{padding:12px;border:1px dashed var(--line);margin:12px 0;border-radius:10px}
+.controlled-view-dialog [hidden]{display:none!important}@media(max-width:720px){.controlled-view-dialog .card{padding:12px}.controlled-view-dialog .cv-steps{gap:14px}}

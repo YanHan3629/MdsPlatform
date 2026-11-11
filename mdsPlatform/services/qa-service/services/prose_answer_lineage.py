@@ -2,12 +2,54 @@
 import base64,copy,hashlib,json,re,uuid
 from services.answer_lineage import Catalogue,IDENTITY,require,same,canonical
 from services.read_receipt import verify,digest
+from services.evidence_trace import source_frame
 from services.user_input_evidence import is_user,has_user,verify as verify_user,verify_context,question_matches,citation_allowed
 
-VERSION='prose-actual-input-lineage-2026-10-26.1'
+VERSION='prose-actual-input-lineage-2026-11-07.2'
+CATALOGUE_DISPLAY_VERSION='validated-catalogue-source-text-display-2026-11-08.1'
+FINAL_DISPLAY_VERSION='prose-display-citations-and-exact-spans-2026-11-07.1'
 EXCERPT_VERSION='document-native-excerpt-lineage-2026-10-27.1'
 CITATION=re.compile(r'\[来源\s*(\d+)\]')
 HEADER='模型解释（语义尚未认证）：\n'
+
+
+def catalogue_display(answer,sources,indices):
+    """Format only exact, already bound internal catalogues echoed by the model.
+
+    Keep unrelated JSON intact and reject a changed copy of a bound catalogue.
+    The actual model response and request remain available in the trace.
+    """
+    known={}
+    bound_ids=set()
+    for index in indices:
+        source=sources[index-1]
+        if is_user(source):continue
+        try:value=json.loads(source.model_context)
+        except (TypeError,ValueError,RecursionError):continue
+        if not isinstance(value,dict) or set(value)!={'evidenceId','facts'} or value['evidenceId']!=source.evidence_id:continue
+        facts=value['facts']
+        if not isinstance(facts,list) or not facts or any(not isinstance(f,dict) or set(f)!={'factId','text','nature'}
+            or not isinstance(f['text'],str) or not f['text'].strip() or f['factId'] not in source.fact_ids for f in facts):continue
+        known.setdefault(canonical(value),[]).append((index,source,value))
+        bound_ids.add(source.evidence_id)
+    decoder=json.JSONDecoder();cursor=0;search=0;parts=[];edits=[]
+    while search<len(answer):
+        start=answer.find('{',search)
+        if start<0:break
+        try:value,length=decoder.raw_decode(answer[start:])
+        except (ValueError,RecursionError):search=start+1;continue
+        end=start+length;search=end;matches=known.get(canonical(value),[])
+        if len(matches)!=1:
+            if isinstance(value,dict) and 'facts' in value and isinstance(value.get('evidenceId'),str):
+                require(value['evidenceId'] not in bound_ids,'CLAIM_PROSE_BOUND_CATALOGUE_CHANGED')
+            continue
+        index,source,catalogue=matches[0];replacement='\n'.join(f['text'] for f in catalogue['facts'])
+        parts.extend([answer[cursor:start],replacement]);cursor=end
+        edits.append(dict(recipeVersion=CATALOGUE_DISPLAY_VERSION,operation='display-validated-catalogue-source-text',
+            inputSourceIndex=index,evidenceId=source.evidence_id,factIds=[f['factId'] for f in catalogue['facts']],
+            inputStart=start,inputEnd=end,offsetUnit='unicode-code-points',
+            inputSha256=hashlib.sha256(answer[start:end].encode()).hexdigest(),outputSha256=hashlib.sha256(replacement.encode()).hexdigest()))
+    parts.append(answer[cursor:]);return ''.join(parts),edits
 
 def _call(result,trace,allow_truncated=False):
     require(trace is not None,'CLAIM_PROSE_AUDIT_REQUIRED')
@@ -116,8 +158,46 @@ def _image_links(sources,indices,image_parts,trace,call):
             modelCallId=call['callId'],modelRequestBodySha256=call['requestBodySha256'],referenceRole='actual-image-input-reference-not-semantic-entailment'))
     return links
 
-def finish(question,answer,result,sources,image_parts,trace):
-    """Attach explicit model citations; omit uncited sources and keep semantics unverified."""
+def _model_slots(sources,call):
+    """Resolve labels from actual recorded model order, including replay subsets."""
+    actual=call.get('actualEvidence',[]);require(isinstance(actual,list) and actual,'CLAIM_PROSE_ACTUAL_SOURCE_ORDER_REQUIRED')
+    texts=[]
+    user_text_hashes = set()
+    for message in call.get('request',{}).get('messages',[]):
+        content=message.get('content',[])
+        if isinstance(content,str):texts.append(content)
+        elif isinstance(content,list):
+            for part in content:
+                if isinstance(part,dict) and part.get('type')=='text':
+                    if isinstance(part.get('text'),str):texts.append(part['text'])
+                    if message.get('role')=='user' and isinstance(part.get('textSha256'),str):
+                        user_text_hashes.add(part['textSha256'])
+    by_model={};by_input={}
+    for index,source in enumerate(sources,1):
+        matches=[i for i,item in enumerate(actual,1) if item.get('sourceId')==source.source_id and item.get('evidenceId')==source.evidence_id]
+        require(len(matches)==1,'CLAIM_PROSE_SOURCE_ORDER_AMBIGUOUS');model=matches[0]
+        require(model not in by_model,'CLAIM_PROSE_DUPLICATE_SOURCE_INPUT')
+        context=('用户所附图片，文件名不构成图片内容依据。' if source.source_type=='user_image' else source.model_context or source.content_preview)
+        require(isinstance(context,str) and context,'CLAIM_PROSE_SOURCE_FRAME_EMPTY')
+        frame = source_frame(source, model)
+        proof = actual[model-1].get('sourceFrameProof')
+        expected_part = call.get('expectedSourcePartSha256')
+        if proof is None and expected_part is None:
+            # Replay traces created before frame proofs may still have the actual text.
+            matched = any(text.startswith(frame) or '\n'+frame in text for text in texts)
+        else:
+            matched = (isinstance(proof,dict) and proof.get('position') == model
+                       and proof.get('frameSha256') == hashlib.sha256(frame.encode()).hexdigest()
+                       and isinstance(proof.get('sourcePartSha256'),str)
+                       and proof['sourcePartSha256'] == expected_part
+                       and proof['sourcePartSha256'] in user_text_hashes)
+        require(matched,'CLAIM_PROSE_ACTUAL_SOURCE_FRAME_CHANGED')
+        by_model[model]=index;by_input[index]=model
+    return by_model,by_input
+
+
+def _compose(question,answer,result,sources,image_parts,trace):
+    """Recompute the registered display using native proofs and the real response."""
     call=_call(result,trace)
     mixed=has_user(sources)
     require(sources and all(question_matches(s,question,mixed) for s in sources),'CLAIM_PROSE_QUESTION_CHANGED')
@@ -130,7 +210,10 @@ def finish(question,answer,result,sources,image_parts,trace):
         checked=[e['value'] for e in trace.data['events'] if e['kind']=='textOutputCheck']
         require(len(checked)==1 and checked[0].get('status')!='REJECTED' and checked[0].get('normalizedAnswer')==answer,'CLAIM_PROSE_PRESENTATION_CHANGED_WITHOUT_CHECK')
     labels=re.findall(r'\[来源[^\]\n]*\]',answer);require(labels and all(CITATION.fullmatch(x) for x in labels),'CLAIM_PROSE_CITATION_MISSING_OR_INVALID')
-    indices=sorted({int(x) for x in CITATION.findall(answer)});require(all(1<=i<=len(sources) for i in indices),'CLAIM_PROSE_CITATION_OUT_OF_RANGE')
+    model_to_input,input_to_model=_model_slots(sources,call)
+    model_indices=sorted({int(x) for x in CITATION.findall(answer)})
+    require(all(i in model_to_input for i in model_indices),'CLAIM_PROSE_CITATION_OUT_OF_RANGE')
+    indices=[model_to_input[i] for i in model_indices]
     if mixed:
         from services.evidence_policy import format_intent
         allowed=format_intent(question).allowed
@@ -141,15 +224,52 @@ def finish(question,answer,result,sources,image_parts,trace):
         if is_user(sources[i-1]):links.append(dict(verify_user(sources[i-1],question,trace,call,image_parts),sourceIndex=i))
     require(set(indices)=={x['sourceIndex'] for x in links},'CLAIM_PROSE_CITED_SOURCE_HAS_NO_ACTUAL_INPUT')
     mapping={old:new for new,old in enumerate(indices,1)}
-    for link in links:link['modelSourceIndex']=link['sourceIndex'];link['sourceIndex']=mapping[link['sourceIndex']]
-    text=CITATION.sub(lambda m:'[来源'+str(mapping[int(m[1])])+']',answer);final=HEADER+text
-    claim=dict(claimId=str(uuid.uuid5(uuid.NAMESPACE_URL,canonical([VERSION,text,links]))),kind='source_interpretation',text=text,answerStart=len(HEADER),answerEnd=len(final),offsetUnit='unicode-code-points',
+    for link in links:
+        index=link['sourceIndex'];link['modelSourceIndex']=input_to_model[index];link['sourceIndex']=mapping[index]
+    displayed,display_edits=catalogue_display(answer,sources,indices)
+    for edit in display_edits:
+        index=edit['inputSourceIndex'];edit.update(modelSourceIndex=input_to_model[index],sourceIndex=mapping[index])
+    model_mapping={input_to_model[index]:mapping[index] for index in indices}
+    text=CITATION.sub(lambda m:'[来源'+str(model_mapping[int(m[1])])+']',displayed);final=HEADER+text
+    proof=dict(recipeVersion=FINAL_DISPLAY_VERSION,modelCallId=call['callId'],modelRequestBodySha256=call['requestBodySha256'],
+        modelResponseTextSha256=hashlib.sha256(raw.encode()).hexdigest(),acceptedTextSha256=hashlib.sha256(answer.encode()).hexdigest(),
+        displayedTextSha256=hashlib.sha256(displayed.encode()).hexdigest(),finalClaimTextSha256=hashlib.sha256(text.encode()).hexdigest(),
+        modelToFinalSourceIndices={str(k):v for k,v in model_mapping.items()},normalizedByTextOutputCheck=answer!=raw)
+    claim=dict(claimId=str(uuid.uuid5(uuid.NAMESPACE_URL,canonical([VERSION,text,links,display_edits,proof]))),kind='source_interpretation',text=text,answerStart=len(HEADER),answerEnd=len(final),offsetUnit='unicode-code-points',
         evidenceNature='model_interpretation',verification='actual-input-binding-only-not-semantic-verification',sourceIndices=list(range(1,len(indices)+1)),
         evidenceIds=[sources[i-1].evidence_id for i in indices],factIds=sorted({f for x in links for f in x.get('factIds',[])}),
-        imageIds=[x['imageId'] for x in links if x.get('imageId')],readIds=sorted({v for x in links for v in x['readIds']}),inputLinks=links)
-    final_sources=[s.model_copy(update={'provenance':{**s.provenance,'modelSourceIndex':i,'finalSourceIndex':mapping[i],'citationScopeCheck':'actual-input-binding-only'}}).model_dump(mode='json') for i,s in enumerate(sources,1) if i in indices]
+        imageIds=[x['imageId'] for x in links if x.get('imageId')],readIds=sorted({v for x in links for v in x['readIds']}),inputLinks=links,
+        presentationTransforms=display_edits,presentationProof=proof)
+    final_sources=[sources[i-1].model_copy(update={'provenance':{**sources[i-1].provenance,'modelSourceIndex':input_to_model[i],'finalSourceIndex':mapping[i],'citationScopeCheck':'actual-input-binding-only'}}).model_dump(mode='json') for i in indices]
     presentation=dict(version=VERSION,answer=final,claims=[claim],sources=final_sources,generationStatus='source_interpretation_unverified',modelInterpretationVerified=False,
-        notice='引用已关联实际读取和入模的文字或图片；模型解释的事实语义尚未认证。',verificationScope='Native receipts, exact actual contexts/images, declared citations and final offsets only; no semantic correctness or independent corroboration claim.')
+        notice='引用已关联实际读取和入模的文字或图片；模型解释的事实语义尚未认证。',verificationScope='Native receipts, exact actual contexts/images, declared citations and final offsets only; no semantic correctness or independent corroboration claim.',
+        presentationTransforms=display_edits,presentationProof=proof)
+    return presentation
+
+
+def verify_presentation(question,answer,result,sources,image_parts,trace,presentation):
+    """Revalidate native inputs and reject any unregistered final-output change."""
+    expected=_compose(question,answer,result,sources,image_parts,trace)
+    supplied=dict(presentation);previous=supplied.pop('finalClaimCheck',None)
+    require(same(supplied,expected),'CLAIM_PROSE_FINAL_PRESENTATION_CHANGED')
+    final=expected['answer'];claims=expected['claims'];require(len(claims)==1,'CLAIM_PROSE_FINAL_CLAIM_COUNT_CHANGED')
+    claim=claims[0]
+    require(claim['offsetUnit']=='unicode-code-points' and claim['answerStart']==len(HEADER) and claim['answerEnd']==len(final)
+        and final[claim['answerStart']:claim['answerEnd']]==claim['text'],'CLAIM_PROSE_FINAL_CLAIM_SPAN_CHANGED')
+    check=dict(version=FINAL_DISPLAY_VERSION,status='VERIFIED_NATIVE_INPUTS_REGISTERED_DISPLAY_AND_EXACT_SPANS',
+        answerSha256=hashlib.sha256(final.encode()).hexdigest(),claimsSha256=hashlib.sha256(canonical(claims).encode()).hexdigest(),
+        presentationTransformsSha256=hashlib.sha256(canonical(expected['presentationTransforms']).encode()).hexdigest(),
+        sourceIndexMap=expected['presentationProof']['modelToFinalSourceIndices'],modelInterpretationVerified=False,
+        verificationScope='Actual native inputs and receipts, unchanged model response, registered display, citations and Unicode spans; no semantic certification.')
+    require(previous is None or same(previous,check),'CLAIM_PROSE_FINAL_CHECK_RECEIPT_CHANGED')
+    return check
+
+
+def finish(question,answer,result,sources,image_parts,trace):
+    """Bind prose to the native inputs and verify the exact displayed claims."""
+    presentation=_compose(question,answer,result,sources,image_parts,trace)
+    presentation['finalClaimCheck']=verify_presentation(question,answer,result,sources,image_parts,trace,presentation)
+    trace.event('proseFinalPresentationCheck',presentation['finalClaimCheck'])
     trace.event('prosePresentation',presentation);return presentation
 
 def finish_excerpts(question,answer,result,sources,claims,trace):
