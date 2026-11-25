@@ -549,6 +549,7 @@ class QaService:
         index_version_id=None,
         texts: Optional[List[str]] = None,
         context: Optional[str] = None,
+        prior_questions: Optional[List[str]] = None,
         images: Optional[List[Tuple[str, bytes]]] = None,
         use_search_service: bool = True,
         retrieval_mode: str = "auto",
@@ -567,7 +568,7 @@ class QaService:
         from services.curated_qa import answer_curated
         return answer_curated(self, question=question, input_mode=input_mode, task_type=task_type,
             dataset_id=dataset_id, version_id=version_id, index_version_id=index_version_id,
-            texts=texts, context=context, images=images, use_search_service=use_search_service,
+            texts=texts, context=context, prior_questions=prior_questions, images=images, use_search_service=use_search_service,
             retrieval_mode=retrieval_mode, retrieval_type=retrieval_type, query_plan=query_plan,
             top_k=top_k, max_tokens=max_tokens, temperature=temperature)
 

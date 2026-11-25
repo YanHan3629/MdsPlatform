@@ -7,8 +7,14 @@
   <link rel="stylesheet" href="./styles.css?v=f04-r59" />
   <link rel="stylesheet" href="./qa.css" />
   <link rel="stylesheet" href="./controlled-views.css?v=f04-r76" />
+  <link rel="stylesheet" href="./sign-in.css?v=1" />
 </head>
 <body>
+  <noscript><main class="sign-in"><section class="card sign-in-card">请启用 JavaScript 后登录数据空间。</section></main></noscript>
+  <main id="sessionWaiting" class="sign-in" hidden>
+    <section class="card sign-in-card"><p id="sessionWaitingText" role="status"></p></section>
+  </main>
+  <div id="businessShell" hidden inert>
   <div class="shell">
     <aside class="sidebar">
       <div class="brand">
@@ -28,7 +34,7 @@
         <a href="#identity" id="identityAccountNav">账号与权限</a>
         <a href="#identityManagement" id="identityManageNav" hidden>账号与类型管理</a>
       </nav>
-      <section class="business-panel">
+      <section class="business-panel" id="businessTools">
         <div class="business-title">业务链路</div>
         <div class="tree-root">
           <span class="caret">▾</span><span class="folder">📁</span>
@@ -36,9 +42,7 @@
         </div>
         <div id="businessTree" class="business-tree"></div>
       </section>
-      <div class="api-box">
-        <label>后端 API</label>
-        <input id="apiBase" value="/api/data-space" />
+      <div class="api-box" id="businessSync">
         <button id="reloadBtn" class="btn block">同步数据</button>
       </div>
     </aside>
@@ -50,12 +54,56 @@
           <h1>产业链数据空间平台</h1>
         </div>
         <div class="top-actions">
-          <span id="health" class="badge muted">连接中</span>
-          <button id="demoDispatchBtn" class="btn primary">刷新业务与任务状态</button>
+          <span id="businessSessionSummary"></span>
+          <a href="#identity" class="btn link">我的账号</a>
+          <button id="businessLogout" class="btn" type="button">退出所有会话</button>
+
         </div>
       </header>
 
-      <section id="dashboard" class="page show">
+      <p id="noBusinessPermission" class="card" hidden>暂无业务权限。可在“我的账号”查看当前账号和权限。</p>
+      <section id="multimodalShared" hidden>
+        <div class="card">
+          <div class="card-head"><h2>数据版本与模型状态</h2><span id="qaHealth" class="badge muted">检查模型状态</span></div>
+          <button id="qaRefresh" class="btn link" type="button">刷新数据集与模型状态</button>
+        </div>
+        <details id="controlledViewExports" class="card mini-gap" hidden>
+          <summary>授权视图导出</summary>
+          <p>导出当前获准的独立视图，保留其行列和文件范围，并附范围与文件校验清单。</p>
+          <form method="post" onsubmit="return false" id="viewExportForm" class="view-export-controls">
+            <label>选择授权视图<select id="viewExportSelect" required><option value="">选择当前获准的视图</option></select></label>
+            <button id="viewExportDownload" class="btn primary" type="submit">下载授权视图</button>
+            <button id="viewExportRefresh" class="btn" type="button">刷新可导出范围</button>
+          </form>
+          <p id="viewExportNotice" role="status"></p>
+        </details>
+        <details class="card mini-gap"><summary>上传、发布与索引任务</summary>
+          <div class="card-head"><div><p class="eyebrow">真实数据版本</p><h2>上传与自动索引</h2></div></div>
+          <p>工作台、检索和问答共用此上传入口。可选择已有数据集。创建新数据集时，先填写名称并点击“创建数据集”，权限核对完成后再选择文件和草稿版本。README 和数据集说明文件会排除。已发布版本保持不可变。</p>
+          <form method="post" onsubmit="return false" id="qaIngestForm" class="form-grid">
+            <label>空间<select id="qaIngestSpace"><option value="">登录后加载</option></select></label>
+            <label>新建空间名称<input id="qaNewSpace" maxlength="128" placeholder="留空则使用所选空间" /></label>
+            <label>数据集<select id="qaIngestDataset"><option value="">先选择空间</option></select></label>
+            <label>新建数据集名称<input id="qaNewDataset" maxlength="128" placeholder="留空则使用所选数据集" /></label>
+            <label>版本<select id="qaIngestVersion"><option value="">先选择数据集</option></select></label>
+            <label>新建版本名称<input id="qaNewVersion" maxlength="64" placeholder="留空则使用所选版本" /></label>
+            <label class="full">上传文件<input id="qaIngestFiles" type="file" multiple /></label>
+            <label class="full">或选择文件夹（保留相对路径）<input id="qaIngestFolder" type="file" webkitdirectory multiple /></label>
+            <label>来源时区<input id="qaSourceTimezone" placeholder="例如 Asia/Shanghai；未知请留空" /></label>
+            <label>时间字段<input id="qaSourceTimeColumn" placeholder="例如 timestamp" /></label>
+            <label>实体分组字段<input id="qaSourceEntities" placeholder="例如 device_id,sensor_id" /></label>
+            <label>单位映射（JSON）<input id="qaSourceUnits" placeholder='例如 {"temperature":"C","length":"mm"}' /></label>
+            <label class="full">按文件覆盖映射（JSON，可选）<textarea id="qaAssetMappings" placeholder='例如 {"/measurements.csv":{"timezone":"Asia/Shanghai","timeColumn":"timestamp"}}'></textarea></label>
+            <button id="qaSaveMapping" type="button" class="btn">保存映射（下次构建生效）</button>
+            <div class="full filters"><button id="qaIngestSubmit" class="btn primary" type="submit">上传并发布，自动建立索引</button><button id="qaBackfill" class="btn" type="button">对已发布版本回填</button></div>
+          </form>
+          <p id="qaIngestProgress" role="status">登录后可操作真实数据版本。</p><div id="qaIndexing" class="compact-list"></div>
+        </details>
+      </section>
+
+      <section id="dashboard" class="page">
+        <div class="filters mini-gap"><span id="health" class="badge muted">连接中</span>
+          <button id="demoDispatchBtn" class="btn primary" type="button">刷新业务与任务状态</button></div>
         <div id="kpis" class="kpi-grid"></div>
         <div class="grid two">
           <section class="card">
@@ -202,50 +250,7 @@
         </section>
       </section>
 
-      <section id="multimodalShared" hidden>
-        <div class="card">
-          <div class="card-head"><div><p class="eyebrow">数据空间 · Qwen3.5</p><h2>数据空间账号与版本管理</h2></div><span id="qaHealth" class="badge muted">检查模型状态</span></div>
-          <p>多模态检索与问答共享账号、组织和数据版本。检索条件与问答资料分别保存。</p>
-          <form method="post" onsubmit="return false" id="qaLogin" class="filters">
-            <input name="userName" aria-label="数据空间账号" placeholder="数据空间账号" autocomplete="username" required />
-            <input name="password" aria-label="密码" type="password" placeholder="密码" autocomplete="current-password" required />
-            <button class="btn" type="submit">登录数据空间</button>
-          </form>
-          <div class="filters mini-gap"><span id="qaAccount">尚未登录</span><button id="qaLogout" class="btn link" type="button" hidden>退出所有会话</button><button id="qaRefresh" class="btn link" type="button">刷新数据集与模型状态</button></div>
-        </div>
-        <details id="controlledViewExports" class="card mini-gap" hidden>
-          <summary>授权视图导出</summary>
-          <p>导出当前获准的独立视图，保留其行列和文件范围，并附范围与文件校验清单。</p>
-          <form method="post" onsubmit="return false" id="viewExportForm" class="view-export-controls">
-            <label>选择授权视图<select id="viewExportSelect" required><option value="">选择当前获准的视图</option></select></label>
-            <button id="viewExportDownload" class="btn primary" type="submit">下载授权视图</button>
-            <button id="viewExportRefresh" class="btn" type="button">刷新可导出范围</button>
-          </form>
-          <p id="viewExportNotice" role="status"></p>
-        </details>
-        <details class="card mini-gap"><summary>上传、发布与索引任务</summary>
-          <div class="card-head"><div><p class="eyebrow">真实数据版本</p><h2>上传与自动索引</h2></div></div>
-          <p>工作台、检索和问答共用此上传入口。可选择已有数据集。创建新数据集时，先填写名称并点击“创建数据集”，权限核对完成后再选择文件和草稿版本。README 和数据集说明文件会排除。已发布版本保持不可变。</p>
-          <form method="post" onsubmit="return false" id="qaIngestForm" class="form-grid">
-            <label>空间<select id="qaIngestSpace"><option value="">登录后加载</option></select></label>
-            <label>新建空间名称<input id="qaNewSpace" maxlength="128" placeholder="留空则使用所选空间" /></label>
-            <label>数据集<select id="qaIngestDataset"><option value="">先选择空间</option></select></label>
-            <label>新建数据集名称<input id="qaNewDataset" maxlength="128" placeholder="留空则使用所选数据集" /></label>
-            <label>版本<select id="qaIngestVersion"><option value="">先选择数据集</option></select></label>
-            <label>新建版本名称<input id="qaNewVersion" maxlength="64" placeholder="留空则使用所选版本" /></label>
-            <label class="full">上传文件<input id="qaIngestFiles" type="file" multiple /></label>
-            <label class="full">或选择文件夹（保留相对路径）<input id="qaIngestFolder" type="file" webkitdirectory multiple /></label>
-            <label>来源时区<input id="qaSourceTimezone" placeholder="例如 Asia/Shanghai；未知请留空" /></label>
-            <label>时间字段<input id="qaSourceTimeColumn" placeholder="例如 timestamp" /></label>
-            <label>实体分组字段<input id="qaSourceEntities" placeholder="例如 device_id,sensor_id" /></label>
-            <label>单位映射（JSON）<input id="qaSourceUnits" placeholder='例如 {"temperature":"C","length":"mm"}' /></label>
-            <label class="full">按文件覆盖映射（JSON，可选）<textarea id="qaAssetMappings" placeholder='例如 {"/measurements.csv":{"timezone":"Asia/Shanghai","timeColumn":"timestamp"}}'></textarea></label>
-            <button id="qaSaveMapping" type="button" class="btn">保存映射（下次构建生效）</button>
-            <div class="full filters"><button id="qaIngestSubmit" class="btn primary" type="submit">上传并发布，自动建立索引</button><button id="qaBackfill" class="btn" type="button">对已发布版本回填</button></div>
-          </form>
-          <p id="qaIngestProgress" role="status">登录后可操作真实数据版本。</p><div id="qaIndexing" class="compact-list"></div>
-        </details>
-      </section>
+
 
       <section id="retrieval" class="page">
         <div class="grid two">
@@ -281,15 +286,20 @@
               <label>输入模式<select name="inputMode" id="qaInputMode"><option value="hybrid">用户资料 + 数据空间</option><option value="question_only">仅问题 + 数据空间</option><option value="user_data_only">仅使用用户资料</option></select></label>
               <label>任务<select name="taskType"><option value="general_qa">通用问答</option><option value="chain_risk_analysis">产业链风险分析</option><option value="demand_evaluation">需求评判</option><option value="data_summary">数据摘要</option></select></label>
               <label class="full checkbox"><input id="qaUseSearch" type="checkbox" checked />从所选数据空间自动寻找依据</label>
-              <label class="full">问题<textarea name="question" maxlength="8000" placeholder="例如：这些质检记录反映了哪些问题？请注明来源。" required></textarea></label>
+              <label>问答档位<select name="profile" id="qaProfile"><option value="standard">常规业务</option></select></label>
+              <label>回答 token 上限<input name="maxTokens" id="qaMaxTokens" type="number" min="1" step="1" /></label>
+              <p id="qaBudgetHelp" class="full" role="status">正在读取问答档位。</p>
+              <label class="full">问题<textarea name="question" placeholder="例如：这些质检记录反映了哪些问题？请注明来源。" required></textarea></label>
               <label class="full">补充资料<textarea name="context" id="qaContext" placeholder="可粘贴文字依据；超出当前模型上下文时会明确提示缩短"></textarea></label>
-              <label class="full">图片（最多 2 张，每张不超过 10 MB）<input name="images" id="qaImages" type="file" accept="image/jpeg,image/png,image/webp" multiple /></label>
+              <label class="full">图片附件<input name="images" id="qaImages" type="file" accept="image/jpeg,image/png,image/webp" multiple /></label>
+              <label class="full"><input id="qaFollowUp" type="checkbox" disabled />接着问，沿用当前范围的前序问题</label>
               <div class="full"><button id="qaClearImages" type="button" class="btn link">清除图片附件</button></div>
               <button id="qaSubmit" class="btn primary" type="submit">提交问题</button>
             </form>
           </div>
           <div class="card" aria-live="polite">
-            <h2>回答与依据</h2><p id="qaProgress">等待提问</p>
+            <h2>回答与依据</h2><p id="qaProgress" role="status">等待提问</p>
+            <button id="qaCancel" class="btn" type="button" hidden>取消问答</button>
             <p id="qaNotice" class="qa-notice" hidden></p>
             <div id="qaAnswer" class="qa-answer"></div>
             <p id="qaMeta"></p><div id="qaSources" class="compact-list"></div>
@@ -456,18 +466,6 @@
   </div>
 
 
-  <dialog id="identityActivationDialog" class="identity-dialog">
-    <form method="post" onsubmit="return false" id="identityActivationForm" class="form-grid">
-      <h2 class="full">激活账号并设置新密码</h2>
-      <p class="full" id="identityActivationUser"></p>
-      <label class="full">新密码<input name="newPassword" type="password" minlength="8" autocomplete="new-password" required /></label>
-      <label class="full">再次输入新密码<input name="confirmPassword" type="password" minlength="8" autocomplete="new-password" required /></label>
-      <p class="full">至少 8 位且包含任意两类字符。可用符号：-_@*#$%&。完成后请用新密码重新登录。</p>
-      <button class="btn primary" type="submit">设置新密码并激活</button><button id="identityCancelActivation" class="btn" type="button">取消激活</button>
-    </form>
-  </dialog>
-
-
   <dialog id="enterpriseMappingDialog" class="enterprise-mapping-dialog">
     <div class="card-head"><div><p class="eyebrow">Enterprise identity</p><h2>企业与身份映射</h2></div><button id="enterpriseMappingClose" class="btn" type="button">关闭</button></div>
     <p>业务实体与登录组织分别管理。确认映射不会转移数据、合同或授权，也不代表法人认证。</p>
@@ -620,14 +618,16 @@
   </dialog>
 
   <div id="toast" class="toast"></div>
-  <script src="./identity-session.js?v=f04-r378"></script>
-  <script src="./app.js?v=f04-r395"></script>
-  <script src="./qa.js?v=f04-r109"></script>
-  <script src="./retrieval.js?v=f04-r109"></script>
-  <script src="./view-exports.js?v=f04-r22"></script>
-  <script src="./identity.js?v=f04-r391"></script>
-  <script src="./enterprise-mapping.js?v=f04-r53"></script>
-  <script src="./resource-grants.js?v=f04-r59"></script>
-  <script src="./controlled-views.js?v=f04-r94"></script>
+  </div>
+  <script src="./identity-session.js?v=f05-r2"></script>
+  <script src="./sign-in.js?v=2"></script>
+  <script src="./app.js?v=f05-r2"></script>
+  <script src="./qa.js?v=f05-r3"></script>
+  <script src="./retrieval.js?v=f05-r2"></script>
+  <script src="./view-exports.js?v=f05-r2"></script>
+  <script src="./identity.js?v=f05-r2"></script>
+  <script src="./enterprise-mapping.js?v=f05-r2"></script>
+  <script src="./resource-grants.js?v=f05-r2"></script>
+  <script src="./controlled-views.js?v=f05-r2"></script>
 </body>
 </html>

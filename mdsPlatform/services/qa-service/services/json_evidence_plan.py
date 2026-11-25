@@ -28,6 +28,14 @@ FIELD_WORDS={
     'quantity':r'数量|多少|用量',
     'unit':r'计量单位|单位',
     'action':r'动作|处理措施|采取|处理方式',
+    'width_mm':r'内外机.{0,6}尺寸|(?:室内机|内机).{0,6}(?:尺寸|宽度)',
+    'depth_mm':r'内外机.{0,6}尺寸|(?:室内机|内机).{0,6}(?:尺寸|深度)',
+    'height_mm':r'内外机.{0,6}尺寸|(?:室内机|内机).{0,6}(?:尺寸|高度)',
+    'outdoor_width_mm':r'内外机.{0,6}尺寸|(?:室外机|外机).{0,6}(?:尺寸|宽度)',
+    'outdoor_depth_mm':r'内外机.{0,6}尺寸|(?:室外机|外机).{0,6}(?:尺寸|深度)',
+    'outdoor_height_mm':r'内外机.{0,6}尺寸|(?:室外机|外机).{0,6}(?:尺寸|高度)',
+    'rated_voltage_v':r'供电|额定电压',
+    'rated_frequency_hz':r'供电|额定频率',
     'measurement_units':r'测量单位|指标.{0,6}单位',
     'loading_or_access_type':r'投放方向|投入口|开门方式|顶部开盖',
 }
@@ -265,11 +273,17 @@ class Reader:
         return sorted(documents.items())
 
 
-def direct_json_question(client,scope,question,filters,intent):
+def direct_json_question(client,scope,question,filters,intent,*,compared_document=None):
     asset=named_asset(question,filters,intent)
     if asset is None:return None
     filenames=re.findall(r'[\w.-]+\.(?:jsonl?|csv|xlsx|txt|pdf|png|jpe?g|svg|obj|step|stp)\b',question,re.I)
-    if any(name!=asset['logicalPath'].rsplit('/',1)[-1] for name in filenames):return None
+    allowed_files = {asset['logicalPath'].rsplit('/', 1)[-1]}
+    selection_question = question
+    if compared_document:
+        allowed_files.add(compared_document['logicalPath'].rsplit('/', 1)[-1])
+        selection_question = _question_without_file(selection_question, compared_document)
+    if any(name not in allowed_files for name in filenames):
+        return None
     # Exact aggregates have their own complete-range executor. Do not turn
     # versions, negated requirements or quantitative predicates into a lookup.
     if re.search(r'上一版|历史版本|之前版本',question):return None
@@ -290,8 +304,8 @@ def direct_json_question(client,scope,question,filters,intent):
                 label=field.get(key,'')
                 if label and '来源为本文件实际字段' not in label:labels[field['name']].append(label)
     if asset['originalFormat']=='JSONL':
-        planned=plan_line_targets(_question_without_file(question,asset),reader.discover_documents(line),labels)
-    else:planned=plan_targets(_question_without_file(question,asset),reader.discover(),labels)
+        planned=plan_line_targets(_question_without_file(selection_question,asset),reader.discover_documents(line),labels)
+    else:planned=plan_targets(_question_without_file(selection_question,asset),reader.discover(),labels)
     plan={'version':READ_VERSION,'assetId':asset['assetId'],'logicalPath':asset['logicalPath'],
         'targets':planned['targets'],'unresolvedIdentifiers':planned['unresolvedIdentifiers'],'selectionReason':planned['reason'],
         'requiredEvidenceIds':[],'discoveryOnlyReadIds':[row['readId'] for row in reader.reads]}

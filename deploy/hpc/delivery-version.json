@@ -1,0 +1,50 @@
+{
+  "candidate": "3733654",
+  "selectedAt": "2026-11-26",
+  "status": "verified_ready_stopped",
+  "ownedActiveJobs": [],
+  "selection": "User requested delivery of the last independently reviewed five-of-five candidate",
+  "workspaceRoot": "/share/home/u08162/apps/mds-manual-20261119",
+  "sourceBindingSha256": "1c1a955c834a3bd58479b34c2a5ea57a3ea02a29c7d798a239766888fe64ce76",
+  "deliveryBindingSha256": "993f88fe2548959d09bc360d4f6c7027f971f8292de8f979941af172e368f93a",
+  "model": "Qwen/Qwen3.8-27B-FP8",
+  "sourceCandidateImmutable": true,
+  "existingManualDataAndAccountsPreserved": true,
+  "oldFormalInstanceMigrated": false,
+  "full80AcceptanceClaimed": false,
+  "liveVerificationJob": "3770069",
+  "verifiedRuntimeSourceFiles": 159,
+  "localFilesRolledBack": 6,
+  "questionRepetitions": 3,
+  "liveQuestionRequests": 30,
+  "actualModelCalls": 36,
+  "recommendedQuestionCount": 42,
+  "questionAuditSha256": "2a0cfe1e0c9f1ddbfd1a6e969975bbaf7f729a602476a2e2d3884d581dd630bb",
+  "questionReviewSha256": "40af3e0dc841983ab15df0137d15cbe75a9d32720d69f84790a2b05ad7a748f3",
+  "applicationBackup": "/share/home/u08162/apps/mds-manual-20261119/apps/mds-platform-before-delivery-20261126",
+  "questionExpansion": {
+    "job": "3770517",
+    "candidateQuestions": 38,
+    "newRecommendedQuestions": 34,
+    "requests": 116,
+    "modelCalls": 111,
+    "auditSha256": "8db5ec64c9e9c1e2f0c16be05a038278758ef82f050e2a0095e78d046143f85e",
+    "stages": {
+      "供应采购": 4,
+      "设计规格与关键BOM": 6,
+      "生产与制造装配": 3,
+      "质量检验与放行": 5,
+      "仓储与配套包装": 8,
+      "运输与交接": 4,
+      "订单与客户履约": 6,
+      "售后与运维": 6
+    },
+    "maxConcurrency": 1,
+    "excludedQuestionIds": [
+      "E-P01",
+      "E-P02",
+      "E-P03",
+      "E-P04"
+    ]
+  }
+}

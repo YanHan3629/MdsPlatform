@@ -2,10 +2,13 @@
 import base64,copy,hashlib,json,re,uuid
 from io import BytesIO
 from PIL import Image
+from core.request_budget import CAPABILITIES, max_image_pixels
 from schemas.qa_resp import SourceItem
 
 VERSION='user-input-receipt-2026-10-27.1'
 IMAGE_CONTEXT='用户所附图片，文件名不构成图片内容依据。'
+IMAGE_LABEL_SELECTION='image-label-letter-1'
+IMAGE_QUANTITY_SYNTAX_VERSION='image-quantity-syntax-1'
 CITATION=re.compile(r'\[来源\s*(\d+)\]')
 def digest(value):return hashlib.sha256(json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
 def sha(raw):return hashlib.sha256(raw).hexdigest()
@@ -16,23 +19,23 @@ def has_user(sources):return any(is_user(s) for s in sources)
 def prose_eligible(sources):return bool(sources) and has_user(sources) and all(is_user(s) or bool(s.evidence_bundle) for s in sources)
 
 def image_original(name,raw):
-    require(len(raw)<=10*1024*1024,'USER_IMAGE_BYTE_LIMIT: 每张用户图片不得超过10 MB。')
+    require(len(raw)<=CAPABILITIES["maxImageBytes"],'USER_IMAGE_BYTE_LIMIT: 每张用户图片不得超过10 MB。')
     try:
         with Image.open(BytesIO(raw)) as image:
-            require(0<image.width*image.height<=32_000_000,'USER_IMAGE_PIXEL_LIMIT: 用户原图超过3200万像素，请缩小图片后再提交。')
+            require(0<image.width*image.height<=CAPABILITIES["maxDecodedImagePixels"],'USER_IMAGE_PIXEL_LIMIT: 用户原图超过允许的像素数，请缩小图片后再提交。')
             require(getattr(image,'n_frames',1)==1,'USER_IMAGE_MULTIFRAME_UNSUPPORTED: 当前仅支持单帧图片，请将动图或多帧图像导出为单张图片。')
             image.load()
             return dict(filename=str(name)[:512],sourceSha256=sha(raw),bytes=len(raw),width=image.width,height=image.height,
                 originalFormat='JPG' if image.format=='JPEG' else str(image.format).upper(),exifOrientation=image.getexif().get(274,1))
     except Image.DecompressionBombError:
-        raise ValueError('USER_IMAGE_PIXEL_LIMIT: 用户原图超过3200万像素，请缩小图片后再提交。') from None
+        raise ValueError('USER_IMAGE_PIXEL_LIMIT: 用户原图超过允许的像素数，请缩小图片后再提交。') from None
     except ValueError as error:
         if str(error).startswith('USER_IMAGE_'):raise
         raise ValueError('USER_IMAGE_UNREADABLE: 当前附件无法解码为完整图片，请提供有效的单帧图片。') from None
     except (OSError,EOFError,SyntaxError):
         raise ValueError('USER_IMAGE_UNREADABLE: 当前附件无法解码为完整图片，请提供有效的单帧图片。') from None
 
-def _register(kind,input_id,context,original,locator,question,trace,part=None):
+def _register(kind,input_id,context,original,locator,question,trace,part=None,labels=None,*,quantity_syntax=None):
     require(trace is not None,'USER_INPUT_AUDIT_REQUIRED')
     evidence=str(uuid.uuid5(uuid.NAMESPACE_URL,trace.id+':'+input_id+':'+original['sourceSha256']))
     representation=str(uuid.uuid5(uuid.NAMESPACE_URL,evidence+':'+sha(context.encode())+(':'+part['sha256'] if part else '')))
@@ -40,12 +43,20 @@ def _register(kind,input_id,context,original,locator,question,trace,part=None):
     receipt=dict(version=VERSION,receiptId=str(uuid.uuid5(uuid.NAMESPACE_URL,evidence+':receipt')),identity=identity,
         evidenceId=evidence,representationId=representation,original=original,locator=locator,
         questionSha256=sha(question.encode()),contextTextSha256=sha(context.encode()))
+    if quantity_syntax is not None:
+        require(kind == 'user_image' and part is not None and quantity_syntax == IMAGE_QUANTITY_SYNTAX_VERSION,
+                'USER_IMAGE_QUANTITY_SYNTAX_UNSUPPORTED')
+        receipt['imageQuantitySyntaxRecipe'] = quantity_syntax
     if part:
-        transform=dict(version='pillow-rgb-area-1048576-1',sourceWidth=original['width'],sourceHeight=original['height'],
+        transform=dict(version='pillow-rgb-profile-area-1',maxPixels=max_image_pixels(),sourceWidth=original['width'],sourceHeight=original['height'],
             outputWidth=part['width'],outputHeight=part['height'],sourceToPromptScale=[part['width']/original['width'],part['height']/original['height']],
             outputOrientation='raw-source-pixels',sourceExifOrientation=original['exifOrientation'])
         receipt['image']=dict(imageId=part['imageId'],promptImageSha256=part['sha256'],width=part['width'],height=part['height'],preprocessing=transform)
         part.update(userInputReceiptId=receipt['receiptId'],sourceImageSha256=original['sourceSha256'],preprocessing=transform)
+        if labels:
+            require(labels['imageSha256']==part['sha256'],'USER_IMAGE_LABEL_INPUT_CHANGED')
+            receipt['imageLabels']=labels
+            receipt['imageLabelSelection']=IMAGE_LABEL_SELECTION
     trace.event('userInputReceipt',receipt)
     return SourceItem(source_id=input_id,source_type=kind,evidence_id=evidence,representation_id=representation,
         original_format=original['originalFormat'],locator=locator,model_context=context,
@@ -56,9 +67,105 @@ def _register(kind,input_id,context,original,locator,question,trace,part=None):
 def text_source(input_id,text,question,trace):
     return _register('user_text',input_id,text,dict(sourceSha256=sha(text.encode()),bytes=len(text.encode()),originalFormat='TXT'),
         dict(inputId=input_id,characterStart=0,characterEnd=len(text),characterIndexUnit='unicode-codepoint'),question,trace)
-def image_source(input_id,original,part,question,trace):
-    return _register('user_image',input_id,IMAGE_CONTEXT,original,
-        dict(inputId=input_id,filename=original['filename'],bbox=[0,0,original['width'],original['height']],coordinateSystem='user-source-image-pixels-top-left'),question,trace,part)
+
+
+def image_prompt_caption(source_index):
+    return f'附件图片 [来源{source_index}] 对应紧随其后的图像。'
+
+
+def _verify_image_reference(call, evidence, image_sha256):
+    # Older traces retain the actual frame order without a source-frame receipt.
+    position = call['actualEvidence'].index(evidence) + 1
+    proof = evidence.get('sourceFrameProof')
+    require(proof is None or proof.get('position') == position, 'USER_IMAGE_SOURCE_INDEX_CHANGED')
+    # Earlier requests used only the citation marker above the image.
+    captions = {sha(text.encode()) for text in (image_prompt_caption(position), f'[来源{position}]')}
+    matches = [
+        (caption['textSha256'], image.get('imageSha256'))
+        for message in call['request']['messages'] if message['role'] == 'user'
+        for caption, image in zip(message['content'], message['content'][1:])
+        if caption['type'] == 'text' and caption.get('textSha256') in captions and image['type'] == 'image_url'
+    ]
+    require(len(matches) == 1 and matches[0][1] == image_sha256, 'USER_IMAGE_REFERENCE_MISMATCH')
+    return matches[0][0]
+
+
+DRAWING_LENGTH_LABEL = re.compile(
+    r'(?:^|_)(?:d|t|h|w|l|od|id|diameter|radius|height|width|length|thickness|depth)$'
+    r'|^(?:孔径|直径|半径|厚度|高度|宽度|长度|深度)$', re.I)
+
+
+def _declared_length_unit(item, labels):
+    if (labels.get('drawingUnitRecipe') != 'drawing-unit-double-ocr-1' or item['unitText']
+            or not DRAWING_LENGTH_LABEL.search(item['label'])):
+        return ''
+    declared = {entry['unitText'] for entry in labels.get('drawingUnits', [])}
+    return next(iter(declared)) if len(declared) == 1 else ''
+
+
+def label_statement(item, *, drawing_units=False, declared_length_unit=''):
+    unit = f" {item['unitText']}" if item['unitText'] else ''
+    if drawing_units and not item['unitText'] and re.search(r'(?:^|_)count$',item['label'],re.I) and re.fullmatch(r'[0-9]+',item['valueText']):
+        return f"原图识别到计数字段“{item['label']} {item['valueText']}”，为 {item['valueText']} 个；这是原图声明，非实物复核。"
+    if drawing_units and not item['unitText'] and declared_length_unit:
+        return (f"原图识别到标注“{item['label']} {item['valueText']}”；按同图明确单位声明，"
+                f"该长度标注为 {item['valueText']} {declared_length_unit}；这是图纸声明，非实物测量。")
+    suffix = '。' if item['unitText'] else ('，局部识别未附单位。' if drawing_units else '，该标注的单位待核。')
+    return f"原图识别到标注“{item['label']} {item['valueText']}{unit}”{suffix}"
+
+
+def drawing_unit_statement(item):
+    return f"原图识别到图纸单位声明“{item['unitText']}”，仅表示图纸声明，不是实物测量。"
+
+
+def image_label_statements(source):
+    receipt = source.provenance.get('userInputReceipt', {})
+    labels = receipt.get('imageLabels') if source.source_type == 'user_image' else None
+    if not labels:
+        return []
+    versioned = labels.get('drawingUnitRecipe') == 'drawing-unit-double-ocr-1'
+    return ([label_statement(item,drawing_units=versioned,declared_length_unit=_declared_length_unit(item,labels))
+             for item in labels['observations']]
+            + [drawing_unit_statement(item) for item in labels.get('drawingUnits',[])])
+
+
+def image_declared_quantities(source):
+    labels = source.provenance.get('userInputReceipt',{}).get('imageLabels',{}) if source.source_type == 'user_image' else {}
+    if labels.get('drawingUnitRecipe') != 'drawing-unit-double-ocr-1':
+        return set()
+    quantities = set()
+    for item in labels.get('observations',[]):
+        unit = item['unitText']
+        if not unit and re.search(r'(?:^|_)count$',item['label'],re.I) and re.fullmatch(r'[0-9]+',item['valueText']):
+            unit = '个'
+        elif not unit:
+            unit = _declared_length_unit(item,labels)
+        if unit:
+            from decimal import Decimal
+            quantities.add((Decimal(item['valueText']),unit))
+    return quantities
+
+
+def image_label_selection(sources):
+    return bool(sources) and all(source.source_type == 'user_image' for source in sources) and any(
+        source.provenance.get('userInputReceipt', {}).get('imageLabelSelection') == IMAGE_LABEL_SELECTION
+        for source in sources
+    )
+
+
+def image_source(input_id,original,part,question,trace,labels=None):
+    context = IMAGE_CONTEXT
+    if labels:
+        versioned = labels.get('drawingUnitRecipe') == 'drawing-unit-double-ocr-1'
+        statements = [(label_statement(item,drawing_units=versioned,declared_length_unit=_declared_length_unit(item,labels)),item['bbox'])
+                      for item in labels['observations']]
+        statements += [(drawing_unit_statement(item),item['bbox']) for item in labels.get('drawingUnits',[])]
+        observations = [{'labelId':chr(ord('A') + index),'statement':text,'bbox':box}
+                        for index,(text,box) in enumerate(statements)]
+        context += ' 下列文字是同一入模图像上的局部识别标注及像素位置：' + json.dumps(observations,ensure_ascii=False)
+    return _register('user_image',input_id,context,original,
+        dict(inputId=input_id,filename=original['filename'],bbox=[0,0,original['width'],original['height']],coordinateSystem='user-source-image-pixels-top-left'),question,trace,part,labels,
+        quantity_syntax=IMAGE_QUANTITY_SYNTAX_VERSION)
 
 def verify(source,question,trace,call,image_parts=None):
     require(is_user(source),'USER_INPUT_VERSION_REQUIRED')
@@ -81,14 +188,21 @@ def verify(source,question,trace,call,image_parts=None):
     else:
         generation=[e['value'] for e in trace.data['events'] if e['kind']=='generationInputs'];require(len(generation)==1,'USER_IMAGE_INPUTS_AMBIGUOUS')
         images=[i for i in generation[0]['images'] if i['sourceId']==source.source_id];require(len(images)==1,'USER_IMAGE_MAPPING_AMBIGUOUS')
-        image=images[0];expected=receipt['image'];wire=[p['imageSha256'] for m in call['request']['messages'] for p in m['content'] if p['type']=='image_url']
-        require(image['imageId']==expected['imageId'] and image['sha256']==expected['promptImageSha256'] and image['sha256'] in wire
+        image=images[0];expected=receipt['image']
+        require(image['imageId']==expected['imageId'] and image['sha256']==expected['promptImageSha256']
             and image['sourceImageSha256']==identity['sourceSha256'] and image['preprocessing']==expected['preprocessing']
-            and [image['width'],image['height']]==[expected['width'],expected['height']] and 0<image['width']*image['height']<=1048576,'USER_IMAGE_CONTENT_OR_TRANSFORM_CHANGED')
+            and [image['width'],image['height']]==[expected['width'],expected['height']] and 0<image['width']*image['height']<=max_image_pixels(),'USER_IMAGE_CONTENT_OR_TRANSFORM_CHANGED')
         if image_parts is not None:
             payload=[i for i in image_parts if i['sourceId']==source.source_id];require(len(payload)==1,'USER_IMAGE_PAYLOAD_MISSING')
             require(sha(base64.b64decode(payload[0]['url'].split(',',1)[1],validate=True))==image['sha256'],'USER_IMAGE_PAYLOAD_CHANGED')
-        link.update(imageId=image['imageId'],promptImageSha256=image['sha256'],sourceImageSha256=identity['sourceSha256'],preprocessing=image['preprocessing'])
+        caption = _verify_image_reference(call, actual[0], image['sha256'])
+        link.update(imageId=image['imageId'],promptImageSha256=image['sha256'],sourceImageSha256=identity['sourceSha256'],
+            promptImageReferenceSha256=caption,preprocessing=image['preprocessing'])
+        if 'imageLabels' in receipt:
+            labels=receipt['imageLabels']
+            require(labels['imageSha256']==image['sha256'] and [labels['width'],labels['height']]==[image['width'],image['height']],
+                    'USER_IMAGE_LABEL_INPUT_CHANGED')
+            link['attachmentLabelEvidence']=labels
     return link
 
 def verify_context(sources,trace,call):
@@ -101,7 +215,7 @@ def question_matches(source,question,mixed=False):
     if is_user(source):return source.provenance.get('validatedUserQuestion')==question
     keys=['validatedDocumentQuestion','validatedTextQuestion','validatedEngineeringQuestion','validatedRecordQuestion']
     declared=[source.provenance[k] for k in keys if k in source.provenance]
-    return all(q==question for q in declared) if declared else bool(mixed and source.evidence_bundle)
+    return all(q==question for q in declared) if declared else bool(source.evidence_bundle)
 
 def citation_allowed(source,question):
     from services.evidence_policy import format_intent

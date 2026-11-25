@@ -1,6 +1,8 @@
 param(
     [Parameter(Mandatory=$true)][ValidateSet('Start','Status','Connect','Stop')][string]$Action,
     [ValidateSet('GPU','CPU')][string]$Mode = 'GPU',
+    [ValidateSet('L40','A800')][string]$GpuType,
+    [ValidateSet('standard','long')][string]$QaProfile,
     [ValidateRange(1,120)][int]$Minutes = 30,
     [ValidateRange(1,2147483647)][int]$JobId,
     [ValidatePattern('^[A-Za-z0-9.-]+$')][string]$Server = 'logini.tongji.edu.cn',
@@ -17,7 +19,13 @@ if ($WorkspaceRoot) { $command += ' --workspace-root ' + $WorkspaceRoot }
 if ($JobId) { $command += " --job $JobId" }
 if ($Action -eq 'Start') {
     $command += " --minutes $Minutes"
-    if ($Mode -eq 'CPU') { $command += ' --cpu-only' }
+    if ($Mode -eq 'CPU') {
+        if ($GpuType -or $QaProfile) { throw 'GpuType and QaProfile require GPU mode.' }
+        $command += ' --cpu-only'
+    } else {
+        if ($GpuType) { $command += ' --gpu-type ' + $GpuType.ToUpperInvariant() }
+        if ($QaProfile) { $command += ' --qa-profile ' + $QaProfile.ToLowerInvariant() }
+    }
 }
 $result = & ssh @sshOptions "u08162@$Server" $command
 if ($LASTEXITCODE -ne 0) { throw 'HPC session command failed; inspect the message above.' }

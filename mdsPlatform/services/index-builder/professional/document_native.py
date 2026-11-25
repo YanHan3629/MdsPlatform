@@ -40,7 +40,7 @@ def ocr_engine():
         'languages':OCR_LANGUAGES,'languageDataSha256':data,'pageSegmentationMode':3,'threadLimit':1,
         'timeoutSeconds':60,'maxRenderPixels':MAX_RENDER_PIXELS,'confidenceScale':'tesseract-0-to-100-not-calibrated-probability'}
 
-def recognize(image,*,to_source=None):
+def recognize(image,*,to_source=None,timeout_seconds=None):
     engine=ocr_engine()
     if not engine['available']:return {'status':engine['status'],'words':[],'engine':engine}
     if image.width*image.height>MAX_RENDER_PIXELS:raise ValueError('OCR_PIXEL_LIMIT')
@@ -49,7 +49,9 @@ def recognize(image,*,to_source=None):
         root=Path(temporary);image.save(root/'input.png')
         try:
             result=subprocess.run(['tesseract',str(root/'input.png'),str(root/'result'),'-l',OCR_LANGUAGES,'--psm','3','tsv'],
-                stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=60,env={**os.environ,'OMP_THREAD_LIMIT':'1'})
+                stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,
+                timeout=engine['timeoutSeconds'] if timeout_seconds is None else min(timeout_seconds,engine['timeoutSeconds']),
+                env={**os.environ,'OMP_THREAD_LIMIT':'1'})
         except subprocess.TimeoutExpired:return {'status':'OCR_TIMEOUT','words':[],'engine':engine,'elapsedMs':round((time.perf_counter()-started)*1000,3)}
         if result.returncode:return {'status':'OCR_PROCESS_FAILED','words':[],'engine':engine,'exitCode':result.returncode}
         output=root/'result.tsv'

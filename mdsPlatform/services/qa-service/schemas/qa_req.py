@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
+from core.request_budget import CAPABILITIES, PROFILES
+
 
 class HardCondition(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -156,7 +158,10 @@ class QaRequest(BaseModel):
     同时兼容 camelCase 与 snake_case 字段名，业务通道统一为 POST /api/v1/qa。
     """
 
-    question: str = Field(min_length=1, max_length=8000)
+    question: str = Field(min_length=1, max_length=CAPABILITIES["maxUserCharacters"])
+    profile: Literal["standard", "long"] = Field(default="standard", validation_alias=AliasChoices("profile", "qaProfile"))
+    prior_questions: list[str] = Field(default_factory=list, max_length=6,
+        validation_alias=AliasChoices("prior_questions", "priorQuestions"))
     input_mode: str = Field(
         default="hybrid",
         validation_alias=AliasChoices("input_mode", "inputMode"),
@@ -201,6 +206,14 @@ class QaRequest(BaseModel):
         default=8, ge=1, le=50, validation_alias=AliasChoices("top_k", "topK")
     )
     max_tokens: Optional[int] = Field(
-        default=None, ge=1, le=32768, validation_alias=AliasChoices("max_tokens", "maxTokens")
+        default=None, ge=1, le=max(profile["maxOutputTokens"] for profile in PROFILES.values()),
+        validation_alias=AliasChoices("max_tokens", "maxTokens")
     )
     temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+
+    @model_validator(mode="after")
+    def validate_user_input(self):
+        total = len(self.question) + len(self.context or "") + sum(map(len, self.texts or [])) + sum(map(len, self.prior_questions))
+        if total > CAPABILITIES["maxUserCharacters"]:
+            raise ValueError("QA_USER_CHARACTER_LIMIT: 问题和补充文字合计超过字符上限。")
+        return self

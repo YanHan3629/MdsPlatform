@@ -1,0 +1,23 @@
+[hidden] { display: none !important; }
+
+.sign-in {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.sign-in-card {
+  width: min(100%, 440px);
+  padding: clamp(24px, 6vw, 42px);
+}
+
+.sign-in-card h1 { margin: 18px 0 8px; font-size: clamp(23px, 5vw, 30px); }
+.sign-in-description { margin: 0 0 24px; color: var(--muted); }
+.sign-in-card [role=status]:empty, #identityActivationStatus:empty { display: none; }
+.sign-in-card label { display: grid; gap: 6px; font-weight: 700; }
+.sign-in-card form { gap: 16px; }
+.sign-in-card input { width: 100%; }
+.sign-in-card button:disabled { opacity: .6; cursor: wait; }
+#businessSessionSummary { overflow-wrap: anywhere; }
+.top-actions { flex-wrap: wrap; }

@@ -40,8 +40,15 @@ data/
 # External datasets (not part of the platform code)
 dataset/
 
-# Local multimodal QA model weights (too large for regular Git storage)
-mdsPlatform/services/qa-service/Qwen3.5-0.8B/*.safetensors
+# External model artifacts, inference images, and download caches
+*.safetensors
+*.gguf
+*.sif
+/models/
+**/.cache/huggingface/
+**/.cache/modelscope/
+/mdsPlatform/services/qa-service/Qwen3.8-27B-FP8*/
+/mdsPlatform/services/qa-service/Qwen3.5-0.8B/
 
 # Downloaded CPU Chinese text embedding weights; Docker builds fetch a pinned revision.
 mdsPlatform/services/index-builder/bge-small-zh-v1.5/

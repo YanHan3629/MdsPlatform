@@ -11,16 +11,11 @@
   const channel=typeof BroadcastChannel==='function'?new BroadcastChannel(channelName):null;
   const copy=value=>value==null?null:JSON.parse(JSON.stringify(value));
   const interrupted=()=>new DOMException('账号或授权范围已变化','AbortError');
-  const notice=message=>window.dispatchEvent(new CustomEvent('dataspace-notice',{detail:{message}}));
   const generationKey=root=>channelName+'.switch.'+root;
   const latestGeneration=root=>localStorage.getItem(generationKey(root))||'';
-  function configuredRoot() {
-    const raw=document.getElementById('apiBase')?.value||localStorage.getItem('dataSpaceApi')||'/api/data-space';
-    const url=new URL(raw,location.href), path=url.pathname.replace(/\/+$/,'');
-    if(!['http:','https:'].includes(url.protocol)||url.username||url.password||url.search||url.hash||!path.endsWith('/data-space'))
-      throw new Error('后端地址应指向数据空间 API。');
-    return url.origin+path.slice(0,-'/data-space'.length);
-  }
+  const configuredRoot = () => location.origin + '/api';
+  const timedSignal = signal => AbortSignal.any([signal, AbortSignal.timeout(10000)]);
+
   function persist() {
     if(access&&bound)sessionStorage.setItem(storageKey,JSON.stringify({access,refresh,root:bound,generation:sessionGeneration}));
     else sessionStorage.removeItem(storageKey);
@@ -71,43 +66,56 @@
     const old=refresh, controller=abort, root=bound;
     const pending=(async()=>{
       try {
-        const response=await fetch(root+'/auth/refresh',{method:'POST',credentials:'omit',redirect:'error',signal:controller.signal,
+        const response=await fetch(root+'/auth/refresh',{method:'POST',credentials:'omit',redirect:'error',signal:timedSignal(controller.signal),
           headers:{'Content-Type':'application/json'},body:JSON.stringify({refreshToken:old})});
+        if(expected!==revision||old!==refresh||!checkSessionGeneration())throw interrupted();
+        if(response.status===401||response.status===403) {
+          invalidate('session-invalid',{announce:true});
+          return false;
+        }
+        if(!response.ok)throw new Error('服务器暂时无法刷新会话。');
         const value=await response.json();
         if(expected!==revision||old!==refresh||!checkSessionGeneration())throw interrupted();
-        if(!response.ok||typeof value.token!=='string'||typeof value.refreshToken!=='string')return false;
+        if(typeof value.token!=='string'||typeof value.refreshToken!=='string')throw new Error('刷新会话响应无效。');
         access=value.token;refresh=value.refreshToken;persist();return true;
-      } catch(error) {if(error.name==='AbortError')throw error;return false;}
+      } catch(error) {
+        if(expected!==revision)throw interrupted();
+        throw error;
+      }
     })();
     rotating=pending;
     try{return await pending;}finally{if(rotating===pending)rotating=null;}
   }
   async function rawAccess(url,options={},allowRotate=true) {
     if(!checkSessionGeneration())throw interrupted();
-    const expected=revision, headers=new Headers(options.headers||{});
-    headers.set('Authorization','Bearer '+access);
+    const expected=revision, sentAccess=access, headers=new Headers(options.headers||{});
+    headers.set('Authorization','Bearer '+sentAccess);
     const signal=options.signal?AbortSignal.any([options.signal,abort.signal]):abort.signal;
     const response=await fetch(scopedUrl(url),{...options,headers,signal,credentials:'omit',redirect:'error'});
     if(expected!==revision||!checkSessionGeneration())throw interrupted();
-    if(response.status===401&&allowRotate&&await rotate(expected))return rawAccess(url,options,false);
+    if(response.status===401&&allowRotate) {
+      const renewed=sentAccess!==access||await rotate(expected);
+      if(expected!==revision||!checkSessionGeneration())throw interrupted();
+      if(renewed)return rawAccess(url,options,false);
+    }
     return {response,expected};
   }
   async function checkIdentity({force=false}={}) {
     if(!access||!bound){if(force)emit('signed-out');return null;}
     if(!checkSessionGeneration())return null;
-    let configured;
-    try{configured=configuredRoot();}catch{invalidate('backend-invalid',{drop:false});return null;}
-    if(configured!==bound){invalidate('backend-changed');return null;}
+    if(configuredRoot()!==bound){invalidate('backend-changed');return null;}
     if(checking)return checking;
     const expected=revision;
     const pending=(async()=>{
       try {
-        const result=await rawAccess(bound+'/users/me');
-        const value=await result.response.json();
-        if(result.expected!==revision||!checkSessionGeneration())throw interrupted();
-        if(!result.response.ok||!value.userId||!value.orgId||!Array.isArray(value.operations)){
+        const result=await rawAccess(bound+'/users/me',{cache:'no-store',signal:timedSignal(abort.signal)});
+        if(result.response.status===401||result.response.status===403){
           invalidate('session-invalid',{announce:true});return null;
         }
+        if(!result.response.ok)throw new Error('服务器暂时无法验证身份。');
+        const value=await result.response.json();
+        if(result.expected!==revision||!checkSessionGeneration())throw interrupted();
+        if(!value.userId||!value.orgId||!Array.isArray(value.operations))throw new Error('身份验证响应无效。');
         const previous=identity;
         const changed=previous&&(previous.userId!==value.userId||previous.orgId!==value.orgId||
           previous.permissionVersion!==value.permissionVersion||previous.policyVersion!==value.policyVersion);
@@ -169,6 +177,7 @@
   }
   async function revokeCaptured(oldAccess,oldRefresh,root) {
     if(!oldAccess||!root)return true;
+    if(root!==configuredRoot())return false;
     for(let attempt=0;attempt<3;attempt++) {
       try {
         let response=await fetch(root+'/auth/logout',{method:'POST',credentials:'omit',redirect:'error',
@@ -181,21 +190,25 @@
             oldAccess=value.token;oldRefresh=value.refreshToken||'';
             response=await fetch(root+'/auth/logout',{method:'POST',credentials:'omit',redirect:'error',
               headers:{Authorization:'Bearer '+oldAccess},signal:AbortSignal.timeout(5000)});
-          } else if(renewed.status===401)return true;
+          } else if(renewed.status===401||renewed.status===403)return false;
         }
-        if(response.ok||response.status===401)return true;
+        if(response.ok&&(await response.json()).allSessionsRevoked===true)return true;
+        if(response.status===401||response.status===403)return false;
       } catch { /* Retry only the captured prior identity; never substitute the current session. */ }
       if(attempt<2)await new Promise(resolve=>setTimeout(resolve,500*(attempt+1)));
     }
     return false;
   }
+  function endSession() {
+    const hadSession=!!(access&&bound);
+    invalidate('logout');
+    if(hadSession)recordSwitch('logout');
+  }
   async function logout() {
-    if(!checkSessionGeneration())return true;
-    const captured={access,refresh,root:bound};invalidate('logout');
-    if(captured.access&&captured.root)recordSwitch('logout');
-    const revoked=await revokeCaptured(captured.access,captured.refresh,captured.root);
-    if(!revoked)notice('本机已退出；服务器会话撤销未能确认，请恢复连接后再次登录并退出。');
-    return revoked;
+    if(!checkSessionGeneration())return false;
+    const captured={access,refresh,root:bound};
+    endSession();
+    return revokeCaptured(captured.access,captured.refresh,captured.root);
   }
   async function login(credentials) {
     checkSessionGeneration();
@@ -206,8 +219,9 @@
     if(captured.access&&!await revokeCaptured(captured.access,captured.refresh,captured.root))
       throw new Error('旧会话撤销未确认，请恢复连接后重试。');
     if(expected!==revision||startingGeneration!==latestGeneration(root))throw interrupted();
-    const response=await fetch(root+'/auth/login',{method:'POST',credentials:'omit',redirect:'error',signal:controller.signal,
+    const response=await fetch(root+'/auth/login',{method:'POST',credentials:'omit',redirect:'error',signal:timedSignal(controller.signal),
       headers:{'Content-Type':'application/json'},body:JSON.stringify(credentials)});
+    if(response.status>=500)throw new Error(await errorMessage(response,'服务器暂时无法登录，请重试。'));
     const value=await response.json();
     if(expected!==revision||startingGeneration!==latestGeneration(root))throw interrupted();
     if(!response.ok)throw new Error(value.detail||value.message||value.errorType||'登录失败。');
@@ -218,16 +232,16 @@
       return {activationRequired:true};
     }
     if(typeof value.token!=='string'||!value.token)throw new Error('登录响应缺少有效会话。');
-    access=value.token;refresh=value.refreshToken||'';persist();
+    access=value.token;refresh=value.refreshToken||'';recordSwitch('login');
     const verified=await checkIdentity({force:true});
     if(!verified)throw new Error('登录身份未能通过服务端确认，请重新登录。');
     if(expected!==revision||!checkSessionGeneration())throw interrupted();
-    recordSwitch('login');return {activationRequired:false,identity:verified};
+    return {activationRequired:false,identity:verified};
   }
   async function activate(newPassword) {
     if(!activation||!checkSessionGeneration())throw new Error('请先使用待激活账号登录。');
     const pending=activation,expected=revision;
-    const response=await fetch(pending.root+'/auth/activate',{method:'POST',credentials:'omit',redirect:'error',signal:abort.signal,
+    const response=await fetch(pending.root+'/auth/activate',{method:'POST',credentials:'omit',redirect:'error',signal:timedSignal(abort.signal),
       headers:{Authorization:'Bearer '+pending.token,'Content-Type':'application/json'},body:JSON.stringify({newPassword})});
     const value=await response.json();
     if(expected!==revision||activation!==pending||!checkSessionGeneration())throw interrupted();
@@ -264,9 +278,8 @@
     setInterval(()=>{if(document.visibilityState==='visible')void checkIdentity();},5000);
   });
   window.mdsIdentity={
-    fetch:authenticatedFetch,api,file,login,logout,activate,check:checkIdentity,policyChanged,
+    fetch:authenticatedFetch,api,file,login,logout,endSession,activate,check:checkIdentity,policyChanged,
     cancelActivation(){invalidate('activation-cancelled');},
-    configure(){let changed=false;try{changed=!!bound&&configuredRoot()!==bound;}catch{changed=true;}if(changed){const captured={access,refresh,root:bound};invalidate('backend-changed');void revokeCaptured(captured.access,captured.refresh,captured.root);}},
     has(operation){return !!identity?.operations.includes(operation);},
     get authenticated(){return !!identity;},get identity(){return copy(identity);},get revision(){return revision;},
     get activationRequired(){return !!activation;}

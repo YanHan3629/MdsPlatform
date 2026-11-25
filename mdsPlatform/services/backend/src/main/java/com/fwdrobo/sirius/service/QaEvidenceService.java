@@ -3,6 +3,7 @@ package com.fwdrobo.sirius.service;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fwdrobo.sirius.dto.file.FileResp;
 import com.fwdrobo.sirius.mapper.ArtifactFileMapper;
 import org.springframework.http.HttpStatus;
@@ -183,7 +184,16 @@ public class QaEvidenceService {
     public JsonNode read(UUID d,UUID v,UUID i,UUID asset,JsonNode request)throws Exception{
         var bound=bind(d,v,i,asset,false);var manifest=nativeManifest(bound,true);
         long deadline=System.nanoTime()+15_000_000_000L;long[] total={0};int[] count={0};var loaded=json.createArrayNode();
-        var result=new QaNativeEvidenceProjection(json).read(manifest,request,descriptor->{
+        ObjectNode result;
+        String operation=request==null?"":request.path("operation").asText();
+        if(QaStepCylinderRead.OPERATION.equals(operation)||QaStepCylinderRead.REPRESENTATION_OPERATION.equals(operation)){
+            if(!"STEP".equals(bound.format))throw error(HttpStatus.UNPROCESSABLE_ENTITY,"EVIDENCE_STEP_SOURCE_REQUIRED: 该操作需要授权的 STEP 源");
+            var raw=verified(bound.source,MAX_JSON);
+            access.requireVersionRead(d,v,i);
+            result=QaStepCylinderRead.REPRESENTATION_OPERATION.equals(operation)
+                ?QaStepCylinderRead.readRepresentation(json,manifest.path("identity"),request,raw)
+                :QaStepCylinderRead.read(json,manifest.path("identity"),request,raw);
+        }else result=new QaNativeEvidenceProjection(json).read(manifest,request,descriptor->{
             if(++count[0]>32||System.nanoTime()>deadline)throw error(HttpStatus.PAYLOAD_TOO_LARGE,"EVIDENCE_READ_BUDGET: 精读步骤或时间超过本次限制，请缩小范围");
             total[0]+=descriptor.path("sizeBytes").asLong();if(total[0]>32L*1024*1024)throw error(HttpStatus.PAYLOAD_TOO_LARGE,"EVIDENCE_READ_BUDGET: 精读总字节超限，请选择较少行列");
             access.requireVersionRead(d,v,i);var bundle=nativeBundle(bound,manifest,descriptor);

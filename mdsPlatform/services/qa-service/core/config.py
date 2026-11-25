@@ -1,6 +1,11 @@
 import os
 from dataclasses import dataclass
 
+from core.request_budget import ACTIVE_PROFILE, CAPABILITIES, PROFILES
+
+
+profile = PROFILES[ACTIVE_PROFILE]
+
 
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
@@ -31,26 +36,25 @@ class Settings:
     # vLLM OpenAI 兼容服务地址（vllm serve 默认 http://localhost:8000）
     vllm_base_url: str = os.environ.get("VLLM_BASE_URL", "http://localhost:8000")
     # 请求 vLLM 时使用的模型名，需与 `vllm serve --served-model-name` 保持一致
-    model_name: str = os.environ.get("MODEL_NAME", "Qwen/Qwen3.5-0.8B")
+    model_name: str = CAPABILITIES["model"]
     api_key: str = os.environ.get("VLLM_API_KEY", "EMPTY")
 
-    request_timeout_seconds: int = _env_int("REQUEST_TIMEOUT_SECONDS", 300)
+    request_timeout_seconds: int = profile["deadlineSeconds"]
 
-    # 默认采样参数（参考 Qwen3.5 非思考模式 VL 任务推荐值）
-    default_max_tokens: int = _env_int("DEFAULT_MAX_TOKENS", 512)
+    # 默认采样参数。问答和规划明确使用非思考模式。
+    default_max_tokens: int = profile["defaultOutputTokens"]
     default_temperature: float = _env_float("DEFAULT_TEMPERATURE", 0.7)
     default_top_p: float = _env_float("DEFAULT_TOP_P", 0.8)
     default_top_k: int = _env_int("DEFAULT_TOP_K", 20)
     default_presence_penalty: float = _env_float("DEFAULT_PRESENCE_PENALTY", 1.5)
 
     # 单次请求限制
-    # RTX 3050 4GB 的保守默认值：单次最多两张图，每条文本依据最多 500 字符。
-    max_upload_images: int = _env_int("MAX_UPLOAD_IMAGES", 2)
-    max_text_chars: int = _env_int("MAX_TEXT_CHARS", 500)
+    max_upload_images: int = CAPABILITIES["maxImageCount"]
+    max_text_chars: int = CAPABILITIES["maxUserCharacters"]
     # 检索回图片时，最多下载/入提示的图片数量
-    max_retrieved_images: int = _env_int("MAX_RETRIEVED_IMAGES", 2)
-    max_prompt_images: int = _env_int("MAX_PROMPT_IMAGES", 2)
-    max_image_pixels: int = _env_int("MAX_IMAGE_PIXELS", 262144)
+    max_retrieved_images: int = CAPABILITIES["maxImageCount"]
+    max_prompt_images: int = CAPABILITIES["maxImageCount"]
+    max_image_pixels: int = profile["maxImagePixels"]
 
     # LLM 后端：vllm（默认）| mock（降级，用于无 vLLM 时的连通性测试）
     llm_backend: str = os.environ.get("LLM_BACKEND", "vllm")

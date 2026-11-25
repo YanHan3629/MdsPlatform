@@ -10,6 +10,7 @@ import socket
 import shutil
 import secrets
 import shlex
+import stat
 import subprocess
 import time
 import threading
@@ -17,6 +18,24 @@ import uuid
 import urllib.request
 from identity_maintenance_binding import create_binding, clear_binding, instance_id
 from runtime_source_binding import RuntimeBindings
+
+
+def jwt_signing_secret(data_root, snapshot_secrets):
+    key = 'MDS_JWT_SIGNING_SECRET'
+    path = data_root / 'jwt-signing-secret'
+    try:
+        descriptor = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        value = snapshot_secrets.get(key, os.environ.get(key))
+    else:
+        with os.fdopen(descriptor, 'r', encoding='utf-8') as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                raise RuntimeError('JWT signing key file must be private and owned by the deployment account')
+            value = stream.read().rstrip('\r\n')
+    if not isinstance(value, str) or len(value.encode('utf-8')) < 32:
+        raise RuntimeError('Configure a JWT signing key of at least 32 bytes before starting the application')
+    return value
 
 
 class Deployment:
@@ -53,6 +72,8 @@ class Deployment:
         self.identity_maintenance = None
         self.lock = (self.data / 'deployment.lock').open('a')
         fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if not args.storage_only:
+            self.secrets['MDS_JWT_SIGNING_SECRET'] = jwt_signing_secret(self.data, self.secrets)
         self.hosts = self.run / 'hosts'
         self.hosts.write_text('127.0.0.1 localhost db minio redis sirius search-service qa-service vllm local-receiver evidence-worker\n')
         for name in ('minio', 'pgdata', 'receiver-data', 'qa-traces', 'evidence-cache', 'evidence-locks', 'runtime', 'search-cache'):
@@ -60,11 +81,27 @@ class Deployment:
         self.java = next((self.app / 'java17').glob('*/bin/java'))
         self.jar = self.app / 'sirius-backend.jar'
         self.bindings = None
+        self.qa_capabilities = None
+        self.qa_profile = None
+        self.qa_gpu = None
         if not args.storage_only:
             self.bindings = RuntimeBindings(self.app / 'runtime-bindings.json')
             if self.bindings.app != self.app.resolve() or self.bindings.packages != self.packages.resolve():
                 raise RuntimeError('Runtime binding does not match this application and package root')
             proof = self.bindings.verify_all(require_model=not args.cpu_only)
+            capabilities = self.bindings.source / 'qa-service/qa-capabilities.json'
+            self.qa_capabilities = json.loads(capabilities.read_text())
+            if not args.cpu_only:
+                self.qa_profile = self.qa_capabilities['profiles'][args.qa_profile]
+                self.qa_gpu = self.qa_capabilities['gpuProfiles'][args.gpu_type]
+                model_identity = self.bindings.value.get('modelIdentity') or {}
+                for field, config_key in [('repository', 'model'), ('revision', 'modelRevision'), ('provider', 'modelProvider')]:
+                    if model_identity.get(field) != self.qa_capabilities[config_key]:
+                        raise RuntimeError('QA model release identity differs from the capability record')
+                if model_identity.get('quantization') != self.qa_capabilities['quantization']:
+                    raise RuntimeError('QA release does not bind the required FP8 quantization')
+                if os.environ.get('SLURM_JOB_PARTITION') != self.qa_gpu['partition']:
+                    raise RuntimeError('QA GPU partition does not match the selected profile')
             (self.run / 'runtime-bindings-verified.json').write_text(json.dumps(proof, indent=2))
         required = ('postgres', 'minio', 'mc', 'redis')
         if not args.storage_only:
@@ -157,6 +194,26 @@ class Deployment:
         with (self.run / (name + '.log')).open('ab') as log:
             subprocess.run(command, stdout=log, stderr=log, check=True, timeout=timeout)
 
+    def verify_qa_cuda(self):
+        probe = """import ctypes
+
+driver = ctypes.CDLL('libcuda.so.1')
+status = driver.cuInit(0)
+print('cuInit=%d' % status, flush=True)
+if status:
+    raise SystemExit(1)
+devices = ctypes.c_int()
+status = driver.cuDeviceGetCount(ctypes.byref(devices))
+print('cuDeviceGetCount=%d devices=%d' % (status, devices.value), flush=True)
+raise SystemExit(int(bool(status) or devices.value != 1))
+"""
+        try:
+            command = self.sif('vllm', ['python3', '-B', '-c', probe], gpu=True)
+            self.execute('qa-cuda-preflight', command, timeout=45)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError('Allocated CUDA device failed the vLLM container preflight; see qa-cuda-preflight.log') from exc
+        self.check()
+
     def wait_url(self, url, seconds=180, headers=None):
         end = time.monotonic() + seconds
         while time.monotonic() < end:
@@ -170,7 +227,50 @@ class Deployment:
                 time.sleep(2)
         raise TimeoutError('Health check timed out: ' + url)
 
+    def warm_qa_model(self, model_name, api_key):
+        """Exercise the actual chat path once using only synthetic text."""
+        started = time.monotonic()
+        outcome = {'status': 'failed'}
+        done = threading.Event()
+
+        def request_completion():
+            try:
+                payload = json.dumps({
+                    'model': model_name,
+                    'messages': [{'role': 'user', 'content': 'Reply with the single word READY.'}],
+                    'temperature': 0.0, 'max_tokens': 16, 'logprobs': True,
+                    'chat_template_kwargs': {'enable_thinking': False},
+                }).encode()
+                request = urllib.request.Request('http://127.0.0.1:8000/v1/chat/completions', data=payload,
+                    headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'})
+                local = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                with local.open(request, timeout=120) as response:
+                    completion = json.loads(response.read(65536))
+                choice, = completion['choices']
+                answer = choice['message']['content']
+                if (completion.get('model') != model_name or choice['finish_reason'] != 'stop'
+                        or not isinstance(answer, str) or answer.strip().strip('.').upper() != 'READY'):
+                    raise ValueError('Unexpected model warmup response')
+                outcome.update(status='complete', promptTokens=completion['usage']['prompt_tokens'],
+                               completionTokens=completion['usage']['completion_tokens'])
+            except Exception as error:
+                outcome['errorType'] = type(error).__name__
+            finally:
+                done.set()
+
+        threading.Thread(target=request_completion, name='qa-model-warmup', daemon=True).start()
+        deadline = started + 121
+        while not done.wait(0.25):
+            self.check()
+            if time.monotonic() >= deadline:
+                return {'status': 'failed', 'errorType': 'TimeoutError', 'elapsedSeconds': round(time.monotonic()-started, 3)}
+        self.check()
+        outcome['elapsedSeconds'] = round(time.monotonic()-started, 3)
+        return outcome
+
     def boot(self):
+        if self.qa_gpu:
+            self.verify_qa_cuda()
         pg = self.data / 'pgdata'
         pg_bind = [(pg, '/pgdata'), (self.snapshot, '/snapshot:ro')]
         fresh = not (pg / 'PG_VERSION').exists()
@@ -257,6 +357,7 @@ class Deployment:
             MM_CONTROLLED_VIEW_PREVIEW_IMAGE=self.bindings.index_reference,
             MM_CONTROLLED_VIEW_PREVIEW_IMAGE_SHA256=self.bindings.value['sifSha256']['index'],
             MM_INDEX_BUILDER_CMD='env MODEL_PATH=/app/clip_model_chinese PYTHONPATH=/candidate HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 python /candidate/build_index.py',
+            MDS_QA_RUNTIME_PROFILE=self.args.qa_profile,
             LOG_PATH=str(self.run))
         common.update(self.secrets)
         # Bind the same verified JAR and private DB target used by this backend.
@@ -264,7 +365,10 @@ class Deployment:
         self.identity_maintenance = create_binding(self.run, common['MDS_INSTANCE_ID'], 'siriusdb', self.java, self.jar, common, workspace_root=self.args.workspace_root)
         hostenv = dict(os.environ, **common)
         hostenv.setdefault('JAVA_TOOL_OPTIONS', '-XX:ActiveProcessorCount=2 -XX:ParallelGCThreads=2 -XX:ConcGCThreads=1')
-        self.start('backend', [str(self.java), '-Djdk.net.hosts.file=' + str(self.hosts), '-jar', str(self.jar)], hostenv)
+        java_tmp = self.run / 'java-tmp'
+        java_tmp.mkdir(mode=0o700)
+        java = [str(self.java), '-Djava.io.tmpdir=' + str(java_tmp)]
+        self.start('backend', [*java, '-Djdk.net.hosts.file=' + str(self.hosts), '-jar', str(self.jar)], hostenv)
         if not (self.data / 'receipts-restored').exists():
             for item in (self.snapshot / 'receiver-data').iterdir():
                 target = self.data / 'receiver-data' / item.name
@@ -276,33 +380,80 @@ class Deployment:
                     shutil.copy2(str(item), str(target))
             (self.data / 'receipts-restored').write_text(str(self.snapshot))
         receiver_env = dict(hostenv, DS_RECEIVER_TOKEN=self.secrets['MM_INTERNAL_TOKEN'], DS_RECEIVER_ROOT=str(self.data / 'receiver-data'), DS_RECEIVER_BIND='127.0.0.1')
-        self.start('receiver', [str(self.java), '-Dloader.main=com.fwdrobo.sirius.dataspace.ReceiverMain', '-cp', str(self.jar), 'org.springframework.boot.loader.launch.PropertiesLauncher'], receiver_env)
-        self.start('search', self.sif('search', ['uvicorn', 'app:app', '--app-dir', '/candidate', '--host', '127.0.0.1', '--port', '18080'], self.env(MAX_LOADED_INDEXES='1', MODEL_PATH='/app/app/clip_model_chinese', LOCAL_CACHE_DIR='/cache'), [(self.data / 'search-cache', '/cache')]))
+        self.start('receiver', [*java, '-Dloader.main=com.fwdrobo.sirius.dataspace.ReceiverMain', '-cp', str(self.jar), 'org.springframework.boot.loader.launch.PropertiesLauncher'], receiver_env)
+        self.start('search', self.sif('search', ['uvicorn', 'app:app', '--app-dir', '/candidate', '--host', '127.0.0.1', '--port', '18080'],
+            self.env(MAX_LOADED_INDEXES='1', MAX_LOADED_CAPABILITIES='8' if self.qa_gpu else '1',
+                      QA_CANDIDATE_MAX_QUESTION_CHARACTERS=str(self.qa_capabilities['maxUserCharacters']),
+                     MODEL_PATH='/app/app/clip_model_chinese', LOCAL_CACHE_DIR='/cache'), [(self.data / 'search-cache', '/cache')]))
         self.wait_url('http://127.0.0.1:18080/healthz', 300)
-        self.start('evidence-worker', self.sif('index', ['python', '/evidence-worker/worker.py'], self.env(PYTHONPATH='/evidence-worker:/candidate', EVIDENCE_BIND_HOST='127.0.0.1', MDS_EVIDENCE_CPU_LOCK_DIR='/var/lock/mds-evidence', EVIDENCE_CACHE_DIR='/cache'),
+        attachment_label_token = '' if self.args.cpu_only else secrets.token_hex(32)
+        self.start('evidence-worker', self.sif('index', ['python', '/evidence-worker/worker.py'], self.env(PYTHONPATH='/evidence-worker:/candidate', EVIDENCE_BIND_HOST='127.0.0.1', MDS_EVIDENCE_CPU_LOCK_DIR='/var/lock/mds-evidence', EVIDENCE_CACHE_DIR='/cache',
+            QA_ATTACHMENT_LABEL_TOKEN=attachment_label_token),
             self.bindings.binds('evidence') + [(self.data / 'evidence-cache', '/cache'), (self.data / 'evidence-locks', '/var/lock/mds-evidence')]))
         self.wait_url('http://127.0.0.1:18083/healthz')
+        model_warmup = None
         if not self.args.cpu_only:
             if not (self.data / 'traces-restored').exists():
-                self.execute('restore-traces', ['tar', '-xf', str(self.snapshot / 'qa-traces.tar'), '-C', str(self.data / 'qa-traces')])
+                traces = self.snapshot / 'qa-traces.tar'
+                if traces.is_file():
+                    self.execute('restore-traces', ['tar', '-xf', str(traces), '-C', str(self.data / 'qa-traces')])
                 (self.data / 'traces-restored').write_text(str(self.snapshot))
             model = self.bindings.model
+            name = self.qa_capabilities['model']
             vllm_key = secrets.token_hex(32)
-            self.start('vllm', self.sif('vllm', ['python3', '-m', 'vllm.entrypoints.openai.api_server', '--host', '127.0.0.1',
-                '--model', '/models/Qwen3.5-0.8B', '--served-model-name', 'Qwen/Qwen3.5-0.8B', '--max-model-len', '2048',
-                '--gpu-memory-utilization', '0.78', '--max-num-seqs', '2', '--limit-mm-per-prompt', '{"image":2}',
-                '--enforce-eager', '--skip-mm-profiling', '--mm-processor-cache-gb', '0'],
-                self.env(MM_INTERNAL_TOKEN='', VLLM_API_KEY=vllm_key, HOME='/tmp', FLASHINFER_WORKSPACE_BASE='/tmp', XDG_CONFIG_HOME='/tmp/config', HF_HOME='/tmp/huggingface', XDG_CACHE_HOME='/tmp/cache',
-                         VLLM_CACHE_ROOT='/tmp/vllm', TRITON_CACHE_DIR='/tmp/triton'),
-                [(model, '/models/Qwen3.5-0.8B:ro')], gpu=True))
+            kv_cache_dtype = self.qa_gpu.get('kvCacheDtype', {}).get(self.args.qa_profile, 'auto')
+            if kv_cache_dtype not in {'auto', 'fp8_e4m3'}:
+                raise RuntimeError('Unsupported KV cache dtype in the selected QA runtime')
+            model_arguments = ['python3', '-m', 'vllm.entrypoints.openai.api_server', '--host', '127.0.0.1',
+                '--model', '/models/qa', '--served-model-name', name,
+                '--max-model-len', str(self.qa_profile['contextTokens']),
+                '--gpu-memory-utilization', str(self.qa_gpu['memoryUtilization']),
+                '--max-num-seqs', str(self.qa_profile['maxConcurrentRequests']),
+                '--limit-mm-per-prompt', json.dumps({'image': self.qa_capabilities['maxImageCount'], 'video': 0}),
+                '--mm-processor-kwargs', json.dumps({'min_pixels': self.qa_capabilities['minImagePixels'],
+                    'max_pixels': self.qa_profile['maxImagePixels']}),
+                '--mm-processor-cache-gb', '0', '--kv-cache-dtype', kv_cache_dtype,
+                '--structured-outputs-config', json.dumps({'backend': 'xgrammar', 'disable_any_whitespace': True}),
+                '--reasoning-parser', 'qwen3']
+            if (self.args.gpu_type, self.args.qa_profile) == ('A800', 'standard'):
+                model_arguments.append('--no-async-scheduling')
+            if (self.args.gpu_type, self.args.qa_profile) in [('A800', 'long'), ('A800', 'standard')]:
+                model_arguments.extend(['--compilation-config', json.dumps({'cudagraph_mode': 'FULL_DECODE_ONLY'})])
+                draft_tokens = 1 if self.args.qa_profile == 'standard' else 2
+                model_arguments.extend(['--speculative-config', json.dumps({
+                    'method': 'qwen3_5_mtp', 'num_speculative_tokens': draft_tokens})])
+            else:
+                model_arguments.append('--enforce-eager')
+            cache = self.run / 'vllm-cache'
+            cache.mkdir(mode=0o700)
+            (cache / 'tmp').mkdir(mode=0o700)
+            self.start('vllm', self.sif('vllm', model_arguments,
+                self.env(MM_INTERNAL_TOKEN='', VLLM_API_KEY=vllm_key, HOME='/vllm-cache', VLLM_NO_USAGE_STATS='1',
+                         FLASHINFER_WORKSPACE_BASE='/vllm-cache', XDG_CONFIG_HOME='/vllm-cache/config',
+                         HF_HOME='/vllm-cache/huggingface', XDG_CACHE_HOME='/vllm-cache/xdg',
+                         VLLM_CACHE_ROOT='/vllm-cache/vllm', TRITON_CACHE_DIR='/vllm-cache/triton',
+                         TORCHINDUCTOR_CACHE_DIR='/vllm-cache/torchinductor', TMPDIR='/vllm-cache/tmp',
+                         HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1'),
+                [(model, '/models/qa:ro'), (cache, '/vllm-cache')], gpu=True))
             self.wait_url('http://127.0.0.1:8000/v1/models', 600, {'Authorization': 'Bearer ' + vllm_key})
             self.start('qa', self.sif('qa', ['uvicorn', 'app:app', '--app-dir', '/candidate', '--host', '127.0.0.1', '--port', '18081'],
-                self.env(VLLM_BASE_URL='http://127.0.0.1:8000', VLLM_API_KEY=vllm_key, MODEL_NAME='Qwen/Qwen3.5-0.8B', LLM_BACKEND='vllm',
-                         SEARCH_SERVICE_BASE_URL='http://127.0.0.1:18080', QA_EVIDENCE_TRACE_DIR='/traces', MAX_IMAGE_PIXELS='524288'), [(self.data / 'qa-traces', '/traces')]))
+                self.env(VLLM_BASE_URL='http://127.0.0.1:8000', VLLM_API_KEY=vllm_key, LLM_BACKEND='vllm',
+                         MDS_QA_RUNTIME_PROFILE=self.args.qa_profile, SEARCH_SERVICE_BASE_URL='http://127.0.0.1:18080',
+                         QA_ATTACHMENT_LABEL_TOKEN=attachment_label_token, QA_EVIDENCE_TRACE_DIR='/traces'),
+                [(self.data / 'qa-traces', '/traces')]))
             self.wait_url('http://127.0.0.1:18081/healthz')
+            self.wait_url('http://127.0.0.1:8888/api/data-space/qa/health')
+            with urllib.request.urlopen('http://127.0.0.1:8888/api/data-space/qa/health', timeout=15) as response:
+                health = json.loads(response.read().decode())
+            if health.get('model', {}).get('loaded') is not True:
+                raise RuntimeError('The loaded model identity or context length is incorrect')
+            model_warmup = self.warm_qa_model(name, vllm_key)
+            (self.run / 'qa-model-warmup.json').write_text(json.dumps(model_warmup))
         self.wait_url('http://127.0.0.1:8888/data-space/index.html')
         self.start_quality_workers(hostenv)
-        (self.run / 'ready.json').write_text(json.dumps({'job': os.environ['SLURM_JOB_ID'], 'node': socket.gethostname(), 'cpu_only': self.args.cpu_only, 'identityMaintenance': self.identity_maintenance, 'runtimeBinding': self.bindings.proof()}))
+        (self.run / 'ready.json').write_text(json.dumps({'job': os.environ['SLURM_JOB_ID'], 'node': socket.gethostname(), 'cpu_only': self.args.cpu_only, 'gpuType': self.args.gpu_type if self.qa_gpu else None,
+            'qaProfile': self.args.qa_profile if self.qa_gpu else None, 'qaModelWarmup': model_warmup,
+            'identityMaintenance': self.identity_maintenance, 'runtimeBinding': self.bindings.proof()}))
         print('READY node=' + socket.gethostname() + ' port=8888 cpu_only=' + str(self.args.cpu_only), flush=True)
         if self.args.functional_check:
             from functional_probe import run
@@ -429,6 +580,8 @@ if __name__ == '__main__':
     parser.add_argument('--workspace-root', help='Absolute private directory containing apps, packages and data; defaults to the current user home')
     parser.add_argument('--duration', type=int, default=1800)
     parser.add_argument('--cpu-only', action='store_true')
+    parser.add_argument('--gpu-type', choices=('L40', 'A800'), default='L40')
+    parser.add_argument('--qa-profile', choices=('standard', 'long'), default='standard')
     parser.add_argument('--storage-only', action='store_true')
     parser.add_argument('--http-check', action='store_true')
     parser.add_argument('--functional-check', action='store_true')

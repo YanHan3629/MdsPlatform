@@ -47,6 +47,7 @@ public class DataSpaceQaController {
     private final MmSourceFileService sourceFiles;
     private final RestTemplate http;
     private final String qaUrl;
+    private final QaRuntimeCapabilities limits;
     private final DatasetAccessService access;
     private final com.fwdrobo.sirius.security.WorkerEvidenceScopeService evidenceScope;
     private final com.fwdrobo.sirius.security.InteractiveRequestActivity activity;
@@ -54,6 +55,7 @@ public class DataSpaceQaController {
     public DataSpaceQaController(JdbcTemplate jdbc, SearchServiceClient search,
                                  MmAssetService assets, MmSourceFileService sourceFiles, DatasetAccessService access,
                                  @Value("${QA_SERVICE_BASE_URL:http://localhost:18081}") String qaUrl,
+                                 @Value("${MDS_QA_RUNTIME_PROFILE:standard}") String qaProfile,
                                  com.fwdrobo.sirius.security.WorkerEvidenceScopeService evidenceScope,
                                  com.fwdrobo.sirius.security.InteractiveRequestActivity activity) {
         this.evidenceScope=evidenceScope;
@@ -66,7 +68,8 @@ public class DataSpaceQaController {
         this.qaUrl = qaUrl.replaceAll("/+$", "");
         var factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(5000);
-        factory.setReadTimeout(360000);
+        this.limits = new QaRuntimeCapabilities(qaProfile);
+        factory.setReadTimeout(limits.outerTimeoutMillis());
         this.http = new RestTemplate(factory);
     }
 
@@ -218,28 +221,36 @@ public class DataSpaceQaController {
 
     @GetMapping("/health")
     public ResponseEntity<byte[]> health() {
-        return forward("/health", HttpMethod.GET, null, new HttpHeaders());
+        var response = forward("/health", HttpMethod.GET, null, new HttpHeaders());
+        if (response.getStatusCode().is2xxSuccessful() && !limits.matchesWorker(response.getBody()))
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "QA_CAPABILITIES_MISMATCH");
+        return response;
     }
 
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<byte[]> askJson(@RequestBody String rawBody,
+            @RequestHeader(value=QaRuntimeCapabilities.REQUEST_ID_HEADER, required=false) UUID requestId,
             @RequestHeader(HttpHeaders.AUTHORIZATION) String authorization) {
         Map<String, Object> body = validatedQaBody(parseJson(rawBody));
-        var headers = headers(body, MediaType.APPLICATION_JSON);
+        var headers = qaHeaders(body, MediaType.APPLICATION_JSON, requestId);
         return forward("/api/v1/qa", HttpMethod.POST, body, headers);
     }
 
     @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<byte[]> askMultipart(@RequestParam MultiValueMap<String, String> fields,
             @RequestParam(required = false) List<MultipartFile> images,
+            @RequestHeader(value=QaRuntimeCapabilities.REQUEST_ID_HEADER, required=false) UUID requestId,
             @RequestHeader(HttpHeaders.AUTHORIZATION) String authorization) throws Exception {
         Map<String, Object> normalized = validatedQaBody(multipartFields(fields));
-        if (images != null && images.size() > 2)
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "单次最多上传 2 张图片");
+        if (images != null && images.size() > limits.maxImageCount())
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "上传图片数量超过当前上限");
+        if (images != null && images.stream().mapToLong(MultipartFile::getSize).sum() > limits.maxAttachmentBytes())
+            throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "所有图片附件的总大小超过上限");
+        var headers = qaHeaders(normalized, MediaType.MULTIPART_FORM_DATA, requestId);
         MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
         normalized.forEach((key,value)->{if(value!=null)body.add(key,value);});
         if (images != null) for (MultipartFile image : images) {
-            if (image.getSize() > 10 * 1024 * 1024)
+            if (image.getSize() > limits.maxImageBytes())
                 throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "每张图片不得超过 10 MB");
             var partHeaders = new HttpHeaders();
             partHeaders.setContentType(MediaType.parseMediaType(
@@ -249,8 +260,24 @@ public class DataSpaceQaController {
             };
             body.add("images", new HttpEntity<>(resource, partHeaders));
         }
-        return forward("/api/v1/qa", HttpMethod.POST, body,
-                headers(normalized, MediaType.MULTIPART_FORM_DATA));
+        return forward("/api/v1/qa", HttpMethod.POST, body, headers);
+    }
+
+    @GetMapping("/requests/{requestId}")
+    public ResponseEntity<byte[]> qaRequestProgress(@PathVariable UUID requestId) {
+        return controlQaRequest(requestId, HttpMethod.GET);
+    }
+
+    @DeleteMapping("/requests/{requestId}")
+    public ResponseEntity<byte[]> cancelQaRequest(@PathVariable UUID requestId) {
+        return controlQaRequest(requestId, HttpMethod.DELETE);
+    }
+
+    private ResponseEntity<byte[]> controlQaRequest(UUID requestId, HttpMethod method) {
+        var headers = new HttpHeaders();
+        headers.set(HttpHeaders.AUTHORIZATION, evidenceScope.userInputBearer());
+        headers.set(com.fwdrobo.sirius.security.InternalTokenFilter.HEADER, evidenceScope.internalCredential());
+        return forward("/api/v1/qa/requests/" + requestId, method, null, headers);
     }
 
     @PostMapping("/search")
@@ -335,6 +362,15 @@ public class DataSpaceQaController {
                         .filename(asset.logicalPath().substring(asset.logicalPath().lastIndexOf('/') + 1),
                                 java.nio.charset.StandardCharsets.UTF_8).build().toString())
                 .header(HttpHeaders.CACHE_CONTROL, "no-store").body(new org.springframework.core.io.InputStreamResource(stream.inputStream()));
+    }
+
+    private HttpHeaders qaHeaders(Map<String,Object> scope, MediaType type, UUID requestId) {
+        var profile = limits.validateProfile(scope);
+        var headers = headers(scope, type);
+        long deadline = System.currentTimeMillis() + profile.path("deadlineSeconds").asLong() * 1000L;
+        headers.set(QaRuntimeCapabilities.DEADLINE_HEADER, Long.toString(deadline));
+        if (requestId != null) headers.set(QaRuntimeCapabilities.REQUEST_ID_HEADER, requestId.toString());
+        return headers;
     }
 
     private HttpHeaders headers(Map<String,Object> scope, MediaType type) {

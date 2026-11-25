@@ -1,6 +1,5 @@
 (() => {
   let token = false;
-  let account = '';
   let scopeSets = new Map(), searchIndex = '';
   const downloadUrls = new Set();
   let datasets = [];
@@ -10,6 +9,75 @@
   let authAbort = new AbortController();
   let qaSequence = 0;
   let qaAbort = null;
+  let qaCapabilities = null;
+  let activeQa = null;
+  let questionHistory = {key: '', turns: []};
+
+  function resetQuestionHistory() {
+    questionHistory = {key: '', turns: []};
+    $('#qaFollowUp').checked = false;
+    $('#qaFollowUp').disabled = true;
+  }
+
+  function syncBudget() {
+    const profile = qaCapabilities?.profiles[$('#qaProfile').value];
+    const output = $('#qaMaxTokens');
+    output.disabled = !profile;
+    if (!profile) {
+      $('#qaBudgetHelp').textContent = '问答能力暂不可用，请刷新模型状态。';
+      return;
+    }
+    output.max = profile.maxOutputTokens;
+    output.placeholder = profile.defaultOutputTokens;
+    $('#qaBudgetHelp').textContent =
+      '问题与补充文字最多 ' + profile.userTokens + ' token，最多 ' + qaCapabilities.maxImageCount +
+      ' 张图片，每张最多 ' + qaCapabilities.maxImageBytes / (1024 * 1024) + ' MB。';
+  }
+
+  function updateBudget(capabilities) {
+    const selected = $('#qaProfile').value;
+    qaCapabilities = capabilities;
+    const profiles = Object.keys(capabilities?.profiles || {});
+    $('#qaProfile').innerHTML = (profiles.length ? profiles : ['standard'])
+      .map(name => option(name, name === 'long' ? '长文与详细报告' : '常规业务')).join('');
+    $('#qaProfile').value = profiles.includes(selected) ? selected : 'standard';
+    syncBudget();
+  }
+
+  function stopQaProgress() {
+    if (!activeQa) return;
+    clearInterval(activeQa.timer);
+    activeQa = null;
+    $('#qaCancel').hidden = true;
+  }
+
+  async function cancelQa() {
+    const pending = activeQa;
+    if (!pending) return;
+    const button = $('#qaCancel');
+    button.disabled = true;
+    try {
+      for (let attempt = 0; attempt < 4 && activeQa === pending; attempt++) {
+        try {
+          await request('/requests/' + pending.id, {method: 'DELETE', signal: AbortSignal.timeout(4000)});
+          if (activeQa !== pending) return;
+          qaSequence++;
+          qaAbort?.abort();
+          stopQaProgress();
+          $('#qaProgress').textContent = '已提交取消，问答已停止等待。';
+          return;
+        } catch (error) {
+          if (error.status !== 404) throw error;
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+      }
+      if (activeQa === pending) $('#qaProgress').textContent = '请求仍在传输，暂未确认取消。';
+    } catch (error) {
+      if (activeQa === pending && error.name !== 'AbortError') $('#qaProgress').textContent = '取消失败：' + error.message;
+    } finally {
+      button.disabled = false;
+    }
+  }
   let ingestLoaded = false;
   let ingestWork = null;
   let mappingEditRevision = 0;
@@ -25,13 +93,12 @@
   function clearSources(root) {
     releaseSourceUrls(root);root.replaceChildren();
   }
-  function invalidateQaResult() {
-    qaSequence++;qaAbort?.abort();
+  function invalidateQaResult(message = '数据范围已更新，可重新提问。') {
+    qaSequence++;qaAbort?.abort();stopQaProgress();resetQuestionHistory();
     $('#qaAnswer').textContent='';clearSources($('#qaSources'));clearQaMeta();$('#qaNotice').replaceChildren();$('#qaNotice').hidden=true;
-    $('#qaProgress').textContent='数据范围已更新，可重新提问。';delete $('#qaProgress').dataset.request;
+    $('#qaProgress').textContent=message;delete $('#qaProgress').dataset.request;
   }
-  const base = () => state.api.replace(/\/$/, '');
-  const authBase = () => base().replace(/\/data-space$/, '/auth');
+  const base = () => '/api/data-space';
   const mmBase = () => base().replace(/\/data-space$/, '/mm');
 
   // A calculation may cite several files without a single primary asset_id.
@@ -280,9 +347,7 @@
     } catch (error) { if(revision===authRevision&&error.name!=='AbortError')$('#qaIngestProgress').textContent = `回填失败：${error.message}`; }
     finally { if(revision===authRevision)button.disabled=false;window.mdsIdentityUi?.applyCapabilities(); }
   }
-  function showAccount() {
-    $('#qaAccount').textContent = token ? `已登录：${account}` : '尚未登录';
-    $('#qaLogin').hidden = !!token; $('#qaLogout').hidden = !token;
+  function notifyAccount() {
     if(lastAuthEventRevision!==authRevision){lastAuthEventRevision=authRevision;window.dispatchEvent(new CustomEvent('dataspace-auth',{detail:{authenticated:!!token,revision:authRevision}}));}
   }
   function notifyScope() {
@@ -293,17 +358,17 @@
     if (!ingestWork?.preparing || !['permissions-changed','permissions-verified'].includes(reason)) releaseIngest();
     releaseSourceUrls();
     authRevision++; authAbort.abort(); authAbort = new AbortController(); qaSequence++; qaAbort?.abort();
-    token=window.mdsIdentity.authenticated;account=window.mdsIdentity.identity?.username||'';
+    token=window.mdsIdentity.authenticated;stopQaProgress();updateBudget(null);resetQuestionHistory();
     datasets=[];scopeSets=new Map();searchIndex='';ingestLoaded=false;busy=false;
     for(const url of downloadUrls)URL.revokeObjectURL(url);downloadUrls.clear();
     for (const key of ['qaToken','qaAccount','qaIndex','qaDraft','retrievalDraft']) sessionStorage.removeItem(key);
     $('#qaDataset').innerHTML = option('', '不使用数据空间检索');
     $('#qaAnswer').textContent = ''; $('#qaSources').replaceChildren(); clearQaMeta();
-    $('#qaProgress').textContent = '请登录后提问'; $('#qaNotice').replaceChildren(); $('#qaNotice').hidden = true; $('#qaForm').reset();
+    $('#qaProgress').textContent = token ? '等待提问' : '请登录后提问'; $('#qaNotice').replaceChildren(); $('#qaNotice').hidden = true; $('#qaForm').reset();
     delete $('#qaProgress').dataset.request;
     $('#qaIngestForm').reset(); ingestSelectionRevision++;
     for (const [id,label] of [['qaIngestSpace','登录后加载'],['qaIngestDataset','先选择空间'],['qaIngestVersion','先选择数据集']]) $('#'+id).innerHTML = option('',label);
-    $('#qaIndexing').replaceChildren(); showAccount(); syncMode(); notifyScope();
+    $('#qaIndexing').replaceChildren(); notifyAccount(); syncMode(); notifyScope();
     delete $('#qaIngestVersion').dataset.status;
     delete $('#qaIngestProgress').dataset.skipped;
     $('#qaIngestProgress').textContent='登录后可操作真实数据版本。';
@@ -351,10 +416,13 @@
       try{
         const response=await fetch(base()+'/qa/health',{credentials:'omit',redirect:'error',signal:authAbort.signal});
         const value=await response.json();if(revision!==authRevision)return;
-        const ready=value.model?.loaded&&value.vllm?.status==='ok';
+        const ready=response.ok&&value.model?.loaded&&value.vllm?.status==='ok'&&value.capabilities?.profiles?.standard;
+        updateBudget(ready?value.capabilities:null);
         $('#qaHealth').textContent=ready?'问答模型已就绪':'模型正在启动或不可用';
         $('#qaHealth').className=ready?'badge':'badge muted';
-      }catch(error){if(revision===authRevision&&error.name!=='AbortError')$('#qaHealth').textContent='问答服务未就绪';}
+      }catch(error){if(revision===authRevision&&error.name!=='AbortError'){
+        updateBudget(null);$('#qaHealth').textContent='问答服务未就绪';
+      }}
     };
     const scopes=async()=>{
       if(!token)return;
@@ -553,15 +621,20 @@
   async function submit(event) {
     event.preventDefault();
     if(!token) return toast('请先登录数据空间账号');
-    qaAbort?.abort(); qaAbort=new AbortController(); const sequence=++qaSequence, revision=authRevision;
+    if(activeQa) return toast('当前问答仍在处理，可先取消再提交。');
+    qaAbort?.abort();
+    qaAbort=new AbortController();
+    const sequence=++qaSequence, revision=authRevision;
     const body=new FormData(event.currentTarget), images=$('#qaImages').disabled?[]:[...$('#qaImages').files];
-    if(images.length>2||images.some(f=>f.size>10*1024*1024)){
-      $('#qaProgress').textContent='输入无效：最多上传2张图片，每张不超过10 MB';
-      delete $('#qaProgress').dataset.request;
-      clearSources($('#qaSources'));clearQaMeta();
-      $('#qaAnswer').textContent='';$('#qaNotice').replaceChildren();$('#qaNotice').hidden=true;
-      return toast('最多上传2张图片，每张不超过10 MB');
+    const profile = qaCapabilities?.profiles[body.get('profile')];
+    if (!profile) return toast('问答能力尚未就绪，请刷新模型状态。');
+    const characters = [...String(body.get('question') || '')].length + [...String(body.get('context') || '')].length;
+    if (characters > qaCapabilities.maxUserCharacters) return toast('问题和补充文字合计超过字符上限。');
+    if (images.length > qaCapabilities.maxImageCount || images.some(file => file.size > qaCapabilities.maxImageBytes) ||
+        images.reduce((size, file) => size + file.size, 0) > qaCapabilities.maxAttachmentBytes) {
+      return toast('图片数量、单张大小或附件总大小超过当前上限。');
     }
+    if (!body.get('maxTokens')) body.delete('maxTokens');
     body.delete('images');images.forEach(f=>body.append('images',f));
     const userOnly=body.get('inputMode')==='user_data_only';
     const scope=!userOnly&&selectedDataset()?{...selectedDataset()}:null;
@@ -569,13 +642,53 @@
     const use=!userOnly&&$('#qaUseSearch').checked;
     body.set('retrievalType','auto');body.set('retrievalMode',use?'search_service':'none');body.set('useSearchService',use?'true':'false');
     ['datasetId','versionId','indexVersionId'].forEach(k=>scope?body.set(k,scope[k]):body.delete(k));
-    body.set('maxTokens','512');
+    const historyKey = JSON.stringify([revision, body.get('inputMode'), use,
+      scope?.datasetId, scope?.versionId, scope?.indexVersionId]);
+    const followUp = $('#qaFollowUp').checked && historyKey === questionHistory.key;
+    const prior = followUp ? questionHistory.turns : [];
+    const question = String(body.get('question') || '');
+    if (prior.reduce((count, turn) => count + [...turn].length, characters) > qaCapabilities.maxUserCharacters)
+      return toast('前序问题与本次资料合计超过字符上限，可取消接着问。');
+    if (!followUp) resetQuestionHistory();
+    body.set('priorQuestions', JSON.stringify(prior));
     $('#qaProgress').dataset.request=JSON.stringify({question:body.get('question'),inputMode:body.get('inputMode'),retrievalMode:body.get('retrievalMode'),retrievalType:body.get('retrievalType'),imageCount:images.length,
       ...(scope?{datasetId:scope.datasetId,versionId:scope.versionId,indexVersionId:scope.indexVersionId}:{})});
     clearSources($('#qaSources'));clearQaMeta();$('#qaProgress').textContent='正在寻找依据并生成回答…';$('#qaAnswer').textContent='';$('#qaNotice').replaceChildren();$('#qaNotice').hidden=true;
     const current=()=>sequence===qaSequence && revision===authRevision;
+    const id=crypto.randomUUID();
+    const controller=qaAbort;
+    const waitingForAnswer=()=>activeQa?.id===id && current();
+    const stageText={
+      queued:'正在等待模型处理资源…',
+      validating:'正在校验输入与 token 预算…',
+      evidence:'正在查找并读取授权证据…',
+      generating:'正在生成并核验回答…',
+    };
+    let polling=false;
+    const timer=setInterval(async()=>{
+      if(polling||!waitingForAnswer())return;
+      polling=true;
+      try{
+        const status=await (await request('/requests/'+id,{signal:controller.signal})).json();
+        if(waitingForAnswer()&&stageText[status.stage])$('#qaProgress').textContent=stageText[status.stage];
+      }catch{/* The request may have completed before this poll. */}
+      finally{polling=false;}
+    },2000);
+    activeQa={id,timer};
+    $('#qaCancel').hidden=false;
     try{
-      const response=await request('',{method:'POST',body,signal:qaAbort.signal});const result=await response.json(); if(!current())return;
+      const response=await request('',{method:'POST',body,
+        headers:{'X-MDS-QA-Request-Id':id},
+        signal:AbortSignal.any([controller.signal,AbortSignal.timeout((profile.deadlineSeconds+8)*1000)])});
+      const result=await response.json(); if(!current())return;
+      if(activeQa?.id===id)stopQaProgress();
+      const generationStatus = result.meta?.generation_status;
+      const canClarify = generationStatus === 'not_requested' && result.meta?.retrieval_status === 'NEEDS_CLARIFICATION';
+      const hasAnswer = ['complete', 'source_values_verified', 'source_interpretation_unverified'].includes(generationStatus);
+      if (canClarify || hasAnswer) {
+        questionHistory={key:historyKey,turns:[...prior,question].slice(-6)};
+        $('#qaFollowUp').disabled=false;
+      }
       renderAnswer($('#qaAnswer'),result.answer);$('#qaNotice').textContent=result.notice||'';$('#qaNotice').hidden=!result.notice;
       $('#qaProgress').textContent=result.meta?.generation_status==='validation_failed'?'模型回答未通过证据校验':result.meta?.generation_status==='output_limit'?'回答达到长度上限':result.meta?.generation_status==='not_requested'?'本次未生成回答':result.meta?.generation_status==='partial'?'本次回答尚未完成':result.meta?.generation_status==='source_values_verified'?'已核对来源字段':result.meta?.generation_status==='source_interpretation_unverified'?'模型解释尚待完整核验':'回答完成';
       $('#qaMeta').dataset.traceId=result.meta?.trace_id||'';$('#qaMeta').dataset.retrievalStatus=result.meta?.retrieval_status||'';
@@ -584,7 +697,11 @@
       const container=document.createElement('div');
       await renderSources(container,result.sources||[],use?scope:null,revision);
       if(current())$('#qaSources').replaceChildren(...container.childNodes);
-    }catch(e){if(current()&&e.name!=='AbortError')$('#qaProgress').textContent=`问答失败：${e.message}`;}
+    }catch(e){
+      if(current()&&e.name!=='AbortError')$('#qaProgress').textContent=e.name==='TimeoutError'?'问答达到总处理时限。':'问答失败：'+e.message;
+    }finally{
+      if(activeQa?.id===id)stopQaProgress();
+    }
   }
   async function requestBusiness(path,options={}) {
     const revision=authRevision;const response=await authorizedFetch(base()+path,options);const result=await response.json();
@@ -609,27 +726,34 @@
     datasetsFor:scopesFor,scopeFor,canUseScope,has:operation=>window.mdsIdentity.has(operation),
     get authenticated(){return !!token;},get revision(){return authRevision;},
     get datasets(){return datasets;},get scope(){const d=selectedDataset();return d?{...d}:null;}};
-  window.addEventListener('dataspace-identity',event=>{resetSessionView(event.detail.reason);if(token)void refresh();});
-  document.addEventListener('DOMContentLoaded',()=>{
+  function handleIdentity(reason) {
+    resetSessionView(reason);
+    if(token)void refresh();
+  }
+  window.addEventListener('dataspace-business-ready',()=>{
     ['qaSourceTimezone','qaSourceTimeColumn','qaSourceEntities','qaSourceUnits','qaAssetMappings'].forEach(id=>$('#'+id).addEventListener('input',()=>{mappingEditRevision++;}));
     $('#qaSaveMapping').onclick=()=>saveMapping().then(()=>toast('映射已保存；安全回填后生效')).catch(e=>toast(e.message));
-    $('#qaInputMode').onchange=syncMode;$('#qaDataset').onchange=()=>selectIndex($('#qaDataset').value);$('#qaUseSearch').onchange=syncMode;
+    const changeInputScope = () => {
+      invalidateQaResult('问答输入范围已更新，可重新提问。');
+      syncMode();
+    };
+    $('#qaInputMode').onchange=changeInputScope;
+    $('#qaDataset').onchange=()=>selectIndex($('#qaDataset').value);
+    $('#qaUseSearch').onchange=changeInputScope;
     $('#qaIngestSpace').onchange=()=>loadIngestDatasets().catch(e=>toast(e.message));
     $('#qaIngestDataset').onchange=()=>loadIngestVersions().catch(e=>toast(e.message));
     $('#qaIngestVersion').onchange=()=>loadIngestVersions($('#qaIngestVersion').value).catch(e=>toast(e.message));
     $('#qaNewDataset').addEventListener('input',()=>window.mdsIdentityUi?.applyCapabilities());
     $('#qaIngestForm').onsubmit=submitIngest;$('#qaBackfill').onclick=backfillIngest;
-    $('#qaRefresh').onclick=refresh;$('#qaLogout').onclick=()=>window.mdsIdentity.logout();$('#qaForm').onsubmit=submit;
+    $('#qaRefresh').onclick=refresh;$('#qaForm').onsubmit=submit;
+    $('#qaCancel').onclick=cancelQa;
+    $('#qaProfile').onchange=()=>{$('#qaMaxTokens').value='';syncBudget();};
     const saved=JSON.parse(sessionStorage.getItem('qaDraft')||'null');
     if(saved&&token){$('#qaForm').elements.question.value=saved.question||'';$('#qaContext').value=saved.context||'';$('#qaInputMode').value=saved.inputMode||'hybrid';$('#qaUseSearch').checked=saved.useSearch!==false;if(saved.taskType)$('#qaForm').elements.taskType.value=saved.taskType;if(saved.hadFiles)$('#qaProgress').textContent='本地图片需要重新选择。';}
     const saveDraft=()=>sessionStorage.setItem('qaDraft',JSON.stringify({question:$('#qaForm').elements.question.value,context:$('#qaContext').value,inputMode:$('#qaInputMode').value,useSearch:$('#qaUseSearch').checked,taskType:$('#qaForm').elements.taskType.value,hadFiles:$('#qaImages').files.length>0}));
     $('#qaForm').addEventListener('input',saveDraft);
     $('#qaClearImages').onclick=()=>{$('#qaImages').value='';saveDraft();$('#qaProgress').textContent='已清除本次图片附件。';};
-    $('#qaLogin').onsubmit=async event=>{
-      event.preventDefault();const form=event.currentTarget,credentials=formData(form);
-      try{const result=await window.mdsIdentity.login(credentials);form.reset();if(result.activationRequired)toast('请设置新密码完成账号激活。');}
-      catch(error){if(error.name!=='AbortError')toast(error.message);}
-    };
-    showAccount();syncMode();refresh();
-  });
+    window.addEventListener('dataspace-identity',event=>handleIdentity(event.detail.reason));
+    handleIdentity('identity-verified');
+  }, {once: true});
 })();

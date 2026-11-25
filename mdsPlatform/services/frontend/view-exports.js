@@ -64,7 +64,7 @@
     }catch(error){if(expected===auth.revision&&request===sequence&&error.name!=='AbortError')$('#viewExportNotice').textContent=explain(error);}
     finally{if(expected===auth.revision&&request===sequence){busy=false;controls();}}
   }
-  document.addEventListener('DOMContentLoaded',()=>{
+  window.addEventListener('dataspace-business-ready',()=>{
     $('#viewExportForm').onsubmit=download;$('#viewExportRefresh').onclick=()=>void load();
     window.addEventListener('dataspace-identity',()=>{clear();if(auth.authenticated)void load();});
     window.addEventListener('pagehide',clear);

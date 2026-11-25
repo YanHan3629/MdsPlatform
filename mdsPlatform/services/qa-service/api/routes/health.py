@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from adapters.vllm_client import VllmClientError, client
 from core.config import settings
+from core.request_budget import ACTIVE_CONTEXT_TOKENS, CAPABILITIES, public_capabilities
 
 router = APIRouter()
 
@@ -16,13 +17,14 @@ def healthz():
 
 @router.get("/health")
 def health_check():
-    """健康检查：服务本身 + vLLM 连通性 + 模型加载状态。"""
+    """检查 QA 服务、vLLM 推理引擎和已加载的模型配置。"""
     vllm_status = "ok"
     vllm_error = None
     model_loaded = False
     try:
+        client.check_engine_health()
         models = client.list_models()
-        model_loaded = any(m.get("id") == settings.model_name for m in models)
+        model_loaded = any(m.get("id") == settings.model_name and m.get("max_model_len") == ACTIVE_CONTEXT_TOKENS for m in models)
     except VllmClientError as e:
         vllm_status = "unreachable"
         vllm_error = str(e)
@@ -37,7 +39,10 @@ def health_check():
         "model": {
             "name": settings.model_name,
             "loaded": model_loaded,
+            "quantization": CAPABILITIES["quantization"],
+            "revision": CAPABILITIES["modelRevision"],
         },
+        "capabilities": public_capabilities(),
         "timestamp": datetime.now().isoformat(),
     }
 

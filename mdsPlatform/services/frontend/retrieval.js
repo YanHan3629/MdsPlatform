@@ -296,7 +296,7 @@
     }catch(e){if(seq===requestSequence&&revision===session.revision&&e.name!=='AbortError')$('#retrievalProgress').textContent=`检索失败：${e.message}`;}
     finally{if(seq===requestSequence)controller=null;}
   }
-  document.addEventListener('DOMContentLoaded',()=>{
+  window.addEventListener('dataspace-business-ready',()=>{
     window.addEventListener('dataspace-scope',load);$('#retrievalDataset').onchange=()=>{invalidate();session.selectIndex($('#retrievalDataset').value,'data.search');};
     $('#retrievalType').onchange=()=>renderType(true);$('#retrievalScope').onchange=()=>renderType(true);$('#retrievalFormat').onchange=()=>{invalidate();conditions=[];renderSpecific();saveDraft();};
     $('#retrievalOperation').onchange=()=>{invalidate();renderSpecific();saveDraft();};

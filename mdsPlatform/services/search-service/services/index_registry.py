@@ -14,6 +14,9 @@ from services.professional_retrievers import ProfessionalRetrieverSuite
 from services.snapshot_scope import SnapshotScope
 
 
+CAPABILITY_SOURCE_CACHE_BYTES = 32 * 1024 * 1024
+
+
 @dataclass
 class LoadedIndex:
     dataset_id: str
@@ -36,6 +39,7 @@ class LoadedIndex:
 class LoadedCapabilities:
     manifest: dict
     scope: SnapshotScope
+    source_bytes: int
 
 
 class IndexRegistry:
@@ -46,6 +50,7 @@ class IndexRegistry:
         # would let a third caller start a concurrent load of the same scope.
         self._locks = WeakValueDictionary()
         self._capabilities_cache: OrderedDict[str, LoadedCapabilities] = OrderedDict()
+        self._capability_cache_bytes = 0
         self._guard = Lock()
         self._operation_guard = RLock()
         self._loader = ManifestLoader()
@@ -171,12 +176,18 @@ class IndexRegistry:
             else:
                 manifest, files, cache = loaded.manifest, loaded.professional_files, loaded.professional_cache
             suite = ProfessionalRetrieverSuite(manifest.get('indexes', []), files, cache=cache)
-            capabilities = LoadedCapabilities(manifest, SnapshotScope.from_suite(suite))
+            scope = SnapshotScope.from_suite(suite)
+            source_bytes = suite._path('snapshot.facets', 'facets.json').stat().st_size
+            capabilities = LoadedCapabilities(manifest, scope, source_bytes)
+            slots = settings.max_loaded_capabilities or settings.max_loaded_indexes
             with self._guard:
                 self._capabilities_cache[key] = capabilities
-                self._capabilities_cache.move_to_end(key)
-                while len(self._capabilities_cache) > settings.max_loaded_indexes:
-                    self._capabilities_cache.popitem(last=False)
+                self._capability_cache_bytes += source_bytes
+                while len(self._capabilities_cache) > 1 and (
+                        len(self._capabilities_cache) > slots or
+                        self._capability_cache_bytes > CAPABILITY_SOURCE_CACHE_BYTES):
+                    _, evicted = self._capabilities_cache.popitem(last=False)
+                    self._capability_cache_bytes -= evicted.source_bytes
             return capabilities
 
 

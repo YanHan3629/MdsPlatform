@@ -147,6 +147,11 @@
                 </includes>
             </resource>
             <resource>
+                <directory>../qa-service</directory>
+                <targetPath>qa-runtime</targetPath>
+                <includes><include>qa-capabilities.json</include></includes>
+            </resource>
+            <resource>
                 <directory>../frontend</directory>
                 <targetPath>static/data-space</targetPath>
                 <includes>

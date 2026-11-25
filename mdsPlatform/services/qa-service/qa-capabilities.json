@@ -1,0 +1,53 @@
+{
+  "version": "qwen38-fp8-v7",
+  "model": "Qwen/Qwen3.8-27B-FP8",
+  "modelProvider": "ModelScope",
+  "modelRevision": "0f041045fbc7b695ead32dd984e0b4d387b49611",
+  "quantization": "FP8",
+  "maxUserCharacters": 65536,
+  "maxImageBytes": 10485760,
+  "maxAttachmentBytes": 62914560,
+  "defaultImageCount": 4,
+  "maxImageCount": 8,
+  "minImagePixels": 65536,
+  "maxDecodedImagePixels": 41943040,
+  "maxSources": 24,
+  "intentDefaultTokens": 1024,
+  "intentMaxTokens": 2048,
+  "gpuProfiles": {
+    "L40": {
+      "partition": "L40", "gres": "gpu:l40:1", "cpus": 7,
+      "memoryGiB": {"standard": 64, "long": 96}, "memoryUtilization": 0.88,
+      "kvCacheDtype": {"long": "fp8_e4m3"}
+    },
+    "A800": {"partition": "A800", "gres": "gpu:a800:1", "cpus": 7, "memoryGiB": {"standard": 96, "long": 112}, "memoryUtilization": 0.88}
+  },
+  "profiles": {
+    "standard": {
+      "contextTokens": 32768,
+      "userTokens": 8192,
+      "defaultOutputTokens": 4096,
+      "maxOutputTokens": 8192,
+      "maxImagePixels": 1048576,
+      "preferredSources": 12,
+      "documentPagesPerBatch": 16,
+      "documentReadOperationsPerBatch": 64,
+      "deadlineSeconds": 180,
+      "maxConcurrentRequests": 2,
+      "maxQueuedRequests": 4
+    },
+    "long": {
+      "contextTokens": 65536,
+      "userTokens": 16384,
+      "defaultOutputTokens": 8192,
+      "maxOutputTokens": 16384,
+      "maxImagePixels": 2097152,
+      "preferredSources": 24,
+      "documentPagesPerBatch": 32,
+      "documentReadOperationsPerBatch": 128,
+      "deadlineSeconds": 300,
+      "maxConcurrentRequests": 1,
+      "maxQueuedRequests": 2
+    }
+  }
+}

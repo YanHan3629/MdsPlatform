@@ -108,7 +108,7 @@
     line(container,'确认依据',p.reason);line(container,'预览有效至',new Date(result.expiresAt).toLocaleString());
     $('enterpriseMappingConfirmForm').reset();$('enterpriseMappingReview').hidden=false;status('请核对下方变更内容后确认。');
   }
-  document.addEventListener('DOMContentLoaded',()=>{
+  window.addEventListener('dataspace-business-ready',()=>{
     for(const id of ['enterpriseMappingOpen','enterpriseMappingOpenManagement'])if($(id))$(id).onclick=()=>void open();
     $('enterpriseMappingClose').onclick=close;
     $('enterpriseMappingDialog').addEventListener('cancel',event=>{event.preventDefault();close();});

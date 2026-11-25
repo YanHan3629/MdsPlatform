@@ -19,7 +19,7 @@ def _sha(value):return hashlib.sha256(value).hexdigest()
 def source_frame(source, position):
     """Render the citation label and source context shared by prompting and validation."""
     context = source.model_context or source.content_preview
-    if source.source_type == 'user_image':
+    if source.source_type == 'user_image' and not source.provenance.get('userInputReceipt', {}).get('imageLabels'):
         context = '用户所附图片，文件名不构成图片内容依据。'
     return f'[来源{position}] {source.original_format or source.source_type} {context}'
 
@@ -32,9 +32,24 @@ class EvidenceTrace:
         self.data={'schemaVersion':'qa-actual-evidence-trace-1','traceId':self.id,'startedAt':datetime.now(timezone.utc).isoformat(),
             'questionSha256':_sha(str(kwargs.get('question','')).encode()),
             'snapshot':{key:str(kwargs[key]) for key in ('dataset_id','version_id','index_version_id') if kwargs.get(key)},
-            'events':[],'modelCalls':[],'tokenizerCalls':[]}
+            'events':[],'modelCalls':[],'intentModelCalls':[],'tokenizerCalls':[]}
     def event(self,kind,value):
         self.data['events'].append({'kind':kind,'value':copy.deepcopy(value)});self.checkpoint()
+    def candidate_admission(self, candidates, selected, rejections):
+        """Link request-local evidence IDs to the source and location used at admission."""
+        self.event('candidateAdmission', {
+            'candidates': [{
+                'evidenceId': item['evidenceId'],
+                'assetId': item.get('assetId'),
+                'semanticSpace': item.get('semanticSpace'),
+                'dataVersion': item.get('dataVersion'),
+                'indexVersion': item.get('indexVersion'),
+                'locatorSha256': _sha(json.dumps(item.get('locator') or {}, ensure_ascii=False, sort_keys=True,
+                                                separators=(',', ':'), default=str).encode()),
+            } for item in candidates],
+            'selectedEvidenceIds': [item['evidenceId'] for item in selected],
+            'rejections': [{'evidenceId': row['evidenceId'], 'reason': row['reason']} for row in rejections],
+        })
     def generation_inputs(self,sources,images,*,source_part=None):
         self.contexts=[];self.inputs=[]
         self.source_part_sha256 = _sha(source_part.encode()) if source_part is not None else None
@@ -60,15 +75,19 @@ class EvidenceTrace:
                 value['clientParentReadReceiptSha256']=[digest(parent) for parent in parents]
             self.contexts.append(text);self.inputs.append(copy.deepcopy(value))
         self.event('generationInputs',{'sources':self.inputs,'images':[{key:value for key,value in image.items() if key!='url'} for image in images]})
-    def begin(self,path,payload,raw):
+    def begin(self,path,payload,raw,*,purpose="answer"):
         call={'callId':str(uuid.uuid4()),'requestBodySha256':_sha(raw),'startedAt':datetime.now(timezone.utc).isoformat(),'startedClock':time.perf_counter()}
-        safe=copy.deepcopy({key:value for key,value in payload.items() if key!='messages'});safe_messages=[];actual_text=[]
+        include_text = path == '/v1/chat/completions' and os.environ.get('QA_TRACE_INCLUDE_TEXT') == '1'
+        safe=copy.deepcopy({key:value for key,value in payload.items() if key not in {'messages','prompt'}});safe_messages=[];actual_text=[]
+        if isinstance(payload.get('prompt'),str):
+            safe['promptSha256']=_sha(payload['prompt'].encode())
+            safe['promptCharacters']=len(payload['prompt'])
         for message in payload.get('messages',[]):
             content=message.get('content','');parts=content if isinstance(content,list) else [{'type':'text','text':content}];safe_parts=[]
             for part in parts:
                 if part.get('type')=='text':
                     text=part.get('text','');actual_text.append(text);entry={'type':'text','textSha256':_sha(text.encode()),'characters':len(text)}
-                    if os.environ.get('QA_TRACE_INCLUDE_TEXT')=='1':entry['text']=text
+                    if include_text:entry['text']=text
                     safe_parts.append(entry)
                 elif part.get('type')=='image_url':
                     url=part.get('image_url',{}).get('url','')
@@ -101,7 +120,13 @@ class EvidenceTrace:
             evidence.append(actual)
         call['actualEvidence'] = evidence
         call['status']='request_prepared'
-        target='modelCalls' if path=='/v1/chat/completions' else 'tokenizerCalls';self.data[target].append(call);self.checkpoint()
+        target = 'tokenizerCalls'
+        if path == '/v1/chat/completions':
+            target = 'intentModelCalls' if purpose == 'intent' else 'modelCalls'
+            if purpose not in {'answer', 'intent'}:
+                call['purpose'] = purpose
+        self.data[target].append(call)
+        self.checkpoint()
         return call
     def end(self,call,result=None,error=None):
         if 'elapsedMs' in call:return

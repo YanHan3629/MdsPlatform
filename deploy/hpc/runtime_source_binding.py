@@ -8,6 +8,7 @@ import re
 import stat
 
 SCHEMA = 'MDS_RUNTIME_BINDINGS_V2'
+MODEL_SCHEMA = 'MDS_RUNTIME_BINDINGS_V3'
 LEGACY_SCHEMA = 'MDS_RUNTIME_BINDINGS_V1'
 GROUPS = ('index-builder', 'search-service', 'qa-service', 'evidence-worker', 'business-worker')
 IMAGES = ('index', 'search', 'qa', 'vllm', 'postgres', 'redis', 'minio', 'mc')
@@ -71,7 +72,10 @@ class RuntimeBindings:
         self.value = json.loads(self.path.read_text())
         required = {'schema', 'appRoot', 'sourceRoot', 'packagesRoot', 'modelRoot', 'jarSha256',
                     'runtimeFiles', 'sourceFilesSha256', 'sourceResourceSha256', 'sifSha256', 'modelFiles'}
-        if set(self.value) != required or self.value['schema'] not in {SCHEMA, LEGACY_SCHEMA}:
+        schema = self.value.get('schema')
+        if schema == MODEL_SCHEMA:
+            required.add('modelIdentity')
+        if set(self.value) != required or schema not in {MODEL_SCHEMA, SCHEMA, LEGACY_SCHEMA}:
             raise ValueError('RUNTIME_BINDING_SCHEMA_INVALID')
         self.app = checked(self.value['appRoot'], directory=True)
         self.source = checked(self.value['sourceRoot'], directory=True)
@@ -79,7 +83,7 @@ class RuntimeBindings:
         self.model = checked(self.value['modelRoot'], directory=True)
         if set(self.value['sourceFilesSha256']) != set(GROUPS) or set(self.value['sifSha256']) != set(IMAGES):
             raise ValueError('RUNTIME_BINDING_COMPONENT_SET_INVALID')
-        required_runtime = RUNTIME_FILES if self.value['schema'] == SCHEMA else LEGACY_RUNTIME_FILES
+        required_runtime = LEGACY_RUNTIME_FILES if schema == LEGACY_SCHEMA else RUNTIME_FILES
         if set(self.value['runtimeFiles']) != set(required_runtime):
             raise ValueError('RUNTIME_BINDING_LAUNCHER_FILE_SET_INVALID')
         sha_value(self.value['jarSha256'])
@@ -149,8 +153,27 @@ class RuntimeBindings:
             self.verify_image(image)
         if require_model:
             expected = self.value['modelFiles']
-            actual = {p.name: p for p in self.model.iterdir() if p.is_file() and
-                      p.name.endswith(('.safetensors', '.json', '.jinja', '.txt'))}
+            if self.value['schema'] == MODEL_SCHEMA:
+                identity = self.value['modelIdentity']
+                manifest = checked(self.model.with_name(self.model.name + '.json'), private=True)
+                if digest(manifest) != sha_value(identity['manifestSha256']):
+                    raise ValueError('RUNTIME_BINDING_MODEL_MANIFEST_CHANGED')
+                declared = json.loads(manifest.read_text())
+                for name in ('repository', 'provider', 'revision'):
+                    if declared[name] != identity[name]:
+                        raise ValueError('RUNTIME_BINDING_MODEL_IDENTITY_CHANGED')
+                quantization = declared['quantization']
+                if identity['quantization'] != 'FP8' or quantization['quant_method'] != 'fp8' or quantization['weight_block_size'] != [128, 128]:
+                    raise ValueError('RUNTIME_BINDING_MODEL_QUANTIZATION_CHANGED')
+                if declared['files'] != expected:
+                    raise ValueError('RUNTIME_BINDING_MODEL_MANIFEST_FILES_CHANGED')
+                paths = list(self.model.rglob('*'))
+                if any(path.is_symlink() for path in paths):
+                    raise ValueError('RUNTIME_BINDING_MODEL_SYMLINK_FORBIDDEN')
+                actual = {str(path.relative_to(self.model)): path for path in paths if path.is_file()}
+            else:
+                actual = {p.name: p for p in self.model.iterdir() if p.is_file() and
+                          p.name.endswith(('.safetensors', '.json', '.jinja', '.txt'))}
             if not expected or set(actual) != set(expected):
                 raise ValueError('RUNTIME_BINDING_MODEL_FILE_SET_CHANGED')
             for name, item in expected.items():
@@ -180,7 +203,8 @@ class RuntimeBindings:
         return {'manifestSha256': self.sha256, 'sourceRoot': str(self.source),
                 'jarSha256': self.value['jarSha256'], 'sifSha256': self.value['sifSha256'],
                 'indexSourceSha256': self.index_source_sha256, 'indexImageReference': self.index_reference,
-                'bindingSchema': self.value['schema'], 'operatorControlsCovered': self.value['schema'] == SCHEMA,
+                'bindingSchema': self.value['schema'], 'operatorControlsCovered': self.value['schema'] != LEGACY_SCHEMA,
+                'modelIdentity': self.value.get('modelIdentity'),
                 'operatorControlFilesSha256': {name: self.value['runtimeFiles'][name] for name in OPERATOR_FILES
                                                if name in self.value['runtimeFiles']}}
 
@@ -225,6 +249,18 @@ def prepare(app, source, packages, model, output):
              'sifSha256': {n: digest(checked(packages / (n + '.sif'))) for n in IMAGES},
              'modelFiles': {p.name: {'bytes': p.stat().st_size, 'sha256': digest(checked(p))}
                  for p in sorted(model.iterdir()) if p.is_file() and p.name.endswith(('.safetensors', '.json', '.jinja', '.txt'))}}
+    capabilities = source / 'qa-service/qa-capabilities.json'
+    if capabilities.is_file():
+        config = json.loads(capabilities.read_text())
+        model_manifest = checked(model.with_name(model.name + '.json'), private=True)
+        manifest = json.loads(model_manifest.read_text())
+        if (manifest['repository'] != config['model'] or manifest['provider'] != config['modelProvider']
+                or manifest['revision'] != config['modelRevision']):
+            raise ValueError('RUNTIME_BINDING_MODEL_CAPABILITIES_MISMATCH')
+        value.update(schema=MODEL_SCHEMA, modelFiles=manifest['files'],
+                     modelIdentity={'repository': manifest['repository'], 'provider': manifest['provider'],
+                                    'revision': manifest['revision'], 'quantization': config['quantization'],
+                                    'manifestSha256': digest(model_manifest)})
     os.umask(0o077)
     with output.open('x') as stream:
         stream.write(json.dumps(value, ensure_ascii=False, indent=2) + '\n')

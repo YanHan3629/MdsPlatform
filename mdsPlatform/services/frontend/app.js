@@ -1,10 +1,9 @@
 const $ = (s, c = document) => c.querySelector(s);
 const $$ = (s, c = document) => [...c.querySelectorAll(s)];
 const state = {
-  api: localStorage.getItem('dataSpaceApi') || '/api/data-space',
   snapshot: null,
   products: [],
-  activeBusiness: localStorage.getItem('activeBusiness') || '',
+  activeBusiness: '',
   loadSequence:0,searchSequence:0,marketSearchActive:false,marketPage:1
 };
 const fmt = new Intl.NumberFormat('zh-CN');
@@ -407,22 +406,7 @@ async function searchProducts(showToast = true) {
   if (showToast) toast(`找到 ${rows.length} 个数据产品`);
 }
 
-function bindNav() {
-  function go() {
-    let id = (location.hash || '#dashboard').slice(1);
-    if (!document.getElementById(id)?.classList.contains('page')) id = 'dashboard';
-    const shared = $('#multimodalShared');
-    if (shared) {shared.hidden=false;const first=$('.page');if(first)first.parentNode.insertBefore(shared,first);}
-    $$('.page').forEach(p => p.classList.toggle('show', p.id === id));
-    $$('nav a').forEach(a => a.classList.toggle('active', a.hash === '#' + id));
-  }
-  window.addEventListener('hashchange', go);
-  go();
-}
-
 function bindForms() {
-  $('#apiBase').value = state.api;
-  $('#apiBase').onchange = e => { state.api=e.target.value||'/api/data-space';localStorage.setItem('dataSpaceApi',state.api);window.mdsIdentity.configure();load(true); };
   $('#reloadBtn').onclick = () => load(true);
   $('#demoDispatchBtn').onclick = () => load(true);
   $('#spaceForm').onsubmit = async e => { e.preventDefault(); const r = await json('/spaces/register', formData(e.currentTarget)); toast(`平台空间已创建：${r.spaceId}；不代表企业认证`); load(); };
@@ -457,7 +441,10 @@ function bindForms() {
   for(const id of ['searchBtn','productModality','productBusiness']){const element=$('#'+id);const key=id==='searchBtn'?'onclick':'onchange';const action=element[key];if(action)element[key]=e=>Promise.resolve(action(e)).catch(error=>{if(error.name!=='AbortError')toast(error.message);});}
 }
 
-window.addEventListener('dataspace-auth',()=>{
+let refreshTimer;
+function resetBusinessView({detail}) {
+  clearInterval(refreshTimer);
+  refreshTimer = null;
   state.loadSequence++;state.searchSequence++;state.snapshot=null;state.products=[];state.marketSearchActive=false;
   state.activeBusiness='';localStorage.removeItem('activeBusiness');
   state.marketPage=1;$('#marketSearchStatus').textContent='账号范围已切换，正在读取当前可见产品。';
@@ -466,13 +453,12 @@ window.addEventListener('dataspace-auth',()=>{
   for(const form of $$('#provider form,#market form,#contracts form'))form.reset();
   for(const id of ['catalogKeyword','catalogStatus','productKeyword','productModality'])$('#'+id).value='';
   clearTimeout(toast.timer);$('#toast').classList.remove('show');$('#toast').textContent='';
-  setDefaultTimes();load();
-});
-
-document.addEventListener('DOMContentLoaded', () => {
   setDefaultTimes();
-  bindNav();
+  void load();
+  if(detail.authenticated && window.mdsIdentity.has('data.catalog.read'))refreshTimer=setInterval(()=>void load(),12000);
+}
+
+window.addEventListener('dataspace-business-ready', () => {
   bindForms();
-  load();
-  setInterval(() => load(), 12000);
-});
+  window.addEventListener('dataspace-auth',resetBusinessView);
+}, {once: true});

@@ -1,5 +1,6 @@
 import json
 from fastapi import APIRouter, UploadFile, File, Form
+from fastapi.responses import JSONResponse
 from uuid import UUID
 from schemas.search_req import TextToImageReq
 from schemas.search_resp import TextToImageResp, ImageToTextResp
@@ -54,10 +55,12 @@ def execute_professional_search(req: ProfessionalSearchRequest):
 @router.get("/indexes/{dataset_id}/{version_id}/{index_version_id}/capabilities")
 def index_capabilities(dataset_id: UUID, version_id: UUID, index_version_id: UUID):
     loaded = registry.ensure_capabilities(str(dataset_id), str(version_id), str(index_version_id))
-    return {
-        "datasetId": dataset_id,
-        "versionId": version_id,
-        "indexVersionId": index_version_id,
+    # The frozen descriptor already consists of JSON primitives. Render it
+    # directly so FastAPI does not recursively copy every facet before encoding.
+    return JSONResponse({
+        "datasetId": str(dataset_id),
+        "versionId": str(version_id),
+        "indexVersionId": str(index_version_id),
         "snapshot": {"dataVersion": str(version_id), "indexVersion": str(index_version_id)},
         "filters": loaded.scope.describe(),
         "capabilities": [{
@@ -66,7 +69,7 @@ def index_capabilities(dataset_id: UUID, version_id: UUID, index_version_id: UUI
             "status": item.get("status"),
             "coverage": item.get("coverage", {}),
         } for item in loaded.manifest.get("indexes", [])],
-    }
+    })
 
 
 @router.post("/search/candidates")
@@ -74,10 +77,8 @@ def index_capabilities(dataset_id: UUID, version_id: UUID, index_version_id: UUI
 def qa_candidates(req: CandidateRequest):
     """Bounded per-format recall, with the original hit and location intact."""
     import re
-    loaded = registry.ensure_loaded(str(req.dataset_id), str(req.version_id), str(req.index_version_id))
-    suite = ProfessionalRetrieverSuite(loaded.manifest.get("indexes", []), loaded.professional_files or {},
-        cache=loaded.professional_cache if loaded.professional_cache is not None else {})
-    scope = SnapshotScope.from_suite(suite)
+    snapshot = (str(req.dataset_id), str(req.version_id), str(req.index_version_id))
+    scope = registry.ensure_capabilities(*snapshot).scope
     known = scope.entities
     prefixes = {entity.split("-", 1)[0].lower() for entity in known if "-" in entity}
     from services.qa_query import named_sources
@@ -90,17 +91,29 @@ def qa_candidates(req: CandidateRequest):
     mentioned = [match.group(0) for match in re.finditer(r"(?<![A-Za-z0-9])[A-Za-z]{2,12}-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", req.question)
         if not any(start<=match.start()<end for start,end in file_spans)]
     canonical = {entity.lower(): entity for entity in known}
-    aliases = {str(item.get("values",{}).get("model")).lower(): entity for entity,item in known.items() if item.get("values",{}).get("model")}
+    aliases_by_model = {}
+    for entity, item in known.items():
+        model = item.get("values", {}).get("model")
+        if isinstance(model, str) and model.strip():
+            aliases_by_model.setdefault(model.casefold(), []).append(entity)
+    aliases = {model: entities[0] for model, entities in aliases_by_model.items() if len(entities) == 1}
+    question_without_file_names = req.question
+    for start, end in sorted(file_spans, reverse=True):
+        question_without_file_names = question_without_file_names[:start] + " " + question_without_file_names[end:]
+    mentioned.extend(model for model in aliases
+        if re.fullmatch(r"(?=.*[a-z])(?=.*\d)[a-z0-9_-]{3,64}", model)
+        and _has_identifier(question_without_file_names, model))
     unknown = [value for value in mentioned if value.lower() not in canonical and value.lower() not in aliases
         and (value.split("-", 1)[0].lower() in prefixes or re.search(r"SKU|订单|合同|料号|序列|型号|客户",req.question,re.I))]
     if unknown:
         return {"evidence": [], "status": "UNKNOWN_ENTITY", "unknownEntities": unknown,
                 "snapshot": {"dataVersion": str(req.version_id), "indexVersion": str(req.index_version_id)}}
-    entities = [canonical.get(value.lower()) or aliases[value.lower()] for value in mentioned if value.lower() in canonical or value.lower() in aliases]
+    entities = list(dict.fromkeys(canonical.get(value.lower()) or aliases[value.lower()]
+        for value in mentioned if value.lower() in canonical or value.lower() in aliases))
     # A joint identifier request (e.g. inspection + batch + SKU) must describe
     # the same matched record/binding. Explicit comparisons may retrieve each
     # object separately so that their independent evidence can be compared.
-    entity_match=any if re.search(r'比较|对比|分别|各自|逐个|对照|是否(?:就是|相同|同一)|是不是(?:同一|相同)',req.question) else all
+    entity_match=any if re.search(r'比较|对比|分别|各自|逐个|对照|哪(?:台|套|款|批|个)更|相差|差多少|是否(?:就是|相同|同一)|是不是(?:同一|相同)',req.question) else all
     file_bound={identifier for asset_id in named_files for binding in scope.assets[asset_id].get('bindings',[])
         for identifier in [*binding.get('entity_ids',[]),binding.get('sku_id')] if identifier}
     strict_named=any(re.search(r'(?:只|仅)(?:依据|参考|基于|使用|用)(?:文件|资料)?\s*$',req.question[max(0,start-20):start]) for start,_ in file_spans)
@@ -130,20 +143,41 @@ def qa_candidates(req: CandidateRequest):
     from services.qa_query import requests_product_picture
     product_picture=requests_product_picture(req.question,entities,known)
     formats = req.formats or sorted({a["originalFormat"] for a in scope.assets.values() if a["scope"] == "corpus"})
+    installation_targets = set()
+    if (not named_files and len(set(entities)) == 1 and len(formats) == 1 and formats[0] in {'JPG', 'PNG', 'WEBP'}
+            and re.search(r'相对位置|安装位置|墙面|地面', req.question)):
+        subject = entities[0]
+        for asset_id, asset in scope.assets.items():
+            if asset['scope'] != 'corpus' or asset['originalFormat'] != formats[0] or 'visual' not in asset['contentTypes']:
+                continue
+            if any(
+                (binding.get('sku_id') == subject or subject in binding.get('entity_ids', []))
+                and re.search(r'whole image|整图|完整图像', binding.get('locator', ''), re.I)
+                and re.search(r'installation visible|安装(?:位置|方式|形态)', binding.get('locator', ''), re.I)
+                for binding in scope.visual_bindings(asset_id, {})
+            ):
+                installation_targets.add(asset_id)
+    loaded = registry.ensure_loaded(*snapshot)
+    suite = ProfessionalRetrieverSuite(loaded.manifest.get("indexes", []), loaded.professional_files or {},
+        cache=loaded.professional_cache if loaded.professional_cache is not None else {})
     evidence, counts = [], {}
     visual_service=TextToImageService()
-    visual_query=None
+    visual_ranking=None
     text_query=None
+    text_ranking=None
     for fmt in formats:
         for kind in ["text", "visual"]:
             if not any(a["scope"] == "corpus" and a["originalFormat"] == fmt and kind in a["contentTypes"] for a in scope.assets.values()):
                 continue
-            plan = QueryPlan(taskIntent="qa_candidates", retrievers=[kind], queryText=expanded_question if kind=='text' else visual_question,
-                contentType=kind, formats=[fmt], topK=req.per_format)
-            # A cited entity must occur in the matched text or have an explicit
-            # record/whole-image binding, not just somewhere else in the file.
-            if entities:
-                plan = plan.model_copy(update={"object_conditions": []})
+            plan = QueryPlan(taskIntent="qa_candidates", retrievers=[kind],
+                             contentType=kind, formats=[fmt], topK=req.per_format)
+            # CandidateRequest has already bounded the full question. The
+            # generated recall text can exceed the public query-plan limit.
+            plan = plan.model_copy(update={
+                "query_text": expanded_question if kind == "text" else visual_question,
+            })
+            # Cited entities must occur in the matching text or have a
+            # matching record or image binding.
             if kind == "text":
                 retriever = scope.scoped_retriever(suite._prepare("text"), "text", plan)
                 if text_query is None and retriever.dense is not None:
@@ -158,13 +192,18 @@ def qa_candidates(req: CandidateRequest):
                         _has_identifier(unit.get('payload',''),known[entity]['values']['model'])) for entity in entities)
                     and (entity_match is any or scope.matches_qa_entities(unit,entities)))
                 general_allowed=retriever.allowed_document
-                hits = retriever.search(plan, str(req.version_id), str(req.index_version_id))
+                # Candidate recall ranks all text units before applying format
+                # and source filters, so the ranking is shared by this query.
+                if text_ranking is None and plan.query_text.strip():
+                    text_ranking = retriever.rank(plan)
+                hits = retriever.search(plan, str(req.version_id), str(req.index_version_id), ranking=text_ranking)
                 if named_files:
                     targeted=[]
                     for asset_id in named_files:
                         if scope.assets[asset_id]['originalFormat']!=fmt:continue
                         retriever.allowed_document=lambda unit,asset_id=asset_id: (unit.get('asset_id') or unit.get('assetId'))==asset_id and general_allowed(unit)
-                        targeted.extend(retriever.search(plan.model_copy(update={'top_k':1}),str(req.version_id),str(req.index_version_id)))
+                        targeted.extend(retriever.search(plan.model_copy(update={'top_k':1}), str(req.version_id),
+                                                         str(req.index_version_id), ranking=text_ranking))
                     seen=set();hits=[hit for hit in [*targeted,*hits] if not (hit.evidenceId in seen or seen.add(hit.evidenceId))][:req.per_format]
             else:
                 hits = []
@@ -175,9 +214,10 @@ def qa_candidates(req: CandidateRequest):
                         entity in b.get("entity_ids", []) or entity == b.get("sku_id")
                         for entity in entities) and (entity_match is any or scope.matches_qa_entities({'metadata':{'bindings':[b]}},entities))
                         for b in scope.visual_bindings(asset_id, locator)))
-                if visual_query is None:
-                    visual_query=visual_service.encoder.encode_text(visual_question)
-                items = visual_service.search_visual(loaded, visual_question, req.per_format, allowed=allowed_visual,encoded_query=visual_query)
+                if visual_ranking is None:
+                    visual_ranking = visual_service.rank_visual(loaded, visual_question, req.per_format, exhaustive=True)
+                items = visual_service.search_visual(loaded, visual_question, req.per_format,
+                                                     allowed=allowed_visual, ranking=visual_ranking)
                 from services.professional_retrievers import _evidence
                 for rank, item in enumerate(items, 1):
                     hits.append(_evidence(version=str(req.version_id), index_version=str(req.index_version_id),
@@ -190,6 +230,8 @@ def qa_candidates(req: CandidateRequest):
                     "representationId": hit.evidenceId, "queryExpansionVersion":"snapshot-fields-6", "expandedFields":expanded_fields,
                     "textAspectQuery":text_aspect,"visualAspectQuery":visual_aspect,
                     "retrievalContentQuery":expanded_question if kind=='text' else visual_question})
+                if kind == 'visual' and installation_targets == {str(hit.assetId)}:
+                    hit.provenance['installationVisualTarget'] = 'unique-bound-installation-image-1'
                 if str(hit.assetId) in named_files:
                     hit.provenance['explicitSourcePath']=scope.assets[str(hit.assetId)]['logicalPath']
                     hit.provenance['namedSourceScopeVersion']='snapshot-file-targets-1'

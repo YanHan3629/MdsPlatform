@@ -28,6 +28,9 @@ FIELD_WORDS={
     'rated_heating_input_w':r'额定制热输入功率|制热额定输入功率',
     'rated_input_power_w':r'额定输入功率',
     'voltage_v':r'额定电压|供电电压',
+    'rated_voltage_v':r'供电|额定电压',
+    'rated_frequency_hz':r'供电|额定频率',
+    'installation_type':r'安装(?:位置|方式)|安装在|挂墙|落地',
 }
 
 def canonical(value):return json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False)
@@ -144,24 +147,29 @@ class Reader:
             'clientReadReceiptSha256':digest(bundle['clientReadReceipt']),'coverage':bundle['coverage']})
         return bundle
 
-def _scan(reader,asset,table,key,fields,*,allow_missing=False,allow_multiple=False):
+def scan_table(reader, asset, table, key_fields, fields, *, max_rows=MAX_ROWS):
     count=table.get('rowCount')
-    if type(count) is not int or count<0 or count>MAX_ROWS:raise ValueError('EVIDENCE_RECORD_SCOPE_TOO_LARGE: 该表超出本次完整记录扫描容量，不能用样本代替全范围核对。')
-    if not count and not allow_missing:raise ValueError('UNKNOWN_ENTITY: 指定来源的当前数组或工作表为空，不能生成记录值。')
+    if type(count) is not int or count<0 or count>max_rows:raise ValueError('EVIDENCE_RECORD_SCOPE_TOO_LARGE: 该表超出本次完整记录扫描容量，不能用样本代替全范围核对。')
     start=1;bundles=[];rows=[];seen=set()
     while True:
         operation={'operation':'read_table','tableId':table['tableId'],'rowStart':start,'rowEnd':2147483647,'fields':fields,'limit':32}
         bundle=reader.read(asset,operation);coverage=bundle.get('coverage',{});page=bundle.get('content',{}).get('records',[])
         if bundle.get('content',{}).get('tableId')!=table['tableId'] or coverage.get('totalRowCount')!=count or coverage.get('returnedRowCount')!=len(page):raise ValueError('EVIDENCE_RECORD_COVERAGE_MISMATCH: 实际记录表或记录数与冻结表范围不一致。')
+        anchors_by_cell = {}
+        for fact in bundle.get('facts', []):
+            if fact.get('field') in key_fields:
+                cell = (fact.get('locator', {}).get('rawRow'), fact['field'])
+                anchors_by_cell.setdefault(cell, []).append(fact)
         for row in page:
             number=row.get('rawRow')
             if type(number) is not int or number<start or number in seen:raise ValueError('EVIDENCE_RECORD_COVERAGE_MISMATCH: 行号重复或超出续读范围。')
-            anchors=[fact for fact in bundle.get('facts',[]) if fact.get('field')==key['field'] and fact.get('locator',{}).get('rawRow')==number]
-            if key['field'] in row.get('values',{}):
-                if len(anchors)!=1 or canonical(anchors[0].get('value'))!=canonical(row['values'][key['field']]):
-                    raise ValueError('EVIDENCE_RECORD_COVERAGE_MISMATCH: 实际记录键与原生字段事实不一致。')
-            elif key['field'] not in row.get('absentFields',[]):
-                raise ValueError('EVIDENCE_RECORD_COVERAGE_MISMATCH: 实际记录键的存在状态未知。')
+            for field in key_fields:
+                anchors = anchors_by_cell.get((number, field), [])
+                if field in row.get('values', {}):
+                    if len(anchors)!=1 or canonical(anchors[0].get('value'))!=canonical(row['values'][field]):
+                        raise ValueError('EVIDENCE_RECORD_COVERAGE_MISMATCH: 实际记录键与原生字段事实不一致。')
+                elif field not in row.get('absentFields', []):
+                    raise ValueError('EVIDENCE_RECORD_COVERAGE_MISMATCH: 实际记录键的存在状态未知。')
             seen.add(number);rows.append(row)
         bundles.append(bundle)
         if not coverage.get('hasMore'):
@@ -171,6 +179,13 @@ def _scan(reader,asset,table,key,fields,*,allow_missing=False,allow_multiple=Fal
         if not page or type(next_row) is not int or next_row<=page[-1]['rawRow']:raise ValueError('EVIDENCE_RECORD_COVERAGE_MISMATCH: 缺少有效的实际续读位置。')
         start=next_row
     if len(rows)!=count:raise ValueError('EVIDENCE_RECORD_SCAN_INCOMPLETE: 不完整记录不能证明键唯一。')
+    return rows, bundles
+
+
+def _scan(reader,asset,table,key,fields,*,allow_missing=False,allow_multiple=False,max_rows=MAX_ROWS):
+    if type(table.get('rowCount')) is int and table['rowCount'] == 0 and not allow_missing:
+        raise ValueError('UNKNOWN_ENTITY: 指定来源的当前数组或工作表为空，不能生成记录值。')
+    rows, bundles = scan_table(reader, asset, table, {key['field']}, fields, max_rows=max_rows)
     matches=[row for row in rows if key['field'] in row['values'] and same_key(row['values'][key['field']],key)]
     if not matches:
         if allow_missing:return None,bundles

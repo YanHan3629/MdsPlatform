@@ -12,6 +12,12 @@ CITATION=re.compile(r'\[来源\s*(\d+)\]')
 QUANTITY=re.compile(r'(?<![\d./⁄])('+FRACTION+'|'+NUMBER+'|'+CJK_NUMBER+r')\s*'
     r'(mm[23]?|cm[23]?|m[23]?|in|ft|毫米|厘米|英寸|英尺|平方毫米|平方厘米|立方毫米|立方厘米|平方米|立方米|米|kg|公斤)(?![A-Za-z])',re.I)
 UNITS={'毫米':'mm','厘米':'cm','米':'m','英寸':'in','英尺':'ft','平方毫米':'mm2','平方厘米':'cm2','平方米':'m2','立方毫米':'mm3','立方厘米':'cm3','立方米':'m3','公斤':'kg'}
+STEP_LABEL = re.compile(r'#\s*([1-9][0-9]{0,17})(?![0-9])')
+STEP_LENGTH = r'(' + NUMBER + r')\s*(毫米|厘米|分米|千米|微米|纳米|米|km|dm|cm|mm|[µμ]m|nm|m)(?![A-Za-z])'
+STEP_DIMENSION = re.compile(r'(半径|(?<!孔)(?<!孔的)直径|\bradius\b|\bdiameter\b|\b[rd]\b)'
+    r'(?:\s*\(\s*[rd]\s*\))?\s*(?:为|是|=|:|：|\bis\b|\bequals\b)?\s*' + STEP_LENGTH, re.I)
+STEP_QUANTITY = re.compile(r'(?<![A-Za-z0-9_.])' + STEP_LENGTH, re.I)
+STEP_UNITS = {**UNITS, '分米': 'dm', '千米': 'km', '微米': 'μm', '纳米': 'nm', 'µm': 'μm'}
 
 def _unit(value):return UNITS.get(value,str(value).lower().replace('²','2').replace('³','3'))
 def _numbers(value):
@@ -44,6 +50,62 @@ def _supported(value,unit,sources,fields=None,approximate=False):
             values=[fact['numberSourceExpression']] if fact.get('numberSourceExpression') is not None else list(_numbers(fact['value']))
             if any(_equal(value,item,approximate) for item in values):identifiers.append(fact['factId'])
     return sorted(set(identifiers))
+
+
+def validate_step_cylinders(answer, sources):
+    """Bind each value and its role to a cited physical-file entity."""
+    expected = {}
+    required = set()
+    unit_labels = set()
+    for index, source in enumerate(sources, 1):
+        dimensions = source.provenance.get('stepCylinderDimensions')
+        if not dimensions:
+            continue
+        unit_labels.update(source.evidence_bundle.get('content', {}).get('lengthUnitEntityIds', []))
+        for fact in source.evidence_bundle['facts']:
+            if fact['factId'] not in source.fact_ids:
+                continue
+            label, dimension = fact['field'].split(' ', 1)
+            key = (index, label, dimension)
+            value = fact.get('numberSourceExpression') or fact['value']
+            expected[key] = (Decimal(str(value)), STEP_UNITS.get(fact['unit'], fact['unit']), fact['factId'])
+            if dimension in dimensions:
+                required.add(key)
+    observed = {}
+    section_label = None
+    for line in answer.splitlines():
+        citations = {int(value) for value in CITATION.findall(line)}
+        clean = unicodedata.normalize('NFKC', CITATION.sub('', line)).replace('**', '').replace('`', '')
+        labels = [(match.start(), '#' + match[1]) for match in STEP_LABEL.finditer(clean)
+                  if '#' + match[1] not in unit_labels]
+        if labels:
+            section_label = labels[0][1] if len(labels) == 1 else None
+        first_dimension = STEP_DIMENSION.search(clean)
+        heading_applies = bool(first_dimension and clean[:first_dimension.start()].strip(' -*0123456789.、)\t') in {'', '其'})
+        quantities = set()
+        for match in STEP_DIMENSION.finditer(clean):
+            dimension = 'radius' if match[1].lower() in {'半径', 'radius', 'r'} else 'diameter'
+            unit = STEP_UNITS.get(match[3].lower(), match[3].lower())
+            preceding = [label for position, label in labels if position < match.start()]
+            label = preceding[-1] if preceding else section_label if labels or heading_applies else None
+            matches = [key for key in expected if key[0] in citations and key[1] == label and key[2] == dimension]
+            if len(matches) != 1 or len(match[2]) > 64:
+                return {'accepted': False, 'reason': 'STEP_ENTITY_DIMENSION_OR_UNIT_MISMATCH'}
+            try:
+                same = expected[matches[0]][:2] == (Decimal(match[2]), unit)
+            except InvalidOperation:
+                same = False
+            if not same:
+                return {'accepted': False, 'reason': 'STEP_ENTITY_DIMENSION_OR_UNIT_MISMATCH'}
+            quantities.add((match.start(2), match.end(3)))
+            observed[matches[0]] = expected[matches[0]][2]
+        if any(match.span() not in quantities for match in STEP_QUANTITY.finditer(clean)):
+            return {'accepted': False, 'reason': 'STEP_QUANTITY_WITHOUT_ENTITY_DIMENSION'}
+    if not required or not required <= observed.keys():
+        return {'accepted': False, 'reason': 'STEP_ENTITY_DIMENSIONS_INCOMPLETE'}
+    return {'accepted': True, 'citedSourceIndices': sorted({key[0] for key in observed}),
+            'validatedFactIds': sorted(observed.values()), 'scope': 'cited STEP entity, dimension role, exact value and unit'}
+
 
 def validate(answer,sources,*,truncated=False):
     engineering=[source for source in sources if source.provenance.get('engineeringReadVersion')]

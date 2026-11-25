@@ -254,15 +254,9 @@ class TextRetriever:
         if self.dense is not None and dense_model_version not in {None, MODEL_VERSION, "cpu-hashed-char-ngram-1.0"}:
             raise ValueError("Unsupported Chinese text embedding model version")
 
-    def search(self, plan: QueryPlan, version: str, index_version: str) -> list[Evidence]:
+    def rank(self, plan: QueryPlan):
         ranks: dict[int, float] = defaultdict(float)
         raw: dict[int, dict[str, float]] = defaultdict(dict)
-        if not plan.query_text.strip():
-            documents = (self.dense_meta or self.lexical or {}).get("documents", [])
-            selected = [d for d in documents if not hasattr(self,"allowed_document") or self.allowed_document(d["unit"])]
-            return [_evidence(version=version,index_version=index_version,space="text.hybrid.zh",asset_id=d["unit"]["asset_id"],
-                locator=d["unit"]["locator"],facts={"text":d["text"]},score=None,score_type="metadata_match",
-                preview={"logicalPath":d["unit"]["logical_path"]}) for d in selected[:plan.top_k]]
         if self.lexical:
             tokens = Counter(_tokens(plan.query_text))
             docs = self.lexical["documents"]
@@ -293,9 +287,18 @@ class TextRetriever:
                 if doc_id < 0: continue
                 ranks[int(doc_id)] += 1 / (60 + rank)
                 raw[int(doc_id)]["cosine"] = float(score)
+        return sorted(ranks.items(), key=lambda item: item[1], reverse=True), raw
+
+    def search(self, plan: QueryPlan, version: str, index_version: str, *, ranking=None) -> list[Evidence]:
         documents = (self.dense_meta or self.lexical or {}).get("documents", [])
+        if not plan.query_text.strip():
+            selected = [d for d in documents if not hasattr(self,"allowed_document") or self.allowed_document(d["unit"])]
+            return [_evidence(version=version,index_version=index_version,space="text.hybrid.zh",asset_id=d["unit"]["asset_id"],
+                locator=d["unit"]["locator"],facts={"text":d["text"]},score=None,score_type="metadata_match",
+                preview={"logicalPath":d["unit"]["logical_path"]}) for d in selected[:plan.top_k]]
+        ranks, raw = self.rank(plan) if ranking is None else ranking
         result = []
-        for doc_id, fused in sorted(ranks.items(), key=lambda item: item[1], reverse=True):
+        for doc_id, fused in ranks:
             document = documents[doc_id]
             unit = document["unit"]
             if hasattr(self, "allowed_document") and not self.allowed_document(unit):

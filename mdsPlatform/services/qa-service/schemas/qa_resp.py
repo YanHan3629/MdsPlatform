@@ -60,6 +60,9 @@ class QAMeta(BaseModel):
     retrieval_support: float = 0.0
     data_quality: float = 0.0
     fact_confidence_source: str = "evidence_programmatic"
+    profile: str = "standard"
+    queue_ms: float = 0.0
+    finish_reason: Optional[str] = None
     planning_ms: float = 0.0
     retrieval_ms: float = 0.0
     generation_ms: float = 0.0

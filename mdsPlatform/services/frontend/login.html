@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>登录 · 产业链数据空间平台</title>
+  <link rel="stylesheet" href="./styles.css?v=f04-r59" />
+  <link rel="stylesheet" href="./sign-in.css?v=1" />
+</head>
+<body>
+  <main class="sign-in" id="signIn">
+    <section class="card sign-in-card" aria-labelledby="signInTitle">
+      <div class="logo" aria-hidden="true">DS</div>
+      <h1 id="signInTitle">产业链数据空间平台</h1>
+      <p class="sign-in-description">使用你的数据空间账号登录。</p>
+      <p id="signInStatus" role="status" tabindex="-1">正在检查会话…</p>
+      <button id="signInRetry" type="button" class="btn" hidden>重新验证会话</button>
+      <form id="signInForm" class="stack-form" method="post" hidden inert>
+        <label>账号<input name="userName" autocomplete="username" required /></label>
+        <label>密码<input name="password" type="password" autocomplete="current-password" required /></label>
+        <button class="btn primary" type="submit">登录</button>
+      </form>
+      <noscript>请启用 JavaScript 后重新打开登录页。</noscript>
+    </section>
+    <dialog id="identityActivationDialog" class="identity-dialog" aria-labelledby="activationTitle">
+      <form id="identityActivationForm" class="form-grid" method="post">
+        <h2 id="activationTitle" class="full">激活账号并设置新密码</h2>
+        <p id="identityActivationUser" class="full"></p>
+        <label class="full">新密码<input name="newPassword" type="password" minlength="8" autocomplete="new-password" required /></label>
+        <label class="full">再次输入新密码<input name="confirmPassword" type="password" minlength="8" autocomplete="new-password" required /></label>
+        <p class="full">至少 8 位且包含任意两类字符。可用符号：-_@*#$%&。</p>
+        <p id="identityActivationStatus" class="full" role="status"></p>
+        <button class="btn primary" type="submit">设置新密码并激活</button>
+        <button id="identityCancelActivation" class="btn" type="button">取消激活</button>
+      </form>
+    </dialog>
+  </main>
+  <script src="./identity-session.js?v=f05-r2" defer></script>
+  <script src="./sign-in.js?v=2" defer></script>
+</body>
+</html>

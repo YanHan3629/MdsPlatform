@@ -10,7 +10,7 @@ from core.config import settings
 from schemas.qa_resp import QAResponse,QAMeta,SourceItem,RetrievedItem
 from services.answer_lineage import Catalogue,LineageError
 from services.claim_protocol import VERSION,bounded_grammar,messages,finish
-from services.evidence_policy import POLICY
+from core.request_budget import current_budget
 from services.evidence_trace import current
 from adapters.vllm_client import VllmClientError
 
@@ -24,6 +24,8 @@ def eligible(sources,images,*,task_type,status):
 
 def answer(service,*,question,sources,items,scope,diagnostics,started,retrieval_ms,output_tokens,temperature):
     trace=current();generation_started=time.perf_counter();result={};presentation=None;error=None
+    finish_reason = None
+    tokenize_ms = 0.0
     diagnostics.update(generationPolicy=VERSION,actualContextEvidenceIds=[source.evidence_id for source in sources])
     try:
         if trace is None:raise LineageError('CLAIM_AUDIT_REQUIRED')
@@ -48,18 +50,24 @@ def answer(service,*,question,sources,items,scope,diagnostics,started,retrieval_
         trace.event('claimInputCatalogue',{'version':VERSION,'sources':catalogue.sources,
             'requiredFactIds':catalogue.required_fact_ids})
         trace.generation_inputs(sources,[])
+        tokenize_started = time.perf_counter()
         count=service.client.tokenize_messages(body)
-        limit=min(POLICY['maxContextTokens'],int(count.get('max_model_len',POLICY['maxContextTokens'])))
+        tokenize_ms = (time.perf_counter() - tokenize_started) * 1000
+        context_limit = current_budget().profile['contextTokens']
+        limit=min(context_limit,int(count.get('max_model_len') or context_limit))
         diagnostics.update(promptTokens=int(count['count']),outputReserved=output_tokens)
         if int(count['count'])+output_tokens>limit:raise LineageError('CLAIM_CONTEXT_BUDGET_EXCEEDED')
         service._get_search_client().check_scope(*scope)
         result=service.client.chat_completions(messages=body,max_tokens=output_tokens,temperature=temperature,
-            presence_penalty=0.0,logprobs=True,structured_outputs=grammar)
+            presence_penalty=0.0,logprobs=False,structured_outputs=grammar)
         choices=result.get('choices',[])
         if len(choices)!=1:raise LineageError('CLAIM_MODEL_RESPONSE_UNAVAILABLE')
         choice=choices[0]
+        finish_reason = choice.get('finish_reason')
+        if finish_reason not in {'stop', 'length'}:
+            raise LineageError('CLAIM_MODEL_RESPONSE_INCOMPLETE')
         presentation=finish(choice.get('message',{}).get('content',''),catalogue,trace.data['modelCalls'],
-            question=question,truncated=choice.get('finish_reason')=='length')
+            question=question,truncated=finish_reason=='length')
         if not presentation['claims']:raise LineageError('CLAIM_NO_SUPPORTED_SELECTION')
         trace.event('claimProtocolResult',presentation)
     except VllmClientError as failure:
@@ -115,4 +123,5 @@ def answer(service,*,question,sources,items,scope,diagnostics,started,retrieval_
             prompt_tokens=usage.get('prompt_tokens',diagnostics.get('promptTokens',0)),completion_tokens=usage.get('completion_tokens',0),
             total_tokens=usage.get('total_tokens',0),request_id=result.get('id'),retrieval_type='curated',
             retrieval_status=retrieval_status,generation_status=generation_status,evidence_selection=diagnostics,
+            finish_reason=finish_reason,professional_timings_ms={'promptTokenization': round(tokenize_ms, 3)},
             retrieval_ms=retrieval_ms,generation_ms=round((time.perf_counter()-generation_started)*1000,3)))

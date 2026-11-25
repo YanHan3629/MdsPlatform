@@ -33,10 +33,10 @@ def workspace_job_name(root, explicit):
 
 def jobs(expected_name=None):
     result = []
-    for line in output(['squeue', '-h', '-u', str(os.getuid()), '-o', '%i|%j|%T|%N']).splitlines():
-        job, name, state, node = line.split('|')
+    for line in output(['squeue', '-h', '-u', str(os.getuid()), '-o', '%i|%j|%T|%N|%P']).splitlines():
+        job, name, state, node, partition = line.split('|')
         if (name == expected_name if expected_name is not None else name.startswith('mds-')):
-            result.append({'job': job, 'name': name, 'state': state, 'node': node})
+            result.append({'job': job, 'name': name, 'state': state, 'node': node, 'partition': partition})
     return result
 
 
@@ -46,6 +46,8 @@ def main():
     parser.add_argument('--job', type=int)
     parser.add_argument('--minutes', type=int, default=30)
     parser.add_argument('--cpu-only', action='store_true')
+    parser.add_argument('--gpu-type', choices=('L40', 'A800'))
+    parser.add_argument('--qa-profile', choices=('standard', 'long'))
     parser.add_argument('--workspace-root', help='Absolute private deployment directory; defaults to the current user home')
     args = parser.parse_args()
     home = selected_workspace(args.workspace_root)
@@ -57,23 +59,36 @@ def main():
             parser.error('minutes must be 1 through 120')
         if active:
             raise RuntimeError('An MDS job is already queued/running; inspect or stop it first')
+        if args.cpu_only and (args.gpu_type or args.qa_profile):
+            parser.error('GPU type and QA profile apply to GPU sessions')
+        gpu_type = args.gpu_type or 'L40'
+        profile = args.qa_profile or 'standard'
+        gpu = None
+        if not args.cpu_only:
+            capabilities = json.loads((app / 'source/qa-service/qa-capabilities.json').read_text())
+            gpu = capabilities['gpuProfiles'][gpu_type]
         wall = args.minutes + 15
         command = ['sbatch', '--parsable', '-A', 'p_p08162',
             '--qos=cpu-500_core-l40-8_card-a800-8_card', '-N1', '-n1',
-            '-p', 'amd' if args.cpu_only else 'L40', '-c', '8' if args.cpu_only else '7',
-            '--mem=24G' if args.cpu_only else '--mem=48G',
+            '-p', 'amd' if args.cpu_only else gpu['partition'],
+            '-c', '8' if args.cpu_only else str(gpu['cpus']),
+            '--mem=24G' if args.cpu_only else '--mem=%dG' % gpu['memoryGiB'][profile],
             '--time=%02d:%02d:00' % (wall // 60, wall % 60), '--deadline=now+12hours',
             '--signal=B:TERM@60', '-J', job_name, '-o', str(app / 'session-%j.log')]
         if not args.cpu_only:
-            command.append('--gres=gpu:l40:1')
+            command.append('--gres=' + gpu['gres'])
         command.extend([str(app / 'run_platform.sh'), '--snapshot', str(home / 'backup/mds-platform/snapshot-01'),
                         '--duration', str(args.minutes * 60)])
         if args.workspace_root is not None:
             command.extend(['--workspace-root', str(home)])
         if args.cpu_only:
             command.append('--cpu-only')
+        else:
+            command.extend(['--gpu-type', gpu_type, '--qa-profile', profile])
         job = output(command)
-        print(json.dumps({'job': job, 'sessionMinutes': args.minutes, 'wallMinutes': wall, 'cpuOnly': args.cpu_only, 'workspaceRoot': str(home), 'jobName': job_name}))
+        print(json.dumps({'job': job, 'sessionMinutes': args.minutes, 'wallMinutes': wall, 'cpuOnly': args.cpu_only, 'workspaceRoot': str(home), 'jobName': job_name,
+                          'gpuType': gpu_type if gpu else None, 'qaProfile': profile if gpu else None,
+                          'memoryGiB': gpu['memoryGiB'][profile] if gpu else 24}))
         return
     if args.action == 'status' and args.job is None:
         print(json.dumps(active))

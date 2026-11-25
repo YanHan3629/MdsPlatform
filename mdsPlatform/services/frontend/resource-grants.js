@@ -181,7 +181,7 @@
    clearReview();await auth.policyChanged();if(typeof toast==='function')toast(pending.action==='CREATE'?'授权策略已创建；访问仍按业务操作和当前范围校验。':'本条授权已撤销；其他授权或合同可能仍有效。');
   }catch(error){report(error,c);}
  }
- document.addEventListener('DOMContentLoaded',()=>{
+ window.addEventListener('dataspace-business-ready',()=>{
   for(const id of ['resourceGrantsOpen','resourceGrantsOpenManagement'])if($(id))$(id).onclick=()=>void open();
   $('resourceGrantClose').onclick=close;$('resourceGrantDialog').addEventListener('close',clear);
   $('resourceGrantDialog').addEventListener('cancel',event=>{event.preventDefault();close();});

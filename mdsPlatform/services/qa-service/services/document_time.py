@@ -8,6 +8,23 @@ VERSION='document-time-difference-2026-10-22.1'
 TIMESTAMP=r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})'
 
 
+def elapsed_microseconds(start_value, end_value):
+    values = (start_value, end_value)
+    if any(not isinstance(value, str) or not re.fullmatch(TIMESTAMP, value) for value in values):
+        raise ValueError('EVIDENCE_TIME_INVALID: 需要两个带时区的原生时间')
+    if any(re.search(r'\.\d{7,}', value) for value in values):
+        raise ValueError('EVIDENCE_TIME_PRECISION_UNSUPPORTED: 本工具尚不支持高于微秒的时间精度')
+    try:
+        start, end = (datetime.fromisoformat(value.replace('Z', '+00:00')) for value in values)
+    except ValueError as error:
+        raise ValueError('EVIDENCE_TIME_INVALID: 原生时间表达无效') from error
+    delta = end - start
+    micros = (delta.days * 86400 + delta.seconds) * 1000000 + delta.microseconds
+    if micros < 0:
+        raise ValueError('EVIDENCE_TIME_ORDER_INVALID: 来源结束时间早于开始时间')
+    return micros
+
+
 def calculate_duration(question,evidence):
     positive=re.sub(r'(?:不要|不用|不能|无需|不应|请勿|而非|而不是)[^，。；;！？?\n]*',' ',question)
     if not re.search(r'相差|间隔|经过|持续|时长|多长|多少(?:分钟|小时|秒)',positive):return None
@@ -23,12 +40,7 @@ def calculate_duration(question,evidence):
     if not options or len(options)>1 and options[0][0]==options[1][0]:
         raise ValueError('NEEDS_CLARIFICATION: 未唯一定位到与所问时间角色对应的两个原生时区时间，不能由模型代算。')
     _,parent,values,label=options[0]
-    if any(re.search(r'\.\d{7,}',value) for value in values):
-        raise ValueError('EVIDENCE_TIME_PRECISION_UNSUPPORTED: 本工具尚不支持高于微秒的时间精度')
-    try:start,end=[datetime.fromisoformat(value.replace('Z','+00:00')) for value in values]
-    except ValueError as error:raise ValueError('EVIDENCE_TIME_INVALID: 原生时间表达无效') from error
-    delta=end-start;micros=(delta.days*86400+delta.seconds)*1000000+delta.microseconds
-    if micros<0:raise ValueError('EVIDENCE_TIME_ORDER_INVALID: 来源结束时间早于开始时间')
+    micros=elapsed_microseconds(*values)
     _,unit,divisor=units[0];number=Fraction(micros,divisor);display=str(number.numerator) if number.denominator==1 else f'{number.numerator}/{number.denominator}'
     original=parent['nativeBundle'];inputs={'start':values[0],'end':values[1],'field':label,'unit':unit,
         'inputFactIds':[fact['factId'] for fact in original['facts']],'inputReadId':original['readId'],

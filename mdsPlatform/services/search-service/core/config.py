@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     mm_internal_token: str = ""
     request_timeout_seconds: int = 120
     max_loaded_indexes: int = Field(default=1, ge=1)
+    max_loaded_capabilities: int | None = Field(default=None, ge=1)
+    qa_candidate_max_question_characters: int = Field(default=65536, ge=1)
 
 
 settings = Settings()

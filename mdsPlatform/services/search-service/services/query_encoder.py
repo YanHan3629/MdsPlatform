@@ -45,21 +45,17 @@ class QueryEncoder:
         return F.normalize(features, dim=-1)
 
     def encode_text(self, text: str):
-        prompt_features = []
-        for prompt in self._prompt_variants(text):
-            inputs = self.processor(
-                text=prompt,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=77,
-            )
-            inputs = {k: v.to(self.device) for k, v in inputs.items() if hasattr(v, "to")}
-            with torch.no_grad():
-                features = self.model.get_text_features(**inputs)
-                prompt_features.append(self._normalize(features))
-        features = torch.mean(torch.cat(prompt_features, dim=0), dim=0, keepdim=True)
-        features = self._normalize(features)
+        inputs = self.processor(
+            text=self._prompt_variants(text),
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=77,
+        )
+        inputs = {name: value.to(self.device) for name, value in inputs.items() if hasattr(value, "to")}
+        with torch.inference_mode():
+            prompt_features = self._normalize(self.model.get_text_features(**inputs))
+            features = self._normalize(prompt_features.mean(dim=0, keepdim=True))
         return features.detach().cpu().numpy()
 
     def encode_image_bytes(self, content: bytes):

@@ -15,17 +15,23 @@ class TextToImageService:
             self._encoder = QueryEncoder()
         return self._encoder
 
-    def search_visual(self, loaded, query, top_k, allowed=None, encoded_query=None):
-        """Image representations only; preserve page/frame identity and preview location."""
-        import json
+    def rank_visual(self, loaded, query, top_k, *, exhaustive=False, encoded_query=None):
         if loaded.image_index is None or loaded.image_index.ntotal == 0:
-            return []
+            return (), ()
         if query:
             vector = encoded_query if encoded_query is not None else self.encoder.encode_text(query)
-            scores, indices = FaissRetriever.search(loaded.image_index, vector, loaded.image_index.ntotal if allowed else min(top_k, loaded.image_index.ntotal))
+            count = loaded.image_index.ntotal if exhaustive else min(top_k, loaded.image_index.ntotal)
+            return FaissRetriever.search(loaded.image_index, vector, count)
+        return [0.0] * len(loaded.image_metadata), range(len(loaded.image_metadata))
+
+    def search_visual(self, loaded, query, top_k, allowed=None, encoded_query=None, *, ranking=None):
+        """Image representations only; preserve page/frame identity and preview location."""
+        import json
+        if ranking is None:
+            scores, indices = self.rank_visual(loaded, query, top_k, exhaustive=bool(allowed),
+                                               encoded_query=encoded_query)
         else:
-            indices = range(len(loaded.image_metadata))
-            scores = [0.0] * len(loaded.image_metadata)
+            scores, indices = ranking
         result = []
         for score, index in zip(scores, indices):
             if index < 0:

@@ -10,7 +10,8 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from services.document_contract import READ_VERSION as DOCUMENT_READ_VERSION,context_kind as document_context_kind
+from core.request_budget import CAPABILITIES
+from services.document_contract import PAGE_SELECTION, READ_VERSION as DOCUMENT_READ_VERSION, context_kind as document_context_kind
 from services.json_contract import READ_VERSION as JSON_READ_VERSION
 
 POLICY = json.loads(Path(__file__).with_suffix(".json").read_text(encoding="utf-8"))
@@ -35,15 +36,17 @@ def format_intent(question):
     allowed, preferred = [], []
     for clause in re.split(r"[。；;\n]", text):
         format_word=r'(?<![A-Za-z0-9_.-])(?:CSV|JSONL?|XLSX|TXT|PDF|PNG|JPG|JPEG|WEBP|SVG|OBJ|STEP|STP)(?![A-Za-z0-9_.-])'
-        source_scope=bool(re.search(format_word+r'(?:\s*(?:和|与|及|、)\s*'+format_word+r')*\s*(?:文件|记录|数据|资料)?\s*(?:中|里|内)',clause,re.I))
-        source = source_scope or bool(re.search(r"依据|根据|基于|参考|结合|来源|资料|文件|优先|只用|仅用|只看|仅看", clause))
-        if not source:
-            continue
+        source_scope=bool(re.search(format_word+r'(?:\s*(?:和|与|及|、)\s*'+format_word+r')*\s*(?:文件|记录|数据|资料|示意图|图片|图像|照片)?\s*(?:中|里|内)',clause,re.I))
         # A page image is a representation of the named PDF, not a new
         # raster-only source restriction. Keep explicit conflicting formats.
         named_pdf_page=bool(re.search(
-            r'(?:只|仅)?(?:看|读|阅读|依据|参考|使用)\s*[\w./-]+\.pdf(?:\s*的)?\s*第\s*[0-9一二三四五六七八九十百]+\s*页',
+            r'(?:只|仅)?(?:看|读|阅读|依据|根据|参考|使用)\s*(?:文件\s*)?[\w./-]+\.pdf(?:\s*的)?\s*'
+            r'(?:'+PAGE_SELECTION+r'|第\s*[一二三四五六七八九十百]+\s*页)',
             clause,re.I))
+        source = named_pdf_page or source_scope or bool(re.search(
+            r"依据|根据|基于|参考|结合|来源|资料|文件|优先|只用|仅用|只看|仅看", clause))
+        if not source:
+            continue
         # A filename cannot cancel an explicit, conflicting format constraint.
         clause=re.sub(r'[\w.-]+\.(?:jsonl?|csv|xlsx|txt|pdf|png|jpe?g|webp|svg|obj|stp|step)\b',' ',clause,flags=re.I)
         # In "PNG 图片", 图片 describes the stated carrier; it must not
@@ -141,12 +144,28 @@ def _literal_record_lookup(question, record, fields):
     return not re.search(r'[A-Za-z0-9\u4e00-\u9fff]', residual)
 
 
-def admit(question, item):
+def _matches_installation_image_request(question, source_format):
+    return (source_format in {'JPG', 'PNG'} and format_intent(question).allowed == (source_format,)
+            and bool(re.search(r'相对位置|安装位置|墙面|地面', question)))
+
+
+def admit(question, item, *, scoped_filters=None):
     provenance, facts = item.get("provenance", {}), item.get("facts", {})
     if not provenance.get("originalFormat") or not item.get("dataVersion") or not item.get("indexVersion"):
         return None, "INCOMPLETE_PROVENANCE"
     if provenance.get("scope") == "catalog":
         return None, "CATALOG_IS_NOT_BUSINESS_EVIDENCE"
+    if item.get('scoreType') == 'verified_business_record':
+        bundle = item.get('nativeBundle', {})
+        identity = bundle.get('identity', {})
+        if (not provenance.get('verifiedBusinessRecord') or not bundle.get('readId') or not bundle.get('facts')
+                or bundle.get('coverage', {}).get('returnedRowCount') != 1
+                or identity.get('assetId') != item.get('assetId')
+                or identity.get('versionId') != item.get('dataVersion')
+                or identity.get('indexVersionId') != item.get('indexVersion')
+                or identity.get('sourceSha256') != provenance.get('sourceSha256')):
+            return None, 'BUSINESS_NATIVE_RECORD_NOT_VERIFIED'
+        return POLICY['metadata']['exactRoleUtility'], 'AUTHORIZED_EXACT_BUSINESS_RECORD'
     if item.get('scoreType')=='verified_record_read':
         from services.answer_lineage import source_dict
         from services.record_claim_view import validate_source
@@ -179,16 +198,43 @@ def admit(question, item):
                 or not re.search(r'(?<![A-Za-z0-9_.-])'+re.escape(identity.get('logicalPath','').rsplit('/',1)[-1])+r'(?![A-Za-z0-9_.-])',question)):
             return None,'JSON_READ_NOT_VERIFIED'
         return POLICY['metadata']['exactRoleUtility'],'EXPLICIT_AUTHORIZED_JSON_FIELD_READ'
-    if item.get('scoreType')=='verified_engineering_read':
-        from services.engineering_evidence_plan import READ_VERSIONS
+    if item.get('scoreType') in {'verified_engineering_read', 'verified_step_cylinder_read'}:
+        from services.engineering_evidence_plan import READ_VERSIONS, requested_engineering_format
         bundle=item.get('nativeBundle',{});identity=bundle.get('identity',{})
-        if (provenance.get('engineeringReadVersion') not in READ_VERSIONS
-                or provenance.get('validatedEngineeringQuestion')!=question or not bundle.get('readId')
+        step_cylinders = item['scoreType'] == 'verified_step_cylinder_read'
+        name = identity.get('logicalPath', '').rsplit('/', 1)[-1]
+        named = bool(name and re.search(r'(?<![A-Za-z0-9_.-])' + re.escape(name) + r'(?![A-Za-z0-9_.-])', question, re.I))
+        scoped = (provenance.get('engineeringTargetSelection') == 'single-authorized-source-of-requested-format'
+                  and requested_engineering_format(question) == identity.get('originalFormat'))
+        if (provenance.get('validatedEngineeringQuestion')!=question or not bundle.get('readId')
                 or identity.get('assetId')!=item.get('assetId') or identity.get('versionId')!=item.get('dataVersion')
                 or identity.get('indexVersionId')!=item.get('indexVersion') or identity.get('sourceSha256')!=provenance.get('sourceSha256')
                 or identity.get('logicalPath')!=provenance.get('explicitSourcePath')
-                or not re.search(r'(?<![A-Za-z0-9_.-])'+re.escape(identity.get('logicalPath','').rsplit('/',1)[-1])+r'(?![A-Za-z0-9_.-])',question,re.I)):
+                or not (named or scoped)):
             return None,'ENGINEERING_READ_NOT_VERIFIED'
+        if step_cylinders:
+            from services.engineering_evidence_plan import verify_step_cylinder_context
+            from services.read_receipt import verify
+            try:
+                receipt = verify(bundle)
+                verify_step_cylinder_context(bundle, item['nativeModelContext'], item['modelFactIds'])
+            except (ValueError, TypeError, KeyError, ArithmeticError):
+                return None, 'STEP_CYLINDER_READ_NOT_VERIFIED'
+            labels = bundle.get('locator', {}).get('entityIds', [])
+            dims = provenance.get('stepCylinderDimensions', [])
+            facts = bundle.get('facts', [])
+            if (identity.get('originalFormat') != 'STEP' or bundle.get('recipeVersion') != 'step-part21-cylinder-declarations-1'
+                    or bundle.get('representationKind') != 'step_cylindrical_surface_declarations'
+                    or not labels or not dims or not set(dims) <= {'radius', 'diameter'}
+                    or receipt['operation'] != {'operation': 'read_step_cylinders', 'entityIds': labels}
+                    or receipt['operation'] != provenance.get('nativeReadOperation')
+                    or len(facts) != 2 * len(labels) or {f['field'] for f in facts} != {
+                        label + ' ' + dimension for label in labels for dimension in ('radius', 'diameter')}
+                    or {f['factId'] for f in facts} != set(item.get('modelFactIds', []))):
+                return None, 'STEP_CYLINDER_READ_NOT_VERIFIED'
+            return POLICY['metadata']['exactRoleUtility'], 'EXPLICIT_AUTHORIZED_STEP_CYLINDER_READ'
+        if provenance.get('engineeringReadVersion') not in READ_VERSIONS:
+            return None, 'ENGINEERING_READ_NOT_VERIFIED'
         if provenance.get('engineeringVisualRead'):
             view=item.get('nativeRegisteredView',{})
             if not view.get('imageId') or view.get('sourceSha256')!=identity.get('sourceSha256') or not view.get('outputSha256'):
@@ -198,12 +244,41 @@ def admit(question, item):
         return POLICY['metadata']['exactRoleUtility'],'EXPLICIT_AUTHORIZED_ENGINEERING_READ'
     if item.get('scoreType') in {'verified_document_visual_read','verified_document_text_read'}:
         bundle=item.get('nativeBundle',{});identity=bundle.get('identity',{})
+        name = identity.get('logicalPath', '').rsplit('/', 1)[-1]
+        named = bool(name and re.search(r'(?<![A-Za-z0-9_.-])' + re.escape(name) + r'(?![A-Za-z0-9_.-])', question, re.I))
+        installation = (provenance.get('installationVisualTarget') in {
+                            'unique-bound-installation-image-1', 'single-current-file-locator-1'}
+                        and item.get('scoreType') == 'verified_document_visual_read'
+                        and _matches_installation_image_request(question, identity.get('originalFormat')))
+        product_document = False
+        if provenance.get('productDocumentAnchor'):
+            from services.document_evidence_plan import verify_product_document_anchor
+            product_document = verify_product_document_anchor(question, identity, provenance['productDocumentAnchor'])
+        maintenance = False
+        if provenance.get('maintenanceImageTopic') and provenance.get('documentImageOnly'):
+            from services.document_evidence_plan import maintenance_image_topic
+            maintenance = (item.get('scoreType') == 'verified_document_visual_read'
+                           and identity.get('originalFormat') in {'JPG', 'PNG'}
+                           and bundle.get('representationKind') == 'document_page'
+                           and provenance.get('documentFullView')
+                           and (item.get('nativeRegionRequest') or {}).get('bbox') == bundle.get('locator', {}).get('bbox')
+                           and provenance['maintenanceImageTopic'] == maintenance_image_topic(question))
+        scoped_raster = False
+        if provenance.get('scopedRasterObservation') and provenance.get('documentImageOnly') and scoped_filters is not None:
+            from services.document_evidence_plan import scoped_raster_observation_sources
+            candidates = scoped_raster_observation_sources(question, scoped_filters, format_intent(question)) or []
+            scoped_raster = (item['scoreType'] == 'verified_document_visual_read'
+                             and bundle.get('representationKind') == 'document_page'
+                             and provenance.get('documentFullView')
+                             and (item.get('nativeRegionRequest') or {}).get('bbox') == bundle.get('locator', {}).get('bbox')
+                             and any(asset['assetId'] == identity.get('assetId') and asset['logicalPath'] == identity.get('logicalPath')
+                                     and asset['originalFormat'] == identity.get('originalFormat') for asset in candidates))
         if (provenance.get('documentReadVersion')!=DOCUMENT_READ_VERSION
                 or provenance.get('validatedDocumentQuestion')!=question or not bundle.get('readId')
                 or identity.get('assetId')!=item.get('assetId') or identity.get('versionId')!=item.get('dataVersion')
                 or identity.get('indexVersionId')!=item.get('indexVersion') or identity.get('sourceSha256')!=provenance.get('sourceSha256')
                 or identity.get('logicalPath')!=provenance.get('explicitSourcePath')
-                or not re.search(r'(?<![A-Za-z0-9_.-])'+re.escape(identity.get('logicalPath','').rsplit('/',1)[-1])+r'(?![A-Za-z0-9_.-])',question,re.I)):
+                or not (named or installation or product_document or maintenance or scoped_raster)):
             return None,'DOCUMENT_READ_NOT_VERIFIED'
         if item['scoreType']=='verified_document_visual_read':
             if bundle.get('representationKind') not in {'document_page','document_region_text_projection'} or not item.get('nativeRegionRequest'):
@@ -216,8 +291,20 @@ def admit(question, item):
         source_identifier=any(re.sub(r'\s+','',identifier).casefold() in re.sub(r'\s+','',text).casefold() for identifier in identifiers)
         from services.document_row_context import verified as verified_row_context
         row_context=verified_row_context(item,question)
-        if not (terms(question)&terms(text)) and not source_identifier and not row_context and not (provenance.get('documentContextOnly') and
-                document_context_kind(text)):
+        comparison_dimensions = False
+        if product_document and provenance['productDocumentAnchor'].get('locator') == 'product-pdf-comparison':
+            from services.document_evidence_plan import DIMENSION_QUERY, UNIT_DIMENSIONS, UNIT_LABEL
+            comparison_dimensions = (bundle.get('locator', {}).get('extractionMethod') == 'pdf-native'
+                                     and DIMENSION_QUERY.search(question) and UNIT_DIMENSIONS.search(text) and UNIT_LABEL.search(text))
+        component_quantity_header = False
+        if product_document and provenance.get('documentComponentUseQuantityHeader'):
+            from services.document_evidence_plan import COMPONENT_USE_QUANTITY_HEADER, component_use_topics
+            component_quantity_header = (bundle.get('representationKind') == 'text_passage'
+                                         and bundle.get('locator', {}).get('extractionMethod') == 'pdf-native'
+                                         and bool(component_use_topics(question))
+                                         and bool(re.search(COMPONENT_USE_QUANTITY_HEADER, text)))
+        if not (terms(question) & terms(text) or source_identifier or row_context or comparison_dimensions
+                or component_quantity_header or (provenance.get('documentContextOnly') and document_context_kind(text))):
             return None,'DOCUMENT_QUESTION_CONTENT_NOT_SUPPORTED'
         return POLICY['metadata']['exactRoleUtility'],'EXPLICIT_READ_WITH_SOURCE_CONTENT'
     if item.get('scoreType')=='verified_native_selector':
@@ -325,11 +412,19 @@ def admit(question, item):
         return min(.98, .65 * max(0,float(cosine or 0)) + .35 * overlap + (.08 if anchored else 0)), "PINNED_BGE_OR_ABSOLUTE_LEXICAL"
     if score_type == "clip_cosine":
         score = item.get("rawScore")
-        if not re.search(r"外观|颜色|图像|图片|图纸|标注|照片|布局|形状|现场", question):
+        if not re.search(r"外观|颜色|图像|图片|图纸|标注|照片|布局|形状|现场|示意图|图中|图上", question):
             return None, "VISUAL_NOT_CONTRIBUTING_TO_QUESTION"
         if re.search(r'标注(?:图|图片|照片)|检验标注',question) and not re.search(r'标注|annotat',provenance.get('visualDescription',''),re.I):
             return None,'REQUESTED_VISUAL_ANNOTATION_NOT_VERIFIED'
-        topic_question=re.sub(r'(?:图片|图像|照片)(?:中|里|上)(?:的)?',' ',provenance.get('visualAspectQuery',question))
+        named = provenance.get('explicitSourcePath', '').rsplit('/', 1)[-1]
+        if (named and provenance.get('namedSourceScopeVersion') == 'snapshot-file-targets-1'
+                and re.search(r'(?<![A-Za-z0-9_.-])' + re.escape(named) + r'(?![A-Za-z0-9_.-])', question, re.I)):
+            return POLICY['metadata']['exactRoleUtility'], 'EXPLICIT_AUTHORIZED_IMAGE'
+        if (provenance.get('installationVisualTarget') == 'unique-bound-installation-image-1'
+                and len(entities) == 1 and format_intent(question).allowed == (original_format(item),)
+                and re.search(r'相对位置|安装位置|墙面|地面', question)):
+            return POLICY['metadata']['exactRoleUtility'], 'EXACT_AUTHORIZED_INSTALLATION_IMAGE'
+        topic_question=re.sub(r'(?:图片|图像|照片|示意图)(?:中|里|上)(?:的)?',' ',provenance.get('visualAspectQuery',question))
         topic_question=re.sub(r'\b(?:PDF|CSV|XLSX|JSON|PNG|JPG|JPEG|WEBP|SVG|OBJ|STEP|STP|TXT)\b',' ',topic_question,flags=re.I)
         topic_question=re.sub(r'产品规格|产品参数|产品外观|这张|这幅|图中|图片|图像|照片|现场|外观|规格|参数|型号|产品|结构|颜色|标注|展示|显示|核对|实际|真实|可见|资料|依据|说明|描述|相关|信息|情况|内容|特点|特征|样子|看起来|介绍',' ',topic_question)
         visual_topics=terms(topic_question)
@@ -356,7 +451,7 @@ def identity(item):
         bundle=item['nativeBundle'];frozen=bundle['identity']
         return ('native-document-row-column',tuple(frozen[key] for key in ('datasetId','versionId','indexVersionId','rawCommitId','assetId','sourceSha256')),
             json.dumps(bundle['locator'],sort_keys=True,separators=(',',':')))
-    if item.get('provenance',{}).get('recordReadVersion') and item.get('nativeBundle'):
+    if (item.get('provenance',{}).get('recordReadVersion') or item.get('provenance',{}).get('verifiedBusinessRecord')) and item.get('nativeBundle'):
         bundle=item['nativeBundle'];frozen=bundle['identity'];provenance=item['provenance']
         return ('native-record',tuple(frozen[key] for key in ('datasetId','versionId','indexVersionId','rawCommitId','assetId','sourceSha256')),
             provenance['recordTableId'],json.dumps(provenance['nativeReadOperation'],sort_keys=True,separators=(',',':')))
@@ -392,7 +487,8 @@ def redundancy(left, right):
         return 1.0
     if any(item.get('provenance',{}).get('documentImageOnly') for item in (left,right)):
         return 0.0
-    if any(item.get('provenance',{}).get('recordReadVersion') for item in (left,right)):
+    if any(item.get('provenance',{}).get('recordReadVersion') or item.get('provenance',{}).get('verifiedBusinessRecord')
+           for item in (left, right)):
         return 0.0  # Retain the explicit relation's witnesses; give no diversity/complement bonus below.
     if any(item.get('provenance',{}).get('textReadVersion') for item in (left,right)):
         return 0.0  # Distinct required ranges are not redundant record copies.
@@ -444,30 +540,35 @@ def redundancy(left, right):
     return min(.79,overlap) if candidate_claims and selected_claims else overlap
 
 
-def select_evidence(question, candidates, intent=None, limit=None):
+def select_evidence(question, candidates, intent=None, limit=None, *, scoped_filters=None):
     intent = intent or format_intent(question)
     diagnostics = {"policyVersion": POLICY["version"], "calibrationStatus": POLICY["calibrationStatus"],
                    "candidateCount": len(candidates), "rejections": [], "singleFormatReason": None}
     eligible, seen = [], {}
+    admitted_ids = set()
     for item in candidates:
+        evidence_id = item["evidenceId"]
+        if evidence_id in admitted_ids:
+            continue
         if intent.allowed and original_format(item) not in intent.allowed:
-            diagnostics["rejections"].append({"evidenceId":item["evidenceId"],"reason":"FORMAT_RESTRICTION"})
+            diagnostics["rejections"].append({"evidenceId":evidence_id,"reason":"FORMAT_RESTRICTION"})
             continue
-        relevance, reason = admit(question, item)
+        relevance, reason = admit(question, item, scoped_filters=scoped_filters)
         if relevance is None:
-            diagnostics["rejections"].append({"evidenceId":item["evidenceId"],"reason":reason})
+            diagnostics["rejections"].append({"evidenceId":evidence_id,"reason":reason})
             continue
+        admitted_ids.add(evidence_id)
         item = {**item, "relevance": relevance, "admissionReason": reason}
         key = identity(item)
         if key in seen:
             seen[key].setdefault("alternateSources", []).append(item)
-            diagnostics["rejections"].append({"evidenceId":item["evidenceId"],"reason":"SAME_FACT_COPY"})
+            diagnostics["rejections"].append({"evidenceId":evidence_id,"reason":"SAME_FACT_COPY"})
             continue
         seen[key] = item
         eligible.append(item)
     eligible.sort(key=lambda e:(-e["relevance"],e["evidenceId"]))
     selected=[]; weights=POLICY["weights"]
-    while eligible and len(selected)<(limit or POLICY["maxSelectedSources"]):
+    while eligible and len(selected)<(limit or CAPABILITIES["maxSources"]):
         formats={original_format(e) for e in selected}
         def utility(item):
             duplicate=max((redundancy(item,s) for s in selected),default=0)

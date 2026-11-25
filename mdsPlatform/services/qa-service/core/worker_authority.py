@@ -3,6 +3,7 @@ import contextvars
 import hmac
 import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -147,7 +148,10 @@ def install_guard(app,service):
         token=None
         try:
             guard=await run_in_threadpool(authenticate,request.headers,allowed);token=bind(guard)
-            if guard.scope.get("purpose")=="USER_INPUT_ONLY" and (request.method!="POST" or request.url.path!="/api/v1/qa"):
+            qa_control = service == "qa" and request.method in {"GET", "DELETE"} and bool(
+                re.fullmatch(r"/api/v1/qa/requests/[0-9a-fA-F-]{36}", request.url.path))
+            qa_submit = request.method == "POST" and request.url.path == "/api/v1/qa"
+            if guard.scope.get("purpose") == "USER_INPUT_ONLY" and not (qa_submit or qa_control):
                 raise AuthorityError(403,"USER_INPUT_ROUTE_DENIED")
             response=await call_next(request)
             await run_in_threadpool(guard.revalidate,True)

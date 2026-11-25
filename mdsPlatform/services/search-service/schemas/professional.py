@@ -7,6 +7,8 @@ from uuid import UUID
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
+from core.config import settings
+
 
 RetrieverName = Literal["text", "visual", "structured", "timeseries", "geometry"]
 OperationName = Literal[
@@ -172,7 +174,7 @@ class CandidateRequest(BaseModel):
     dataset_id: UUID = Field(validation_alias=AliasChoices("dataset_id", "datasetId"))
     version_id: UUID = Field(validation_alias=AliasChoices("version_id", "versionId"))
     index_version_id: UUID = Field(validation_alias=AliasChoices("index_version_id", "indexVersionId"))
-    question: str = Field(min_length=1, max_length=8000)
+    question: str = Field(min_length=1, max_length=settings.qa_candidate_max_question_characters)
     formats: list[str] = Field(default_factory=list, max_length=20)
     per_format: int = Field(default=8, ge=1, le=16)
 

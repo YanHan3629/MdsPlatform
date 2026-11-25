@@ -335,7 +335,7 @@
  async function refresh(){
   if(busy)return;const c=context();try{if(pending?.kind==='publication')await openPublication(pending.id,c);else if(pending?.kind==='preview')await openAttempt(pending.id,c);await loadRecords(c);}catch(e){report(e,c);}
  }
- document.addEventListener('DOMContentLoaded',()=>{
+ window.addEventListener('dataspace-business-ready',()=>{
   for(const [code,label]of ops){const l=node('label'),i=node('input');i.type='checkbox';i.value=code;i.checked=['data.catalog.read','data.preview','data.search','data.qa'].includes(code);i.onchange=clearReview;l.append(i,node('span','',label));$('cvOperations').append(l);}
   for(const id of ['controlledViewsOpen','controlledViewsOpenManagement','controlledViewsOpenProvider'])$(id).onclick=()=>void open();
   $('cvClose').onclick=()=>close();$('controlledViewDialog').addEventListener('cancel',e=>{e.preventDefault();close();});$('controlledViewDialog').addEventListener('close',()=>{if(proposal||preview||publication||selected.size)reset();});

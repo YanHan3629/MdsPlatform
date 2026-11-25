@@ -101,7 +101,17 @@ class Catalogue:
                 require(fact.get('evidenceNature') in {'source_record','source_text','source_declaration','program_calculation','ocr_text','program_rendering'},'CLAIM_MODEL_FACT_IS_NOT_NATIVE_EVIDENCE')
                 raw_adapter=bool(provenance.get('documentReadVersion') or provenance.get('engineeringReadVersion'))
                 lexeme_adapter=bool(provenance.get('engineeringReadVersion') and fact.get('numberSourceExpression') is not None)
-                require(same(value,_model_value(fact,bundle)) or raw_adapter and same(value,fact['value']) or lexeme_adapter and same(value,fact['numberSourceExpression']),'CLAIM_CONTEXT_VALUE_DIFFERS_FROM_READ')
+                graphic_projection=provenance.get('svgGraphicRecordRecipe') in {'svg-graphic-record-context-3','svg-graphic-record-context-4','svg-graphic-record-context-5','svg-graphic-record-context-6','svg-graphic-record-context-7'}
+                if graphic_projection:
+                    require(provenance.get('engineeringReadVersion') and not provenance.get('engineeringVisualRead')
+                            and identity.get('originalFormat')=='SVG' and bundle.get('representationKind')=='svg_elements',
+                            'CLAIM_SVG_GRAPHIC_PROJECTION_SCOPE_CHANGED')
+                    from services.engineering_evidence_plan import svg_graphic_model_value,svg_graphic_coordinate_model_value
+                    project=(svg_graphic_coordinate_model_value if provenance['svgGraphicRecordRecipe'] in {'svg-graphic-record-context-4','svg-graphic-record-context-5','svg-graphic-record-context-6','svg-graphic-record-context-7'}
+                             else svg_graphic_model_value)
+                    require(same(value,project(fact)),'CLAIM_CONTEXT_VALUE_DIFFERS_FROM_READ')
+                else:
+                    require(same(value,_model_value(fact,bundle)) or raw_adapter and same(value,fact['value']) or lexeme_adapter and same(value,fact['numberSourceExpression']),'CLAIM_CONTEXT_VALUE_DIFFERS_FROM_READ')
                 csv_original=csv_empty_source(fact,bundle)
                 require(same(row.get('originalField'),csv_original),'CLAIM_CONTEXT_ORIGINAL_CSV_FIELD_CHANGED')
                 locator=fact.get('locator',{});require('locator' not in row or same(row['locator'],locator),'CLAIM_CONTEXT_LOCATOR_MISMATCH')
@@ -126,6 +136,14 @@ class Catalogue:
                         'sourceLocator':source['locator'],
                         'clientReadReceiptSha256':receipt_digest(receipt),'clientDecodedBodySha256':receipt['decodedBodySha256'],
                         'readOutputSha256':bundle['readOutputSha256'],'contextTextSha256':hashlib.sha256(source['model_context'].encode()).hexdigest()}]}
+                if graphic_projection:
+                    node['bindings'][0].update(modelValueProjectionRecipe=(
+                        'svg-coordinate-declaration-projection-1' if provenance['svgGraphicRecordRecipe'] in {'svg-graphic-record-context-4','svg-graphic-record-context-5','svg-graphic-record-context-6','svg-graphic-record-context-7'}
+                        else 'svg-type-and-style-projection-1'),
+                        nativeValueSha256=checksum(fact['value']),modelValueSha256=checksum(value))
+                    if provenance['svgGraphicRecordRecipe'] in {'svg-graphic-record-context-5','svg-graphic-record-context-6','svg-graphic-record-context-7'}:
+                        node['bindings'][0].update(primitiveRegisterRecipe=provenance['svgPrimitiveRegisterRecipe'],
+                            primitiveRegisterSha256=checksum(context['svgPrimitiveRegister']))
                 if provenance.get('tableReadVersion'):
                     from services.worksheet_claim_view import view
                     node['worksheetView']=view(source,fact)

@@ -280,12 +280,6 @@
       identity?.enterpriseMemberManager?'仅管理本企业普通成员，并分配平台委托的适用业务类型。':'仅向平台管理员或企业成员管理者开放。';
     $('#identityQualificationsPanel').hidden=!identity?.platformAdmin;$('#identityTypesPanel').hidden=!identity?.platformAdmin;
     for(const form of $$('#identitySelfForms form'))form.reset();
-    const dialog=$('#identityActivationDialog');
-    if(auth.activationRequired){
-      $('#identityActivationUser').textContent='待激活账号：'+(showSelf.activationUsername||'');
-      if(!dialog.open)dialog.showModal();
-    }else if(dialog.open){dialog.close();$('#identityActivationForm').reset();}
-    if(!manager&&location.hash==='#identityManagement')location.hash='#identity';
     applyCapabilities();
   }
   async function loadManagement(){
@@ -332,31 +326,25 @@
     for(const [selector,operation] of Object.entries(selectors))for(const button of $$(selector))button.disabled=!auth.has(operation);
   }
   const bindForm=(id,action)=>{$('#'+id).onsubmit=event=>{event.preventDefault();const form=event.currentTarget;Promise.resolve().then(()=>action(form)).catch(report);};};
-  document.addEventListener('DOMContentLoaded',()=>{
+  window.addEventListener('dataspace-business-ready',()=>{
     $('#identityReload').onclick=()=>void auth.check({force:true});$('#identityManagementReload').onclick=loadManagement;
     $('#identityAuditForm').onsubmit=event=>{event.preventDefault();void loadAudit();};
     $('#identityAuditNext').onclick=()=>void loadAudit(true);
-    $('#identityLogout').onclick=()=>void auth.logout();
+    $('#identityLogout').onclick=()=>void window.mdsNavigation.signOut();
     $('#identityBulkLogout').onclick=()=>mutation('/identity/users/logout-non-admin','POST',{},'所有非平台管理员的旧会话已撤销。').catch(report);
     $('#identityUserSelect').onchange=event=>selectUser(event.target.value);$('#identityNewUser').onclick=()=>selectUser('');
     $('#identityUserOrg').onchange=()=>fillUserTypes();
     $('#identityPrimaryType').onchange=()=>{const primary=$('#identityPrimaryType').value;for(const option of $('#identityAdditionalTypes').options)if(option.value===primary)option.selected=false;};
     $('#identityTypeSelect').onchange=event=>selectType(event.target.value);$('#identityNewType').onclick=()=>selectType('');
     $('#identityTypeForm').elements.readOnly.onchange=enforceReadonlyPicker;
-    bindForm('identityActivationForm',async form=>{
-      if(form.elements.newPassword.value!==form.elements.confirmPassword.value)throw new Error('两次输入的新密码不一致。');
-      const username=await auth.activate(form.elements.newPassword.value);form.reset();$('#qaLogin').elements.userName.value=username;toast('激活完成，请使用新密码登录。');
-    });
-    const cancel=()=>{auth.cancelActivation();$('#identityActivationForm').reset();};
-    $('#identityCancelActivation').onclick=cancel;$('#identityActivationDialog').addEventListener('cancel',event=>{event.preventDefault();cancel();});
     bindForm('identityPasswordForm',async form=>{
       if(form.elements.newPassword.value!==form.elements.confirmPassword.value)throw new Error('两次输入的新密码不一致。');
       await auth.api('/users/me/password',{method:'PATCH',json:{oldPassword:form.elements.oldPassword.value,newPassword:form.elements.newPassword.value}});
-      form.reset();await auth.logout();toast('密码已更新，请重新登录。');
+      form.reset();window.mdsNavigation.endRevokedSession('passwordChanged');
     });
     bindForm('identityCloseForm',async form=>{
       const identity=me();if(!identity||form.elements.confirmation.value!==identity.username)throw new Error('请输入当前用户名确认注销。');
-      await auth.api('/users/me/close',{method:'POST',json:{expectedVersion:identity.permissionVersion}});await auth.logout();toast('账号已注销，业务记录保留。');
+      await auth.api('/users/me/close',{method:'POST',json:{expectedVersion:identity.permissionVersion}});window.mdsNavigation.endRevokedSession('accountClosed');
     });
     bindForm('identityUserForm',async form=>{
       const configured=assignment(),user=currentUser(),body={username:form.elements.username.value.trim(),orgId:form.elements.orgId.value,...configured};
@@ -378,10 +366,9 @@
       const replacement=activeType(form.elements.replacementTypeId.value);
       return mutation('/identity/types/'+type.typeId+'/delete','POST',{expectedVersion:type.version,replacementTypeId:replacement?.typeId||null,replacementTypeVersion:replacement?.version||null},'业务类型已删除；如有成员，已完成原子迁移。');
     });
-    window.addEventListener('dataspace-identity',event=>{
-      showSelf.activationUsername=event.detail.activationUsername;clearManagement();showSelf();if(auth.authenticated)void loadManagement();
+    window.addEventListener('dataspace-identity',()=>{
+      clearManagement();showSelf();if(auth.authenticated)void loadManagement();
     });
-    window.addEventListener('dataspace-notice',event=>toast(event.detail.message));
     const observer=new MutationObserver(()=>{queueMicrotask(applyCapabilities);});observer.observe(document.querySelector('main'),{childList:true,subtree:true});
     showSelf();if(auth.authenticated)void loadManagement();
   });

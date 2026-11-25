@@ -12,6 +12,8 @@ ENGINEERING_RECIPE='engineering-region-render-2026-10-22.1'
 MAX_SOURCE=16*1024*1024
 MAX_BODY=24*1024*1024
 MAX_OUTPUT=16*1024*1024
+MAX_ATTACHMENT_LABEL_BYTES=8*1024*1024
+ATTACHMENT_LABEL_PATH='/internal/v1/evidence/attachment-labels'
 QUEUE_FILE='/app/professional/cpu_queue.py'
 spec=importlib.util.spec_from_file_location('evidence_cpu_queue',QUEUE_FILE)
 queue_module=importlib.util.module_from_spec(spec);spec.loader.exec_module(queue_module)
@@ -82,6 +84,9 @@ def _child(connection,raw,format,parameters):
     resource.setrlimit(resource.RLIMIT_CPU,(30,30))
     resource.setrlimit(resource.RLIMIT_NOFILE,(64,64))
     try:
+        if format=='attachment_labels':
+            from professional.image_label_observations import observe
+            connection.send(observe(raw,parameters['seconds']));return
         if format in {'SVG','OBJ','STEP'}:
             for name in ('OMP_NUM_THREADS','OPENBLAS_NUM_THREADS','MKL_NUM_THREADS'):os.environ[name]='1'
             from professional.engineering_render import render_source
@@ -135,16 +140,17 @@ def _child(connection,raw,format,parameters):
         connection.send({'error':code,'status':409 if code=='ENGINEERING_ENGINE_BINDING_MISMATCH' else 422})
     finally:connection.close()
 
-def execute(raw,format,parameters):
-    guard=current_guard();guard.revalidate(force=True)
+def execute(raw,format,parameters,*,deadline_seconds=40):
+    guard=None if format=='attachment_labels' else current_guard()
+    if guard is not None:guard.revalidate(force=True)
     context=multiprocessing.get_context('spawn');receiver,sender=context.Pipe(duplex=False)
     process=context.Process(target=_child,args=(sender,raw,format,parameters));process.start();sender.close()
     try:
-        deadline=time.monotonic()+40
+        deadline=time.monotonic()+deadline_seconds
         while not receiver.poll(.5):
-            guard.revalidate(force=True)
+            if guard is not None:guard.revalidate(force=True)
             if time.monotonic()>=deadline:raise Invalid('RENDER_TIMEOUT',504)
-        guard.revalidate(force=True)
+        if guard is not None:guard.revalidate(force=True)
         try:result=receiver.recv()
         except EOFError:raise Invalid('RENDER_PROCESS_TERMINATED',503)
         process.join(2)
@@ -217,20 +223,42 @@ class Handler(BaseHTTPRequestHandler):
         if self.path=='/internal/v1/evidence/stats' and self.authorized():
             with metrics_lock:return self.reply(200,dict(metrics))
         self.reply(404,{'error':'NOT_FOUND'})
+    def read_json_body(self,maximum,limit_error):
+        if self.headers.get('Transfer-Encoding'):raise Invalid('CHUNKED_BODY_UNSUPPORTED')
+        if not self.headers.get('Content-Type','').startswith('application/json'):raise Invalid('JSON_REQUIRED')
+        try:length=int(self.headers.get('Content-Length','-1'))
+        except ValueError:raise Invalid('BODY_LENGTH_INVALID')
+        if not 0<length<=maximum:raise Invalid(limit_error,413)
+        self.connection.settimeout(15);raw=self.rfile.read(length)
+        if len(raw)!=length:raise Invalid('INCOMPLETE_BODY')
+        return json.loads(raw,object_pairs_hook=duplicate,parse_constant=lambda value:(_ for _ in ()).throw(Invalid('NONFINITE_JSON_NUMBER')))
+    def attachment_labels(self):
+        expected=os.environ.get('QA_ATTACHMENT_LABEL_TOKEN','')
+        supplied=self.headers.get('X-MDS-Attachment-Label-Token','')
+        if self.client_address[0]!='127.0.0.1' or not expected or not hmac.compare_digest(expected.encode(),supplied.encode()):
+            return self.reply(401,{'error':'ATTACHMENT_LABEL_IDENTITY_REQUIRED'})
+        try:
+            body=self.read_json_body(4*((MAX_ATTACHMENT_LABEL_BYTES+2)//3)+4096,'ATTACHMENT_LABEL_BYTE_LIMIT')
+            if not isinstance(body,dict) or set(body)!={'imageBase64','imageSha256'}:
+                raise Invalid('ATTACHMENT_LABEL_REQUEST_INVALID')
+            image=base64.b64decode(body['imageBase64'],validate=True)
+            if len(image)>MAX_ATTACHMENT_LABEL_BYTES:raise Invalid('ATTACHMENT_LABEL_BYTE_LIMIT',413)
+            identity=digest(image)
+            if body['imageSha256']!=identity:raise Invalid('ATTACHMENT_LABEL_IMAGE_CHANGED',409)
+            with queue_module.cpu_evidence_slot(timeout=1):
+                result=execute(image,'attachment_labels',{'seconds':4.5},deadline_seconds=6)
+            return self.reply(200,dict(result,imageSha256=identity))
+        except Invalid as error:self.reply(error.status,{'error':error.code})
+        except (ValueError,TypeError):self.reply(400,{'error':'ATTACHMENT_LABEL_REQUEST_INVALID'})
+        except (TimeoutError,OSError):self.reply(503,{'error':'ATTACHMENT_LABEL_UNAVAILABLE'})
     def do_POST(self):
+        if self.path==ATTACHMENT_LABEL_PATH:return self.attachment_labels()
         if not self.authorized():return self.reply(401,{'error':'INTERNAL_IDENTITY_REQUIRED'})
         if self.path!='/internal/v1/evidence/render':return self.reply(404,{'error':'NOT_FOUND'})
         binding=None;self._response_started=False
         try:
             guard=authenticate(self.headers,{'data.preview','data.search','data.qa'});binding=bind(guard)
-            if self.headers.get('Transfer-Encoding'):raise Invalid('CHUNKED_BODY_UNSUPPORTED')
-            if not self.headers.get('Content-Type','').startswith('application/json'):raise Invalid('JSON_REQUIRED')
-            try:length=int(self.headers.get('Content-Length','-1'))
-            except ValueError:raise Invalid('BODY_LENGTH_INVALID')
-            if not 0<length<=MAX_BODY:raise Invalid('RENDER_REQUEST_BYTE_LIMIT',413)
-            self.connection.settimeout(15);raw=self.rfile.read(length)
-            if len(raw)!=length:raise Invalid('INCOMPLETE_BODY')
-            body=json.loads(raw,object_pairs_hook=duplicate,parse_constant=lambda value:(_ for _ in ()).throw(Invalid('NONFINITE_JSON_NUMBER')))
+            body=self.read_json_body(MAX_BODY,'RENDER_REQUEST_BYTE_LIMIT')
             with metrics_lock:metrics['acceptedRequests']+=1
             self.reply(200,render(body))
         except AuthorityError as error:
