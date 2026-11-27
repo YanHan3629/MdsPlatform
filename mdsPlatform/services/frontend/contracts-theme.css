@@ -1,0 +1,257 @@
+/* Keep authorization forms and delivery records as full-width sections. */
+#contracts.show {
+  display: grid;
+  gap: 16px;
+  padding: var(--workspace-gutter);
+
+  > .grid.two {
+    grid-template-columns: minmax(0, 1fr);
+    gap: inherit;
+    margin: 0;
+  }
+
+  .card {
+    container: contract-panel / inline-size;
+    padding: clamp(16px, 2vw, 24px);
+    background: #fff;
+  }
+
+  .card-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 9px 14px;
+    margin-bottom: 16px;
+  }
+
+  h2 {
+    margin: 0;
+    padding-inline-start: 10px;
+    border-inline-start: 3px solid #417fac;
+    font-size: 18px;
+    line-height: 1.4;
+  }
+
+  form { margin: 16px 0 0; }
+
+  p {
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.65;
+  }
+
+  .form-grid { gap: 14px 16px; }
+
+  .form-grid label {
+    min-width: 0;
+    gap: 6px;
+    color: #344e63;
+    font-size: 13px;
+    font-weight: 650;
+  }
+
+  :is(input:not([type="checkbox"]), select, textarea) {
+    min-width: 0;
+    max-width: 100%;
+    min-height: 38px;
+    padding: 7px 10px;
+    border-color: #bccdde;
+    border-radius: 6px;
+    font-weight: 400;
+  }
+
+  :is(input, textarea)::placeholder { color: #5e7184; opacity: 1; }
+  :is(input, select, textarea):disabled,
+  form[inert] :is(input, select, textarea) { background: #f5f7fa; }
+  .btn { max-width: 100%; overflow-wrap: anywhere; }
+  form > .btn { min-height: 38px; }
+
+  #receiverForm {
+    display: flex;
+    align-items: stretch;
+    gap: 10px 12px;
+  }
+
+  #receiverForm > input { flex: 1 1 220px; width: auto; max-width: 460px; }
+  #receiverForm > .btn { width: auto; }
+
+  #receiverConfigurations {
+    display: grid;
+    gap: 6px;
+  }
+
+  #receiverConfigurations p, #contractScope {
+    margin: 0;
+    padding: 8px 11px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--workspace-hover);
+  }
+
+  #contractForm { margin: 0; }
+  #contractForm + p { margin: 16px 0 0; padding-top: 12px; border-top: 1px solid var(--line); }
+  #contractScope:empty, #contractViewWindow:empty, .compact p:empty, td p:empty { display: none; }
+
+  #contractControlled {
+    min-width: 0;
+    margin: 0;
+    padding: 11px 14px 15px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--workspace-hover);
+  }
+
+  #contractControlled legend {
+    padding: 0 6px;
+    color: #315b7a;
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  #contractControlled p { margin: 8px 0; }
+  #contractControlled > label { margin-top: 12px; }
+
+  :is(#contractActions, #contractPurposes) {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 130px), 1fr));
+    gap: 7px;
+  }
+
+  :is(#contractActions, #contractPurposes) label {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+    padding: 7px 9px;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: #fff;
+    overflow-wrap: anywhere;
+  }
+
+  #contractControlled input[type="checkbox"] {
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+    margin: 2px 0 0;
+    accent-color: var(--brand);
+  }
+
+  .compact-list { gap: 12px; }
+
+  .compact {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px 18px;
+    padding: 13px 15px;
+    border-radius: 8px;
+    background: #fff;
+  }
+
+  .compact b { color: #233f55; }
+  .compact p { margin-top: 5px; }
+  .compact .btn { margin: 6px 4px 0 0; }
+
+  #applications textarea {
+    display: block;
+    width: min(100%, 600px);
+    min-height: 62px;
+    margin: 10px 0 3px;
+  }
+
+  :is(.badge, .status) { padding: 4px 8px; border-radius: 5px; font-weight: 650; }
+  .badge { background: #edf4fa; }
+  .status.DELIVERED { background: #e5f7eb; color: #166534; }
+  .status:is(.PENDING, .SCHEDULED, .RETRY, .WAITING) { background: #fff4d9; color: #805112; }
+  .status:is(.FAILED, .BLOCKED, .CANCELLED, .REVOKED) { background: #fee9e9; color: #9b2727; }
+
+  .empty {
+    padding: 12px 15px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--workspace-hover);
+    text-align: start;
+  }
+
+  .table-wrap { border-radius: 8px; }
+  .table-wrap:focus-within { border-color: #91b5d1; }
+  .table-wrap table { min-width: 955px; }
+
+  th, td {
+    padding: 11px 10px;
+    overflow-wrap: anywhere;
+  }
+
+  th { background: #edf4fa; color: #34536a; letter-spacing: 0; }
+  th:nth-child(1) { width: 19%; }
+  th:nth-child(2) { width: 17%; }
+  th:nth-child(3) { width: 15%; }
+  th:nth-child(4) { width: 19%; }
+  th:nth-child(5) { width: 12%; }
+  th:nth-child(6) { width: 9%; }
+  th:nth-child(7) { width: 9%; }
+
+  table:has(#contractTable button ~ button) {
+    th:nth-child(1) { width: 17%; }
+    th:nth-child(2), th:nth-child(3) { width: 14%; }
+    th:nth-child(5) { width: 10%; }
+    th:nth-child(6) { width: 8%; }
+    th:nth-child(7) { width: 18%; }
+  }
+
+  tbody tr:nth-child(even) { background: #f8fbfd; }
+  tbody tr:hover { background: var(--workspace-hover); }
+  td p { margin-top: 5px; font-size: 12px; }
+  td:nth-child(3) { font-size: 13px; word-break: keep-all; }
+  td:nth-child(4) { font-size: 12px; font-variant-numeric: tabular-nums; }
+  td .status { white-space: normal; }
+
+  .contract-token { display: inline-block; max-width: 100%; }
+  .contract-revision { color: #426580; font-size: 12px; font-weight: 650; }
+  .contract-quality { font-size: 12px; }
+
+  #contractTable .btn {
+    min-height: 28px;
+    margin: 0 0 4px;
+    padding: 4px 6px;
+    font-size: 12px;
+    text-align: start;
+  }
+
+  td textarea {
+    display: block;
+    width: 100%;
+    min-height: 56px;
+    margin: 0 0 5px;
+  }
+
+  #deliveryDetails {
+    max-height: min(560px, 65vh);
+    overflow: auto;
+    margin: 14px 0 0;
+    padding: 13px 15px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--workspace-hover);
+    color: #34536a;
+    font-size: 13px;
+    line-height: 1.65;
+  }
+
+  @container contract-panel (min-width: 480px) {
+    #deliveries .compact {
+      grid-template-columns: minmax(0, 1fr) fit-content(32%);
+      align-items: start;
+    }
+
+    #deliveries .compact > div:last-child { text-align: end; }
+  }
+
+  @container contract-panel (max-width: 540px) {
+    #contractForm { grid-template-columns: minmax(0, 1fr); }
+  }
+
+  @container contract-panel (min-width: 780px) {
+    #contractForm { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    #contractScope { grid-column: span 2; align-self: end; }
+    #contractForm > label:has(> #contractEndpointSelect) { grid-column: span 2; }
+  }
+}

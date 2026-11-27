@@ -1,0 +1,312 @@
+/* Place the full-width output directly after the form on both pages. */
+:is(#retrieval, #qa).show {
+  padding: var(--workspace-gutter);
+
+  > .grid.two {
+    container: multimodal-output / inline-size;
+    grid-template-columns: minmax(0, 1fr);
+    gap: clamp(14px, 1.6vw, 22px);
+    margin: 0;
+  }
+
+  .card {
+    padding: clamp(16px, 2vw, 26px);
+    background: #fff;
+  }
+
+  > .grid.two > .card:first-child { container: multimodal-form / inline-size; }
+
+  h2 {
+    margin: 0;
+    padding-inline-start: 10px;
+    border-inline-start: 3px solid #417fac;
+    font-size: 19px;
+    line-height: 1.4;
+  }
+
+  .card-head { margin: 0; }
+
+  .card > p:not([id]) {
+    margin: 10px 0 0;
+    color: var(--muted);
+    line-height: 1.65;
+  }
+
+  form {
+    margin-top: 20px;
+    padding-top: 17px;
+    border-top: 1px solid var(--line);
+  }
+
+  .form-grid { gap: 14px 16px; }
+  .form-grid > * { min-width: 0; }
+
+  .form-grid label {
+    gap: 6px;
+    min-width: 0;
+    color: #344f65;
+    font-size: 13px;
+    font-weight: 650;
+  }
+
+  .form-grid :is(input:not([type="checkbox"]), select, textarea) {
+    min-width: 0;
+    min-height: 38px;
+    padding: 7px 10px;
+    border-color: #bccdde;
+    border-radius: 6px;
+    font-weight: 400;
+  }
+
+  .form-grid :is(input, textarea)::placeholder { color: #5e7184; opacity: 1; }
+  .form-grid :is(input, select, textarea):disabled { background-color: #f3f6f9; }
+
+  .form-grid p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.65;
+  }
+
+  fieldset {
+    min-width: 0;
+    margin: 0;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--workspace-hover);
+  }
+
+  fieldset legend {
+    padding: 0 5px;
+    color: #315b7a;
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  .scope-picker-controls { gap: 10px 12px; }
+  .scope-picker-controls label { flex-basis: 165px; }
+  .scope-picker-controls label:last-child { flex-grow: 1.4; }
+  .scope-picker-tags { gap: 6px; padding: 9px 0 4px; }
+  .scope-picker-tags:empty { display: none; }
+
+  .scope-picker-tag {
+    padding: 4px 5px 4px 8px;
+    border: 1px solid #d5e3ef;
+    background: #eaf2f9;
+    color: #34566f;
+    font-size: 12px;
+  }
+
+  .scope-picker-tag button {
+    margin-inline-start: 6px;
+    padding: 3px 6px;
+    border: 1px solid #ccdce9;
+    border-radius: 4px;
+    background: #fff;
+    color: var(--brand);
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .scope-picker-tag button:hover:not(:disabled) { background: #f2f7fb; }
+  .scope-picker-tag button:disabled { opacity: .55; cursor: default; }
+
+  .scope-picker .filters {
+    display: flex;
+    justify-content: space-between;
+    gap: 4px 10px;
+    margin-top: 7px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .scope-picker .filters > * { width: auto; }
+  .scope-picker .btn { min-height: 28px; padding: 4px 6px; }
+  form > .btn.primary { min-height: 40px; padding-inline: 16px; }
+
+  .card[aria-live] {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    gap: 14px;
+  }
+
+  :is(#retrievalProgress, #qaProgress) {
+    margin: 1px 0 0;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--workspace-hover);
+    color: #34566f;
+    font-weight: 650;
+    line-height: 1.6;
+  }
+
+  :is(#retrievalApplied, #qaMeta) {
+    margin: 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.65;
+  }
+
+  :is(#retrievalApplied, #retrievalResults, #qaAnswer, #qaMeta, #qaSources):empty {
+    display: none;
+  }
+
+  .compact-list { gap: 12px; }
+  .compact-list > p { margin: 0; color: var(--muted); font-size: 13px; }
+
+  .compact-list .compact {
+    padding: clamp(13px, 1.5vw, 18px);
+    border-radius: 8px;
+    background: #fff;
+  }
+
+  .compact-list .compact > div { width: 100%; }
+  .compact-list .compact b { color: #233f55; line-height: 1.5; }
+  .compact-list .compact p { margin: 6px 0 0; line-height: 1.6; }
+
+  .compact-list .source-preview:not(:empty) {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-inline-start: 2px solid #c0d5e6;
+    border-radius: 3px;
+    background: var(--workspace-hover);
+    color: var(--ink);
+    font-size: 13px;
+  }
+
+  .evidence-meta { margin-top: 10px; }
+  .evidence-meta:empty { display: none; }
+  .evidence-meta span { padding: 4px 7px; border-radius: 4px; background: #edf4fa; }
+
+  .compact .btn.link { margin-top: 6px; text-align: start; overflow-wrap: anywhere; }
+  .evidence-image img { border: 1px solid var(--line); border-radius: 6px; }
+
+  @container multimodal-form (max-width: 440px) {
+    .form-grid { grid-template-columns: minmax(0, 1fr); }
+  }
+
+  @container multimodal-form (min-width: 740px) {
+    form.form-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    form > .btn.primary { grid-column: -2 / -1; justify-self: end; align-self: end; }
+  }
+
+  @container multimodal-output (min-width: 520px) {
+    .card[aria-live] { grid-template-columns: minmax(0, 1fr) fit-content(60%); }
+    .card[aria-live] > h2 { align-self: center; }
+    .card[aria-live] > :not(h2, #retrievalProgress, #qaProgress) { grid-column: 1 / -1; }
+
+    :is(#retrievalProgress, #qaProgress) { margin: 0; padding: 7px 12px; }
+  }
+}
+
+#retrieval.show {
+  .card-head > div {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 7px 12px;
+  }
+
+  .card-head h2 { order: -1; }
+  .eyebrow { color: #426580; letter-spacing: .035em; }
+  #retrievalSpecific:empty, #retrievalConditionRows:empty { display: none; }
+  #retrievalConditions { grid-template-columns: minmax(0, 1fr); }
+
+  .retrieval-condition {
+    grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+    margin: 0;
+    padding: 12px;
+    border-radius: 6px;
+    background: #fff;
+  }
+
+  .retrieval-condition + .retrieval-condition { margin-top: 10px; }
+
+  #retrievalResults { white-space: normal; }
+  #retrievalResults p { white-space: pre-wrap; }
+
+  @container multimodal-form (max-width: 440px) {
+    .retrieval-condition { grid-template-columns: minmax(0, 1fr); }
+  }
+
+  @container multimodal-form (min-width: 740px) {
+    #retrievalForm > p:last-of-type {
+      grid-column: span 2;
+      align-self: center;
+    }
+
+    #retrievalForm:not(:has(#retrievalSpecific:not(:empty), #retrievalConditions:not([hidden])))
+      > :is(label:has(> #retrievalQuery), p:last-of-type) { grid-column: span 3; }
+  }
+}
+
+#qa.show {
+  > .card {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px 18px;
+    margin-bottom: clamp(14px, 1.6vw, 22px);
+    padding-block: 13px;
+  }
+
+  > .card > .card-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+  }
+
+  > .card h2 { font-size: 16px; }
+  #qaHealth { padding: 4px 8px; border-radius: 5px; white-space: normal; }
+  #qaRefresh { text-align: start; }
+  #qaForm textarea { min-height: 108px; }
+
+  #qaForm label:has(> input[type="checkbox"]) {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--workspace-hover);
+  }
+
+  #qaForm input[type="checkbox"] {
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+    margin: 2px 0 0;
+    accent-color: var(--brand);
+  }
+
+  #qaForm label:has(> input[type="checkbox"]:disabled) { color: var(--muted); }
+  #qaCancel { justify-self: start; }
+  #qaNotice { margin: 0; border-radius: 6px; }
+
+  #qaAnswer {
+    margin: 0;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+    line-height: 1.85;
+  }
+
+  #qaMeta:not(:empty) { padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+  .qa-answer-table { border: 1px solid var(--line); border-radius: 6px; }
+  .qa-answer-table th { background: var(--workspace-hover); }
+  .qa-answer-table :is(th, td) { padding: 9px 10px; }
+
+  @container multimodal-form (min-width: 740px) {
+    #qaForm > :is(#qaBudgetHelp, label:has(> :is(#qaUseSearch, textarea, #qaImages, #qaFollowUp))) {
+      grid-column: span 2;
+    }
+
+    #qaForm > :is(#qaBudgetHelp, label:has(> :is(#qaUseSearch, #qaFollowUp))) { align-self: end; }
+    #qaForm > label:has(> textarea) { align-self: start; }
+    #qaForm > div:has(> #qaClearImages) { grid-column: 1 / -2; }
+  }
+}

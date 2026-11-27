@@ -1,0 +1,364 @@
+/* Account information and management forms share the workspace layout. */
+:is(#identity, #identityManagement).show {
+  container: identity-workspace / inline-size;
+  display: grid;
+  gap: 16px;
+  padding: var(--workspace-gutter);
+
+  .card {
+    padding: clamp(16px, 2vw, 24px);
+    background: #fff;
+  }
+
+  .card-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 14px;
+    margin-bottom: 15px;
+  }
+
+  h2 {
+    margin: 0;
+    padding-inline-start: 10px;
+    border-inline-start: 3px solid #417fac;
+    font-size: 18px;
+    line-height: 1.4;
+  }
+
+  p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.65;
+  }
+
+  :is(h2, .card-head) + p { margin-top: 12px; }
+
+  .form-grid {
+    gap: 12px 16px;
+    margin-top: 14px;
+  }
+
+  label:has(> :is(input:not([type="checkbox"]), select, textarea)) {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+    color: #344e63;
+    font-size: 13px;
+    font-weight: 650;
+  }
+
+  :is(input:not([type="checkbox"]), select, textarea) {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    min-height: 38px;
+    padding: 7px 10px;
+    border-color: #bccdde;
+    border-radius: 6px;
+    font-weight: 400;
+  }
+
+  :is(input, textarea)::placeholder { color: #5e7184; opacity: 1; }
+  :is(input, select, textarea):disabled,
+  form[inert] :is(input, select, textarea) { background: #f5f7fa; }
+
+  .btn { max-width: 100%; overflow-wrap: anywhere; }
+  button[type="submit"] { min-height: 38px; }
+
+  :is(#identityCloseForm, #identityDeleteForm, #identityDeleteTypeForm) .btn,
+  #identityBulkLogout.btn {
+    border-color: #e7c6c6;
+    background: #fff8f7;
+    color: #8c3232;
+  }
+
+  :is(#identityCloseForm, #identityDeleteForm, #identityDeleteTypeForm) .btn:hover:not(:disabled),
+  #identityBulkLogout.btn:hover:not(:disabled) {
+    border-color: #d5a3a3;
+    background: #fbe9e7;
+  }
+
+  @container identity-workspace (max-width: 540px) {
+    .form-grid { grid-template-columns: minmax(0, 1fr); }
+  }
+
+  @container identity-workspace (min-width: 700px) {
+    :is(#identityCloseForm, #identityResetForm, #identityDeleteForm) {
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: end;
+    }
+
+    :is(#identityCloseForm, #identityResetForm, #identityDeleteForm) > label { grid-column: auto; }
+  }
+}
+
+#identity.show {
+  #identitySummary {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  #identitySummary p {
+    min-width: 0;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--workspace-hover);
+    text-wrap: pretty;
+  }
+
+  #identitySummary p:first-child {
+    grid-column: 1 / -1;
+    padding: 12px 14px;
+    border-inline-start: 3px solid #417fac;
+    background: #edf4fa;
+  }
+
+  #identitySummary b { color: var(--ink); font-size: 20px; font-weight: 700; }
+
+  .identity-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 14px;
+  }
+
+  .identity-actions:not(:has(button:not([hidden]))),
+  #identityEffectiveOperations:empty { display: none; }
+
+  #identityEffectiveOperations {
+    gap: 6px 8px;
+    margin-top: 16px;
+    padding-top: 13px;
+    border-top: 1px solid var(--line);
+  }
+
+  #identityEffectiveOperations span {
+    max-width: 100%;
+    padding: 4px 8px;
+    border-radius: 5px;
+    background: #edf4fa;
+    color: #34536a;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+
+  #identitySelfForms { grid-template-columns: minmax(0, 1fr); margin: 0; }
+  #identityLogout { margin-top: 12px; }
+  #identityCloseForm { padding-top: 14px; border-top: 1px solid var(--line); }
+
+  @container identity-workspace (min-width: 700px) {
+    #identitySummary { grid-template-columns: minmax(0, 1.4fr) repeat(2, minmax(0, 1fr)); }
+    #identityPasswordForm { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    #identityPasswordForm > label { grid-column: auto; }
+  }
+}
+
+#identityManagement.show {
+  #identityManagementNotice { margin-bottom: 12px; }
+  > .card > button { margin: 0 8px 4px 0; }
+
+  #identityManagementContent, #identityManagementContent > .grid.two {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+    margin: 0;
+  }
+
+  label:has(> :is(#identityUserSelect, #identityTypeSelect)) { max-width: 540px; }
+
+  :is(#identityUserState, #identityTypeMembers, #identityAuditStatus):not(:empty) {
+    margin: 9px 0 0;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--workspace-hover);
+  }
+
+  #identityUserForm + .filters {
+    display: flex;
+    gap: 8px;
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+  }
+
+  #identityUserForm + .filters > .btn { width: auto; }
+
+  :is(#identityResetForm, #identityDeleteForm, #identityDeleteTypeForm) {
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+  }
+
+  #identityQualificationsPanel .form-grid {
+    min-width: 0;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: var(--workspace-hover);
+  }
+
+  .identity-operation-picker {
+    min-width: 0;
+    margin: 0;
+    padding: 12px;
+    border-color: var(--line);
+    border-radius: 8px;
+    background: var(--workspace-hover);
+  }
+
+  .identity-operation-picker legend {
+    padding: 0 6px;
+    color: #315b7a;
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  #identityOperationPicker {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+    align-items: start;
+    gap: 10px;
+  }
+
+  #identityOperationPicker .identity-operation-group {
+    min-width: 0;
+    margin: 0;
+    padding: 9px 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: #fff;
+  }
+
+  .identity-operation-group b {
+    display: block;
+    margin-bottom: 4px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--line);
+    color: #233f55;
+    font-size: 13px;
+  }
+
+  .identity-operation-group label {
+    padding: 5px 3px;
+    border-radius: 4px;
+    overflow-wrap: anywhere;
+  }
+
+  .identity-operation-group label:hover:has(input:enabled) { background: var(--workspace-hover); }
+  .identity-operation-group label:has(input:disabled) { color: var(--muted); }
+
+  .identity-operation-group input[type="checkbox"] {
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    accent-color: var(--brand);
+  }
+
+  #identityAuditForm { align-items: end; gap: 10px; margin-top: 14px; }
+  #identityAuditForm > label { flex: 1 1 240px; max-width: 460px; }
+  #identityAuditForm > .btn { width: auto; min-height: 38px; }
+
+  #identityAuditRows:not(:empty) { gap: 9px; margin-top: 12px; }
+
+  #identityAuditRows article {
+    min-width: 0;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    overflow-wrap: anywhere;
+  }
+
+  #identityAuditRows article p { margin-top: 4px; }
+  #identityAuditRows summary { margin-top: 8px; font-size: 13px; font-weight: 650; }
+
+  #identityAuditRows pre {
+    max-height: 45vh;
+    overflow: auto;
+    margin: 8px 0 0;
+    padding: 10px;
+    border-radius: 5px;
+    background: var(--workspace-hover);
+    white-space: pre-wrap;
+  }
+
+  @container identity-workspace (min-width: 700px) {
+    #identityUserForm > label:has(> :is(#identityPrimaryType, #identityAdditionalTypes)) {
+      grid-column: auto;
+      align-self: start;
+    }
+
+    #identityQualificationsPanel {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px 14px;
+      align-items: start;
+    }
+
+    #identityQualificationsPanel > :is(h2, p) { grid-column: 1 / -1; }
+    #identityQualificationsPanel > :is(p, form) { margin-top: 0; }
+  }
+
+  @container identity-workspace (min-width: 780px) {
+    #identityTypeForm { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+    #identityTypeForm > label:not(.full) { grid-column: span 2; }
+    #identityTypeForm > label:has(select[multiple]) { grid-column: span 3; }
+    #identityTypeForm > .btn { grid-column: 1 / -1; }
+
+    #identityDeleteTypeForm { grid-template-columns: repeat(2, minmax(0, 1fr)) auto; align-items: end; }
+    #identityOperationPicker { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  }
+}
+
+.identity-impact-dialog {
+  padding: clamp(14px, 3vw, 24px);
+  border: 1px solid #d7e2ec;
+  border-radius: 10px;
+  background: #fff;
+  color: #1a2f42;
+  box-shadow: 0 12px 38px rgb(24 48 68 / 18%);
+  overflow-wrap: anywhere;
+}
+
+.identity-impact-dialog::backdrop { background: rgb(24 48 68 / 48%); }
+.identity-impact-dialog > h3 { margin: 0; font-size: 18px; }
+.identity-impact-dialog p { margin: 9px 0; color: #506477; }
+
+.identity-impact-dialog > section {
+  margin: 12px 0;
+  padding: 10px 14px;
+  border: 1px solid #d7e2ec;
+  border-radius: 8px;
+  background: #f3f7fb;
+}
+
+.identity-impact-dialog h4 { margin: 0; }
+
+.identity-impact-dialog > div:last-child {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: end;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid #d7e2ec;
+}
+
+.identity-impact-dialog button {
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid #c7d5e2;
+  border-radius: 6px;
+  background: #fff;
+  color: #294357;
+  font: inherit;
+  font-weight: 650;
+}
+
+.identity-impact-dialog button:last-child { border-color: #155e9b; background: #155e9b; color: #fff; }
+.identity-impact-dialog button:enabled { cursor: pointer; }
+.identity-impact-dialog button:disabled { opacity: .55; }
+.identity-impact-dialog button:focus-visible { outline: 2px solid #2680bd; outline-offset: 2px; }
