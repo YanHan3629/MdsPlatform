@@ -219,12 +219,23 @@ function renderContracts() {
   $('#contractTable').innerHTML = rows.map(c => {
     const provider=c.providerOrgId===chainOwner().orgId,consumer=c.consumerOrgId===chainOwner().orgId;
     const pending=c.status==='PENDING_CONFIRMATION',confirmed=c.status==='CONFIRMED';
+    const qualityDetails = [
+      c.measuredQuality == null || c.measuredQuality === '' ? '' : `实测 ${esc(c.measuredQuality)}%`,
+      esc(c.qualityRulesVersion)
+    ].filter(Boolean).join(' · ');
     return `
     <tr>
-      <td><b>${esc(c.contractName)} · 修订 ${esc(c.revision)}</b><p>${esc(c.contractId)}</p><p>${esc(mdsLabel(c.status))} · 授权状态 ${esc(mdsLabel(c.authorizationStatus))}</p></td>
-      <td>${esc(c.businessName || '-')}<p>${esc(c.productName)} / ${esc(c.versionName)} / 产品修订 ${esc(c.productRevision)}</p><p>${esc(mdsLabel(c.scopeType,'范围待核对'))} · ${esc(c.fileCount)} 文件</p></td>
+      <td><b>${esc(c.contractName)} <span class="contract-token contract-revision">· 修订 ${esc(c.revision)}</span></b>
+        <p>${esc(c.contractId)}</p><p>${esc(mdsLabel(c.status))} · <span class="contract-token">授权状态 ${esc(mdsLabel(c.authorizationStatus))}</span></p></td>
+      <td>${esc(c.businessName || '-')}
+        <p>${esc(c.productName)} / <span class="contract-token">${esc(c.versionName)}</span> / <span class="contract-token">产品修订 ${esc(c.productRevision)}</span></p>
+        <p>${esc(mdsLabel(c.scopeType,'范围待核对'))} · <span class="contract-token">${esc(c.fileCount)} 文件</span></p></td>
       <td>${esc(c.providerName)}<p>→ ${esc(c.consumerName)}</p></td>
-      <td>${esc(c.sendTime)}<p>有效期 ${esc(c.validFrom)} 至 ${esc(c.validTo)}</p><p>${esc(c.receiverEndpoint)}</p></td><td>${c.qualityThreshold==null?'不另设数值门槛':'≥ '+esc(c.qualityThreshold)+'%'}<p>实测 ${esc(c.measuredQuality)}% · ${esc(c.qualityRulesVersion)}</p></td><td>${c.pushStatus?status(c.pushStatus):'—'}<p>${esc(c.error?mdsSystemMessage(c.error,'交付任务未完成，请查看任务记录。'):c.revokeReason||'')}</p></td>
+      <td><span class="contract-token">${esc(c.sendTime)}</span>
+        <p>有效期 <span class="contract-token">${esc(c.validFrom)}</span> <span class="contract-token">至 ${esc(c.validTo)}</span></p>
+        <p>${esc(c.receiverEndpoint)}</p></td>
+      <td class="contract-quality">${c.qualityThreshold==null?'不另设数值门槛':'≥ '+esc(c.qualityThreshold)+'%'}<p>${qualityDetails}</p></td>
+      <td>${c.pushStatus?status(c.pushStatus):'—'}<p>${esc(c.error?mdsSystemMessage(c.error,'交付任务未完成，请查看任务记录。'):c.revokeReason||'')}</p></td>
       <td><button class="btn link" data-contract-history="${esc(c.contractId)}">条款记录</button>
         ${c.hasAccess&&canSearch?`<button class="btn link" data-open-product="${esc(c.productId)}" data-version="${esc(c.productVersionId)}" data-target="#retrieval">进入冻结版本检索</button>`:''}
         ${pending&&consumer&&canConfirm?`<button class="btn" data-confirm-contract="${esc(c.contractId)}" data-revision="${esc(c.revision)}">确认修订 ${esc(c.revision)}</button>`:''}

@@ -9,6 +9,13 @@
   <link rel="stylesheet" href="./controlled-views.css?v=f04-r76" />
   <link rel="stylesheet" href="./sign-in.css?v=1" />
   <link rel="stylesheet" href="./dashboard.css?v=6" />
+  <link rel="stylesheet" href="./workspace-theme.css" />
+  <link rel="stylesheet" href="./dashboard-theme.css" />
+  <link rel="stylesheet" href="./provider-theme.css" />
+  <link rel="stylesheet" href="./market-theme.css" />
+  <link rel="stylesheet" href="./multimodal-theme.css" />
+  <link rel="stylesheet" href="./contracts-theme.css" />
+  <link rel="stylesheet" href="./identity-theme.css" />
 </head>
 <body>
   <noscript><main class="sign-in"><section class="card sign-in-card">请启用 JavaScript 后登录数据空间。</section></main></noscript>
@@ -64,6 +71,7 @@
 
       <p id="noBusinessPermission" class="card" hidden>暂无业务权限。可在“我的账号”查看当前账号和权限。</p>
       <section id="dashboard" class="page">
+        <div id="kpis" class="kpi-grid"></div>
         <details id="controlledViewExports" class="card mini-gap" hidden>
           <summary>授权视图导出</summary>
           <p>导出当前获准的独立视图，保留其行列和文件范围，并附范围与文件校验清单。</p>
@@ -120,7 +128,6 @@
             <button type="button" id="dashboardNext" class="btn">下一页</button>
           </div>
         </section>
-        <div id="kpis" class="kpi-grid"></div>
         <div class="grid two">
           <section class="card">
             <div class="card-head">

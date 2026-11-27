@@ -1,0 +1,200 @@
+/* Workbench forms share the dashboard palette and keep their existing sequence. */
+#businessShell:has(#provider.show) {
+  #provider.show {
+    display: grid;
+    gap: 14px;
+    padding: var(--workspace-gutter);
+  }
+
+  #provider > .card-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 9px 16px;
+    min-height: 61px;
+    margin: 0;
+    padding: 12px clamp(16px, 2.1vw, 22px);
+    border: 1px solid var(--line);
+    border-left: 3px solid #417fac;
+    border-radius: var(--radius);
+    background: #fff;
+    box-shadow: var(--shadow);
+  }
+
+  #provider h2 {
+    margin: 0;
+    font-size: 17px;
+    font-weight: 700;
+    line-height: 1.4;
+  }
+
+  #controlledViewsOpenProvider {
+    border-color: var(--brand);
+    background: var(--brand);
+    color: #fff;
+  }
+
+  #controlledViewsOpenProvider:hover:not(:disabled) { background: #104e82; }
+
+  #provider > .grid {
+    grid-template-columns: minmax(0, .86fr) minmax(0, 1.14fr);
+    gap: 14px;
+    margin: 0;
+  }
+
+  #provider .card {
+    padding: clamp(16px, 2.1vw, 22px);
+    background: #fff;
+  }
+
+  #provider .card .card-head {
+    margin: 0 0 14px;
+    padding-bottom: 13px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  #provider .card > h2 {
+    margin-bottom: 14px;
+    padding-bottom: 13px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  #provider .card .eyebrow {
+    width: fit-content;
+    margin: 0 0 7px;
+    padding: 3px 7px;
+    border-radius: 4px;
+    background: #edf4fa;
+    color: #285d84;
+    font-size: 12px;
+    font-weight: 650;
+    letter-spacing: .025em;
+  }
+
+  #provider form {
+    min-width: 0;
+    gap: 11px;
+    margin: 0;
+  }
+
+  #provider .form-grid { grid-template-columns: minmax(0, 1fr); }
+
+  #provider label {
+    display: grid;
+    min-width: 0;
+    gap: 6px;
+    color: #344e63;
+    font-size: 13px;
+    font-weight: 650;
+  }
+
+  #provider :is(input, select, textarea) {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    min-height: 38px;
+    padding: 7px 10px;
+    border-color: #bccdde;
+    border-radius: 6px;
+    font-weight: 400;
+  }
+
+  #provider textarea { min-height: 78px; }
+
+  #provider :is(input, textarea)::placeholder {
+    color: #5e7184;
+    opacity: 1;
+  }
+
+  #provider form > p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.65;
+  }
+
+  #provider form .btn {
+    justify-self: start;
+    width: auto;
+    max-width: 100%;
+    min-height: 36px;
+    margin-top: 2px;
+  }
+
+  #provider #spaces:not(:empty) {
+    gap: 8px;
+    margin-top: 15px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+  }
+
+  #provider #spaces .compact {
+    align-items: flex-start;
+    padding: 11px 12px;
+    border-radius: 6px;
+    background: var(--workspace-hover);
+  }
+
+  #provider #spaces .compact p { overflow-wrap: anywhere; }
+  #provider #spaces .status { padding: 3px 7px; border-radius: 4px; font-weight: 650; }
+  #provider #spaces .status.VERIFIED { color: #166534; }
+  #provider #spaces .status.PENDING_AUTH { color: #825217; }
+
+  #qualityReport:not(:empty) {
+    min-width: 0;
+    margin-top: 15px;
+    padding: 11px 12px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--workspace-hover);
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  #qualityReport p { margin: 0 0 8px; }
+  #qualityReport p:last-child { margin-bottom: 0; }
+  #qualityReport details { margin-top: 9px; }
+  #qualityReport pre { overflow: auto; }
+
+  #provider > .grid.three > .card:last-child {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr);
+    column-gap: clamp(15px, 2.2vw, 26px);
+  }
+
+  #provider > .grid.three > .card:last-child > :is(.eyebrow, h2) { grid-column: 1 / -1; }
+
+  #provider #indexForm {
+    align-self: start;
+    padding: 13px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--workspace-hover);
+  }
+
+  #provider #publishForm {
+    align-self: start;
+    padding-inline-start: clamp(15px, 2.2vw, 26px);
+    border-inline-start: 1px solid var(--line);
+  }
+
+  #controlledViewDialog {
+    border-radius: var(--radius);
+    background: var(--workspace-canvas);
+  }
+
+  #controlledViewDialog .card { background: #fff; }
+
+  @media (max-width: 760px) {
+    #provider > .grid,
+    #provider > .grid.three > .card:last-child { grid-template-columns: minmax(0, 1fr); }
+
+    #provider #publishForm {
+      margin-top: 15px;
+      padding: 15px 0 0;
+      border-inline-start: 0;
+      border-top: 1px solid var(--line);
+    }
+  }
+}

@@ -1,0 +1,221 @@
+/* Shared navigation and header for the themed business pages. */
+#businessShell:has(:is(#dashboard, #provider, #market, #retrieval, #qa, #contracts, #identity, #identityManagement).show) {
+  --workspace-canvas: #edf2f6;
+  --workspace-sidebar: #183044;
+  --workspace-sidebar-line: #375063;
+  --workspace-sidebar-muted: #acc1d0;
+  --workspace-hover: #f3f7fb;
+  --workspace-gutter: clamp(18px, 3vw, 36px);
+  --ink: #1a2f42;
+  --muted: #506477;
+  --line: #d7e2ec;
+  --brand: #155e9b;
+  --shadow: 0 1px 3px rgba(24, 48, 68, .06);
+  --radius: 10px;
+  color: var(--ink);
+  font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+
+  .shell {
+    grid-template-columns: 230px minmax(0, 1fr);
+    background: var(--workspace-canvas);
+  }
+
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    position: sticky;
+    height: 100dvh;
+    padding: 22px 15px 18px;
+    background: var(--workspace-sidebar);
+    border-right: 0;
+    color: #eff6fa;
+    backdrop-filter: none;
+  }
+
+  .brand {
+    gap: 10px;
+    margin: 0 0 17px;
+    padding: 0 3px 19px;
+    border-bottom: 1px solid var(--workspace-sidebar-line);
+  }
+
+  .logo {
+    flex: 0 0 35px;
+    width: 35px;
+    height: 35px;
+    border: 1px solid #5a91bc;
+    border-radius: 8px;
+    background: #246da4;
+    box-shadow: none;
+    font-size: 17px;
+  }
+
+  .brand b { font-size: 14px; }
+  .brand span { color: var(--workspace-sidebar-muted); }
+
+  .sidebar nav { gap: 3px; }
+
+  .sidebar nav a {
+    min-height: 39px;
+    padding: 9px 10px;
+    border-left: 3px solid transparent;
+    border-radius: 5px;
+    color: #d5e4ee;
+    font-weight: 600;
+  }
+
+  .sidebar nav a:hover {
+    background: #253f55;
+    color: #fff;
+  }
+
+  .sidebar nav a[aria-current="page"] {
+    border-left-color: #8bcbef;
+    background: #245b84;
+    color: #fff;
+  }
+
+  .business-panel {
+    margin: 18px 0 14px;
+    padding: 14px 0 0;
+    border: 0;
+    border-top: 1px solid var(--workspace-sidebar-line);
+    border-radius: 0;
+    background: transparent;
+  }
+
+  .business-title {
+    margin: 0 0 9px 4px;
+    color: var(--workspace-sidebar-muted);
+    font-weight: 650;
+    letter-spacing: .04em;
+  }
+
+  .tree-root {
+    align-items: center;
+    padding: 7px 8px;
+    border-radius: 5px;
+    background: #223d52;
+  }
+
+  .tree-root b { font-size: 13px; overflow-wrap: anywhere; }
+  .tree-root .caret { color: var(--workspace-sidebar-muted); }
+
+  .business-tree {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 3px;
+    margin: 7px 0 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .business-tree small { padding: 6px 8px; color: var(--workspace-sidebar-muted); }
+
+  .tree-node {
+    min-width: 0;
+    padding: 7px 8px;
+    border-radius: 5px;
+    color: #d5e4ee;
+  }
+
+  .tree-node .name { white-space: normal; }
+  .tree-node:hover, .tree-node.active { background: #28465f; }
+  .tree-node.active .name { color: #fff; font-weight: 700; }
+  .business-tree .btn.link { justify-self: start; color: #a9dbff; }
+
+  .api-box {
+    margin: auto 0 0;
+    padding: 12px 0 0;
+    border: 0;
+    border-top: 1px solid var(--workspace-sidebar-line);
+    border-radius: 0;
+    background: transparent;
+  }
+
+  #reloadBtn {
+    border-color: #56758b;
+    background: #233e54;
+    color: #edf6fb;
+  }
+
+  #reloadBtn:hover { background: #2e4f6a; }
+
+  .shell > main { padding: 0; }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 14px 24px;
+    margin: 0;
+    padding: 22px var(--workspace-gutter);
+    border-bottom: 1px solid var(--line);
+    background: #fff;
+  }
+
+  .topbar h1 {
+    margin: 0;
+    font-size: clamp(22px, 2.2vw, 31px);
+    font-weight: 700;
+    letter-spacing: .01em;
+  }
+
+  .topbar .eyebrow { display: none; }
+  .top-actions { gap: 8px; }
+
+  #businessSessionSummary {
+    max-width: min(100%, 28ch);
+    padding: 6px 9px;
+    border-radius: 5px;
+    background: #edf4fa;
+    color: #36566d;
+    font-size: 12px;
+  }
+
+  .btn {
+    min-height: 34px;
+    padding: 6px 11px;
+    border: 1px solid #c7d5e2;
+    border-radius: 6px;
+    background: #fff;
+    color: #294357;
+    font: inherit;
+    font-weight: 650;
+  }
+
+  .btn:hover:not(:disabled) { background: #eef5fa; filter: none; }
+  .btn:disabled { opacity: .55; cursor: default; }
+  .btn.link { border-color: transparent; background: transparent; color: var(--brand); }
+
+  .btn.primary {
+    border-color: var(--brand);
+    background: var(--brand);
+    box-shadow: none;
+    color: #fff;
+  }
+
+  .btn.primary:hover:not(:disabled) { background: #104e82; }
+
+  :is(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 2px solid #2680bd;
+    outline-offset: 2px;
+  }
+
+  .sidebar :is(a, button):focus-visible { outline-color: #a2dbff; }
+
+  @media (max-width: 900px) {
+    .shell { grid-template-columns: minmax(0, 1fr); }
+    .sidebar { position: static; height: auto; padding: 14px 18px 17px; }
+    .brand { margin-bottom: 9px; padding-bottom: 12px; }
+    .sidebar nav { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .business-panel { margin-block: 11px 9px; }
+    .business-tree { grid-template-columns: repeat(auto-fit, minmax(105px, 1fr)); }
+    .api-box { align-self: flex-end; border-top: 0; padding-top: 4px; }
+  }
+
+  @media (max-width: 600px) {
+    .sidebar nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .topbar { padding-block: 16px; }
+  }
+}
