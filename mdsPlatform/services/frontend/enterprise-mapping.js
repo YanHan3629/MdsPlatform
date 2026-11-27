@@ -29,8 +29,7 @@
   const status=text=>{$('enterpriseMappingStatus').textContent=text;};
   function report(error){
     if(error?.name==='AbortError'||!$('enterpriseMappingDialog').open)return;
-    const text=String(error?.message||error||'操作失败。'),key=Object.keys(errors).find(code=>text.includes(code));
-    status(key?errors[key]:text);
+    status(mdsErrorMessage(error,errors));
   }
   function options(select,items,placeholder){
     select.replaceChildren(new Option(placeholder,''));
@@ -54,7 +53,7 @@
     clearReview();const org=selectedOrg();
     $('enterpriseMappingCurrent').textContent=org?
       (org.catalogCustodian?'独立名录保管组织；不绑定单一企业。':org.entityId?
-       '当前映射：'+org.enterpriseName+' · '+org.entityId+' · '+(states[org.mappingState]||org.mappingState)+'；'+org.memberCount+' 名成员':
+       '当前映射：'+org.enterpriseName+' · '+org.entityId+' · '+(states[org.mappingState]||'映射状态待核验')+'；'+org.memberCount+' 名成员':
        '尚未确认业务实体；'+org.memberCount+' 名成员'):'请选择组织。';
     $('enterpriseMappingDisable').disabled=!org||org.mappingState!=='CONFIRMED'||org.status!==1;
     if(org?.catalogRevisionId&&catalogs.some(c=>c.catalogRevisionId===org.catalogRevisionId))$('enterpriseMappingCatalog').value=org.catalogRevisionId;
@@ -101,8 +100,8 @@
     review={reviewId:result.reviewId,orgId:org.orgId,orgName:org.orgName,revision:auth.revision};
     const p=result.preview,container=$('enterpriseMappingReviewContent');container.replaceChildren();
     line(container,'组织',p.orgName);
-    line(container,'原映射',p.before?(p.before.enterpriseName+' · '+p.before.entityId+' · '+(states[p.before.state]||p.before.state)):'无');
-    line(container,'新映射',p.after.enterpriseName+' · '+p.after.entityId+' · '+(industries[p.after.industryKind]||p.after.industryKind)+' · '+(states[p.after.state]||p.after.state));
+    line(container,'原映射',p.before?(p.before.enterpriseName+' · '+p.before.entityId+' · '+(states[p.before.state]||'映射状态待核验')):'无');
+    line(container,'新映射',p.after.enterpriseName+' · '+p.after.entityId+' · '+(industries[p.after.industryKind]||'行业待核验')+' · '+(states[p.after.state]||'映射状态待核验'));
     line(container,'用途',p.after.identityKind==='TEST'?'受控测试映射':'业务组织映射');
     line(container,'影响范围',p.impact.memberCount+' 名成员；'+p.impact.datasetCount+' 个数据集；'+p.impact.contractCount+' 份合同；'+p.impact.grantCount+' 条授权记录');
     line(container,'确认依据',p.reason);line(container,'预览有效至',new Date(result.expiresAt).toLocaleString());

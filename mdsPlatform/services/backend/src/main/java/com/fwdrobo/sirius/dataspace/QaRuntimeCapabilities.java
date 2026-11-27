@@ -35,6 +35,9 @@ final class QaRuntimeCapabilities {
         active = activeProfile;
         contextLimit = definition.path("profiles").path(active).path("contextTokens").asInt();
         if (contextLimit < 1) throw new IllegalStateException("Unknown QA runtime profile");
+        if (!definition.path("maxDataScopes").isIntegralNumber() || !definition.path("maxDataScopes").canConvertToInt()
+                || maxDataScopes() < 1 || maxDataScopes() > 8)
+            throw new IllegalStateException("Invalid QA scope capacity");
     }
 
     JsonNode validateProfile(Map<String, Object> body) {
@@ -89,6 +92,7 @@ final class QaRuntimeCapabilities {
     }
 
     int maxImageCount() { return definition.path("maxImageCount").asInt(); }
+    int maxDataScopes() { return definition.path("maxDataScopes").asInt(); }
     long maxImageBytes() { return definition.path("maxImageBytes").asLong(); }
     long maxAttachmentBytes() { return definition.path("maxAttachmentBytes").asLong(); }
     int outerTimeoutMillis() { return (definition.path("profiles").path(active).path("deadlineSeconds").asInt() + 8) * 1000; }

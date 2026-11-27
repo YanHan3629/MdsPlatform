@@ -62,7 +62,7 @@ public class JwtAuthFilter extends OncePerRequestFilter {
     private void reject(HttpServletResponse response,int status,String code) throws IOException {
         SecurityContextHolder.clearContext();response.setStatus(status);response.setCharacterEncoding("UTF-8");
         response.setContentType("application/json");response.setHeader("Cache-Control","no-store, private");
-        mapper.writeValue(response.getOutputStream(),Map.of("success",false,"errorType",code,"status",status));
+        mapper.writeValue(response.getOutputStream(),com.fwdrobo.sirius.handler.ApiErrors.body(status,code,null));
     }
     @Override protected void doFilterInternal(HttpServletRequest request,HttpServletResponse response,FilterChain chain)
             throws ServletException,IOException {

@@ -4,254 +4,211 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import io.jsonwebtoken.ExpiredJwtException;
 import io.jsonwebtoken.JwtException;
 import jakarta.validation.ConstraintViolationException;
-import org.springframework.http.HttpStatus;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.AuthenticationException;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingPathVariableException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
-import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.support.MissingServletRequestPartException;
 import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
-import java.util.HashMap;
+import java.sql.SQLException;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
-/**
- * 全局异常处理器，统一处理auth模块的各类异常
- */
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+    private static final Logger LOG = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+    private static final Map<String,String> FIELDS = Map.ofEntries(
+            Map.entry("userName", "账号"), Map.entry("username", "账号"),
+            Map.entry("password", "密码"), Map.entry("newPassword", "新密码"),
+            Map.entry("temporaryPassword", "临时密码"), Map.entry("name", "名称"),
+            Map.entry("datasetId", "数据集"), Map.entry("versionId", "版本"),
+            Map.entry("indexVersionId", "索引版本"), Map.entry("datasetName", "数据集名称"),
+            Map.entry("spaceName", "空间名称"), Map.entry("versionName", "版本名称"),
+            Map.entry("orgId", "所属企业"), Map.entry("question", "问题"),
+            Map.entry("page", "页码"), Map.entry("size", "每页条数"),
+            Map.entry("files", "文件"), Map.entry("images", "图片附件"));
 
-    /**
-     * 处理请求参数校验失败异常
-     * 拦截 @Valid 注解校验失败的情况
-     */
+    private static String validationReason(String code) {
+        return switch (code == null ? "" : code) {
+            case "NotNull", "NotBlank", "NotEmpty" -> "为必填项";
+            case "Size", "Length" -> "长度或数量超出允许范围";
+            case "Min", "Max", "DecimalMin", "DecimalMax", "Positive", "PositiveOrZero" -> "数值超出允许范围";
+            case "Pattern", "Email" -> "格式不正确";
+            case "Past", "PastOrPresent", "Future", "FutureOrPresent" -> "时间超出允许范围";
+            default -> "取值无效";
+        };
+    }
+
+    private static String fieldLabel(String path) {
+        String field = path.substring(path.lastIndexOf('.') + 1).replaceFirst("\\[.*", "");
+        return FIELDS.getOrDefault(field, "字段");
+    }
+
+    private ResponseEntity<Map<String,Object>> validation(Map<String,String> fields) {
+        var message = fields.entrySet().stream()
+                .map(entry -> fieldLabel(entry.getKey()) + entry.getValue())
+                .distinct().reduce((a, b) -> a + "，" + b).orElse("请检查填报内容") + "。";
+        Map<String,Object> body = new LinkedHashMap<>(ApiErrors.body(400, "VALIDATION_ERROR", message));
+        body.put("errors", fields);
+        return ResponseEntity.badRequest().body(body);
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
-    @ResponseStatus(HttpStatus.BAD_REQUEST)
-    public Map<String, Object> handleValidation(MethodArgumentNotValidException ex) {
-
-        Map<String, String> fieldErrors = new HashMap<>();
-        StringBuilder messageBuilder = new StringBuilder();
-
-        ex.getBindingResult().getFieldErrors().forEach(err -> {
-            fieldErrors.put(err.getField(), err.getDefaultMessage());
-            if (messageBuilder.length() > 0) {
-                messageBuilder.append("; ");
-            }
-            messageBuilder.append(err.getField()).append(": ").append(err.getDefaultMessage());
-        });
-
-        return Map.of(
-            "success", false,
-            "errorType", "VALIDATION_ERROR",
-            "message", messageBuilder.toString(),
-            "errors", fieldErrors,
-            "status", HttpStatus.BAD_REQUEST.value()
-        );
+    public ResponseEntity<Map<String,Object>> handleValidation(MethodArgumentNotValidException ex) {
+        Map<String,String> fields = new LinkedHashMap<>();
+        ex.getBindingResult().getFieldErrors().forEach(err -> fields.put(err.getField(), validationReason(err.getCode())));
+        return validation(fields);
     }
 
-    /**
-     * 处理方法级参数校验异常
-     * 拦截 @RequestParam、@PathVariable 等注解校验失败的情况
-     */
     @ExceptionHandler(ConstraintViolationException.class)
-    @ResponseStatus(HttpStatus.BAD_REQUEST)
-    public Map<String, Object> handleConstraintViolation(ConstraintViolationException ex) {
-        Map<String, String> fieldErrors = new HashMap<>();
-        StringBuilder messageBuilder = new StringBuilder();
-        
-        ex.getConstraintViolations().forEach(violation -> {
-            String fieldName = violation.getPropertyPath().toString();
-            String errorMsg = violation.getMessage();
-            fieldErrors.put(fieldName, errorMsg);
-            if (messageBuilder.length() > 0) {
-                messageBuilder.append("; ");
-            }
-            messageBuilder.append(fieldName).append(": ").append(errorMsg);
-        });
-        
-        return Map.of(
-                "success", false,
-                "errorType", "VALIDATION_ERROR",
-                "message", messageBuilder.toString(),
-                "errors", fieldErrors,
-                "status", HttpStatus.BAD_REQUEST.value()
-        );
+    public ResponseEntity<Map<String,Object>> handleConstraintViolation(ConstraintViolationException ex) {
+        Map<String,String> fields = new LinkedHashMap<>();
+        ex.getConstraintViolations().forEach(err -> fields.put(err.getPropertyPath().toString(),
+                validationReason(err.getConstraintDescriptor().getAnnotation().annotationType().getSimpleName())));
+        return validation(fields);
     }
 
-    /**
-     * 处理缺失路径参数异常
-     * 拦截 @PathVariable 注解缺失参数的情况
-     */
+    private ResponseEntity<Map<String,Object>> failure(int status, String code, String message) {
+        return ResponseEntity.status(status).body(ApiErrors.body(status, code, message));
+    }
+
     @ExceptionHandler(MissingPathVariableException.class)
-    @ResponseStatus(HttpStatus.BAD_REQUEST)
-    public Map<String, Object> handleMissingPathVariable(MissingPathVariableException ex) {
-        return Map.of(
-                "success", false,
-                "message", "缺少路径参数: " + ex.getVariableName(),
-                "status", HttpStatus.BAD_REQUEST.value(),
-                "errorType", "MISSING_PATH_VARIABLE"
-        );
+    public ResponseEntity<Map<String,Object>> handleMissingPath(MissingPathVariableException ex) {
+        return failure(400, "MISSING_PATH_VARIABLE", "缺少" + fieldLabel(ex.getVariableName()) + "，请返回页面重新选择。");
     }
 
-    /**
-     * 处理类型转换异常
-     * 拦截 @PathVariable 或 @RequestParam 等参数类型转换失败的情况（如无效的UUID格式）
-     */
+    @ExceptionHandler(MissingServletRequestParameterException.class)
+    public ResponseEntity<Map<String,Object>> handleMissingParameter(MissingServletRequestParameterException ex) {
+        return failure(400, "MISSING_PARAMETER", "缺少" + fieldLabel(ex.getParameterName()) + "，请填写后重试。");
+    }
+
     @ExceptionHandler(MethodArgumentTypeMismatchException.class)
-    @ResponseStatus(HttpStatus.BAD_REQUEST)
-    public Map<String, Object> handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
-        String paramName = ex.getName();
-        String requiredType = ex.getRequiredType() != null ? ex.getRequiredType().getSimpleName() : "Unknown";
-        String providedValue = ex.getValue() != null ? ex.getValue().toString() : "null";
-
-        String message = String.format("参数 '%s' 的值 '%s' 无法转换为所需的类型 %s",
-                paramName, providedValue, requiredType);
-
-        return Map.of(
-                "success", false,
-                "message", message,
-                "status", HttpStatus.BAD_REQUEST.value(),
-                "errorType", "INVALID_PARAMETER_TYPE"
-        );
+    public ResponseEntity<Map<String,Object>> handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
+        return failure(400, "INVALID_PARAMETER_TYPE", fieldLabel(ex.getName()) + "格式不正确，请修改后重试。");
     }
 
-    /**
-     * 处理ResponseStatusException异常
-     */
     @ExceptionHandler(ResponseStatusException.class)
-    public ResponseEntity<Map<String, Object>> handleResponseStatusException(ResponseStatusException ex) {
-        Map<String, Object> error = new HashMap<>();
-        error.put("success", false);
-        error.put("message", ex.getReason() != null ? ex.getReason() : "请求处理失败");
-        error.put("status", ex.getStatusCode().value());
-        return ResponseEntity.status(ex.getStatusCode()).body(error);
+    public ResponseEntity<Map<String,Object>> handleResponseStatusException(ResponseStatusException ex) {
+        int status = ex.getStatusCode().value();
+        String reason = ex.getReason();
+        String code = reason != null && reason.matches("[A-Z][A-Z0-9_]{2,95}") ? reason : "HTTP_" + status;
+        // Preserve application-level validation guidance. Hidden scopes and internal failures
+        // have a uniform description regardless of the object or upstream response.
+        String detail = reason != null && status >= 400 && status < 500 && status != 401 && status != 403 && status != 404
+                && reason.length() <= 300 && reason.matches("(?s).*\\p{IsHan}.*")
+                && !reason.matches("(?is).*(?:exception|<html|\\r|\\n|\\\\).*") ? reason : null;
+        Map<String,Object> body = ApiErrors.body(status, code, detail);
+        if (status >= 500) LOG.warn("Request {} failed with {}", body.get("requestId"), code);
+        return ResponseEntity.status(status).headers(ex.getHeaders()).body(body);
     }
 
-    /**
-     * 处理JWT过期异常
-     */
     @ExceptionHandler(ExpiredJwtException.class)
-    public ResponseEntity<Map<String, Object>> handleExpiredJwtException(ExpiredJwtException ex) {
-        Map<String, Object> error = new HashMap<>();
-        error.put("success", false);
-        error.put("message", "登录已过期，请重新登录");
-        error.put("status", HttpStatus.UNAUTHORIZED.value());
-        error.put("errorType", "TOKEN_EXPIRED");
-        return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(error);
+    public ResponseEntity<Map<String,Object>> handleExpiredJwtException() {
+        return failure(401, "TOKEN_EXPIRED", null);
     }
 
-    /**
-     * 处理JWT无效异常
-     */
     @ExceptionHandler(JwtException.class)
-    public ResponseEntity<Map<String, Object>> handleJwtException(JwtException ex) {
-        Map<String, Object> error = new HashMap<>();
-        error.put("success", false);
-        error.put("message", "登录凭证无效，请重新登录");
-        error.put("status", HttpStatus.UNAUTHORIZED.value());
-        error.put("errorType", "TOKEN_INVALID");
-        return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(error);
+    public ResponseEntity<Map<String,Object>> handleJwtException() {
+        return failure(401, "TOKEN_INVALID", null);
     }
 
-    /**
-     * 处理访问拒绝异常（无权限）
-     */
     @ExceptionHandler(AccessDeniedException.class)
-    public ResponseEntity<Map<String, Object>> handleAccessDeniedException(AccessDeniedException ex) {
-        Map<String, Object> error = new HashMap<>();
-        error.put("success", false);
-        error.put("message", "权限不足，无法访问此资源");
-        error.put("status", HttpStatus.FORBIDDEN.value());
-        error.put("errorType", "ACCESS_DENIED");
-        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(error);
+    public ResponseEntity<Map<String,Object>> handleAccessDeniedException() {
+        return failure(403, "ACCESS_DENIED", null);
     }
 
-    /**
-     * 处理认证异常
-     */
     @ExceptionHandler(AuthenticationException.class)
-    public ResponseEntity<Map<String, Object>> handleAuthenticationException(AuthenticationException ex) {
-        Map<String, Object> error = new HashMap<>();
-        error.put("success", false);
-        error.put("message", "认证失败：" + ex.getMessage());
-        error.put("status", HttpStatus.UNAUTHORIZED.value());
-        error.put("errorType", "AUTHENTICATION_FAILED");
-        return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(error);
+    public ResponseEntity<Map<String,Object>> handleAuthenticationException() {
+        return failure(401, "AUTHENTICATION_FAILED", null);
     }
 
-    /**
-     * 处理IllegalArgumentException异常
-     */
     @ExceptionHandler(IllegalArgumentException.class)
-    public ResponseEntity<Map<String, Object>> handleIllegalArgumentException(IllegalArgumentException ex) {
-        Map<String, Object> error = new HashMap<>();
-        error.put("success", false);
-        error.put("message", ex.getMessage() != null ? ex.getMessage() : "请求参数错误");
-        error.put("status", HttpStatus.BAD_REQUEST.value());
-        error.put("errorType", "INVALID_ARGUMENT");
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
+    public ResponseEntity<Map<String,Object>> handleIllegalArgumentException() {
+        return failure(400, "INVALID_ARGUMENT", null);
     }
 
-    /**
-     * 处理IllegalStateException异常
-     */
     @ExceptionHandler(IllegalStateException.class)
-    public ResponseEntity<Map<String, Object>> handleIllegalStateException(IllegalStateException ex) {
-        Map<String, Object> error = new HashMap<>();
-        error.put("success", false);
-        error.put("message", "INTERNAL_STATE_ERROR");
-        error.put("status", HttpStatus.INTERNAL_SERVER_ERROR.value());
-        error.put("errorType", "ILLEGAL_STATE");
-        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(error);
+    public ResponseEntity<Map<String,Object>> handleIllegalStateException(IllegalStateException ex) {
+        return internalError("ILLEGAL_STATE", ex);
     }
 
-    /**
-     * 处理JSON解析/序列化异常
-     */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<Map<String,Object>> unreadableBody() {
+        return failure(400, "INVALID_OR_DUPLICATE_JSON_FIELDS", "请求格式不正确或含重复字段，请检查后重试。");
+    }
+
     @ExceptionHandler(JsonProcessingException.class)
-    public ResponseEntity<Map<String, Object>> handleJsonProcessingException(JsonProcessingException ex) {
-        Map<String, Object> error = new HashMap<>();
-        error.put("success", false);
-        error.put("message", "INVALID_JSON");
-        error.put("status", HttpStatus.BAD_REQUEST.value());
-        error.put("errorType", "JSON_PROCESSING_ERROR");
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
+    public ResponseEntity<Map<String,Object>> handleJsonProcessingException() {
+        return failure(400, "JSON_PROCESSING_ERROR", "请求内容格式不正确，请检查后重试。");
+    }
+
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public ResponseEntity<Map<String,Object>> handleTooLarge() {
+        return failure(413, "UPLOAD_TOO_LARGE", null);
+    }
+
+    @ExceptionHandler(MissingServletRequestPartException.class)
+    public ResponseEntity<Map<String,Object>> handleMissingPart() {
+        return failure(400, "MISSING_REQUEST_PART", "缺少文件或表单内容，请确认已选文件后重试。");
+    }
+
+    @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
+    public ResponseEntity<Map<String,Object>> handleMediaType() {
+        return failure(415, "UNSUPPORTED_MEDIA_TYPE", null);
+    }
+
+    @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
+    public ResponseEntity<Map<String,Object>> handleMethod(HttpRequestMethodNotSupportedException ex) {
+        return ResponseEntity.status(405).headers(ex.getHeaders()).body(ApiErrors.body(405, "METHOD_NOT_SUPPORTED", null));
+    }
+
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<Map<String,Object>> handleNotFound() {
+        return failure(404, "RESOURCE_NOT_AVAILABLE", null);
     }
 
     @ExceptionHandler({org.springframework.dao.DataAccessException.class,org.springframework.transaction.TransactionException.class})
     public ResponseEntity<Map<String,Object>> handleDatabaseConflict(Exception ex) {
-        String code="AUTHORITY_UNAVAILABLE";int status=503;
-        Throwable cause=ex;
-        for(int depth=0;cause!=null&&depth<16;depth++,cause=cause.getCause()) {
-            if(cause instanceof java.sql.SQLException sql) {
-                String state=sql.getSQLState();String message=sql.getMessage();
-                if(message!=null&&message.contains("LAST_PLATFORM_ADMIN_REQUIRED")){code="LAST_PLATFORM_ADMIN_REQUIRED";status=409;break;}
-                if("23505".equals(state)){code="IDENTITY_OR_RESOURCE_CONFLICT";status=409;break;}
-                if("23503".equals(state)||"23514".equals(state)){code="RESOURCE_STATE_CONFLICT";status=409;break;}
-                if("40P01".equals(state)||"40001".equals(state)){code="CONCURRENT_IDENTITY_CHANGE_RETRY";status=409;break;}
-            }
+        Throwable cause = ex;
+        for (int depth = 0; cause != null && depth < 16; depth++, cause = cause.getCause()) {
+            if (!(cause instanceof SQLException sql)) continue;
+            String message = sql.getMessage();
+            if (message != null && message.contains("LAST_PLATFORM_ADMIN_REQUIRED"))
+                return failure(409, "LAST_PLATFORM_ADMIN_REQUIRED", null);
+            String code = switch (String.valueOf(sql.getSQLState())) {
+                case "23505" -> "IDENTITY_OR_RESOURCE_CONFLICT";
+                case "23503", "23514" -> "RESOURCE_STATE_CONFLICT";
+                case "40P01", "40001" -> "CONCURRENT_IDENTITY_CHANGE_RETRY";
+                default -> null;
+            };
+            if (code != null) return failure(409, code, null);
         }
-        return ResponseEntity.status(status).body(Map.of("success",false,"errorType",code,"message",code,"status",status));
-    }
-    @ExceptionHandler(org.springframework.http.converter.HttpMessageNotReadableException.class)
-    public ResponseEntity<Map<String,Object>> unreadableBody(Exception ex) {
-        return ResponseEntity.badRequest().body(Map.of("success",false,"errorType","INVALID_OR_DUPLICATE_JSON_FIELDS","status",400));
+        var body = ApiErrors.body(503, "AUTHORITY_UNAVAILABLE", null);
+        LOG.error("Request {} failed to access database", body.get("requestId"), ex);
+        return ResponseEntity.status(503).body(body);
     }
 
-    /**
-     * 处理其他未捕获的异常
-     */
     @ExceptionHandler(Exception.class)
-    public ResponseEntity<Map<String, Object>> handleGenericException(Exception ex) {
-        Map<String, Object> error = new HashMap<>();
-        error.put("success", false);
-        error.put("message", "INTERNAL_ERROR");
-        error.put("status", HttpStatus.INTERNAL_SERVER_ERROR.value());
-        error.put("errorType", "INTERNAL_ERROR");
-        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(error);
+    public ResponseEntity<Map<String,Object>> handleGenericException(Exception ex) {
+        return internalError("INTERNAL_ERROR", ex);
+    }
+
+    private ResponseEntity<Map<String,Object>> internalError(String code, Exception ex) {
+        var body = ApiErrors.body(500, code, null);
+        LOG.error("Request {} failed with {}", body.get("requestId"), code, ex);
+        return ResponseEntity.status(500).body(body);
     }
 }

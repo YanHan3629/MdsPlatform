@@ -15,7 +15,6 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
 import java.io.IOException;
-import java.util.HashMap;
 import java.util.Map;
 
 /**
@@ -64,25 +63,15 @@ public class RestAuthenticationEntryPoint implements AuthenticationEntryPoint {
      * 构建未认证返回体，区分缺失、无效、过期令牌。
      */
     private Map<String, Object> buildUnauthorizedBody(HttpServletRequest request, JwtException jwtException) {
-        Map<String, Object> error = new HashMap<>();
-        error.put("success", false);
-        error.put("status", HttpStatus.UNAUTHORIZED.value());
-
         if (jwtException instanceof ExpiredJwtException) {
-            error.put("message", "登录已过期，请重新登录");
-            error.put("errorType", "TOKEN_EXPIRED");
-            return error;
+            return com.fwdrobo.sirius.handler.ApiErrors.body(401,"TOKEN_EXPIRED",null);
         }
 
         String authHeader = request.getHeader(HttpHeaders.AUTHORIZATION);
         if (jwtException == null && !StringUtils.hasText(authHeader)) {
-            error.put("message", "未提供登录凭证，请先登录");
-            error.put("errorType", "TOKEN_MISSING");
-            return error;
+            return com.fwdrobo.sirius.handler.ApiErrors.body(401,"TOKEN_MISSING","请先登录。");
         }
 
-        error.put("message", "登录凭证无效，请重新登录");
-        error.put("errorType", "TOKEN_INVALID");
-        return error;
+        return com.fwdrobo.sirius.handler.ApiErrors.body(401,"TOKEN_INVALID",null);
     }
 }

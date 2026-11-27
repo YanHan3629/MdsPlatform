@@ -558,10 +558,14 @@ class QaService:
         top_k: int = 8,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        scope_set=None,
     ) -> QAResponse:
         from core.worker_authority import current_guard
-        current_guard().require_qa_mode(input_mode,dataset_id,version_id,index_version_id,
-            use_search_service,retrieval_mode,retrieval_type,query_plan)
+        if scope_set is None:
+            current_guard().require_qa_mode(input_mode,dataset_id,version_id,index_version_id,
+                use_search_service,retrieval_mode,retrieval_type,query_plan)
+        elif scope_set is not current_guard() or input_mode=='user_data_only' or any((dataset_id,version_id,index_version_id)):
+            raise ValueError('多数据集问答范围不正确。')
         question = (question or "").strip()
         if not question:
             raise ValueError("question 不能为空")
@@ -570,7 +574,7 @@ class QaService:
             dataset_id=dataset_id, version_id=version_id, index_version_id=index_version_id,
             texts=texts, context=context, prior_questions=prior_questions, images=images, use_search_service=use_search_service,
             retrieval_mode=retrieval_mode, retrieval_type=retrieval_type, query_plan=query_plan,
-            top_k=top_k, max_tokens=max_tokens, temperature=temperature)
+            top_k=top_k, max_tokens=max_tokens, temperature=temperature, scope_set=scope_set)
 
 
 service = QaService()

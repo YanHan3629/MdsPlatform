@@ -14,6 +14,7 @@ class SourceItem(BaseModel):
     relevance_score: float = 1.0
     content_preview: str = ""
     asset_id: Optional[UUID] = None
+    dataset_id: Optional[UUID] = None
     logical_path: Optional[str] = None
     data_version: Optional[str] = None
     index_version: Optional[str] = None

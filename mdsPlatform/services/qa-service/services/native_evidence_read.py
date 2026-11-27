@@ -17,9 +17,27 @@ def _same_locator(left,right):
     return all(key not in left or key not in right or left[key]==right[key] for key in keys)
 
 
+def _review_fields(question, registered):
+    # A business ID selects the record. Questions which compare closely related
+    # processes also need the fields that prove each part of the answer.
+    if (re.search(r'(?<![A-Za-z0-9_-])FG-[A-Za-z0-9]+(?![A-Za-z0-9_-])',question,re.I)
+            and re.search(r'放行|终检',question) and re.search(r'长期|外推|所有设备|全部设备',question)):
+        if {'finished_batch_id','manufacturing_batch_id','released_at'} <= registered:
+            return {'finished_batch_id','manufacturing_batch_id','qc_id','released_at','final_good','unit'}
+        if {'object_id','qc_id','measured_at'} <= registered:
+            return {'object_id','qc_id','measured_at','item','actual_value','lower_limit','upper_limit','unit',
+                    'quantity_checked','quantity_checked_unit','result','aggregation_method'}
+    if (re.search(r'(?<![A-Za-z0-9_-])SVC-[A-Za-z0-9]+(?![A-Za-z0-9_-])',question,re.I)
+            and re.search(r'现场|客户',question) and re.search(r'买方|服务方|退款',question)
+            and {'service_id','serial_id','customer_id','inspection'} <= registered):
+        return {'service_id','serial_id','customer_id','sku_id','service_contract_id','inspection','action','retest'}
+    return set()
+
+
 def _fields(question,table,item):
     focused=set(item.get('provenance',{}).get('expandedFields',[]))
     fields=table.get('fields',table.get('columns',[]))
+    focused.update(_review_fields(question,{field['name'] for field in fields}))
     for field in fields:
         name=field['name'];labels=[name,field.get('description',''),field.get('sourceDescription','')]
         if any(label and re.search(r'(?<![A-Za-z0-9_])'+re.escape(label)+r'(?![A-Za-z0-9_])',question,re.I) for label in labels):focused.add(name)
@@ -35,7 +53,7 @@ def _native_numbers(value,pointer,numbers):
     return value
 
 
-def read_selected(client,scope,item,question,filters,cache):
+def read_selected(client,scope,item,question,filters,cache,*,full_record=False):
     if item.get('nativeBundle'):return item,None
     if item.get('evidenceType')=='calculation':
         if item.get('semanticSpace')=='timeseries.facts':
@@ -57,7 +75,7 @@ def read_selected(client,scope,item,question,filters,cache):
         pointer=locator['jsonPointer']
         try:record=json.loads(item.get('facts',{}).get('text',''))
         except (ValueError,TypeError):record=None
-        if isinstance(record,dict):
+        if isinstance(record,dict) and not full_record:
             names=[name for name in record if re.search(r'(?<![A-Za-z0-9_])'+re.escape(name)+r'(?![A-Za-z0-9_])',question,re.I)]
             if len(names)==1:pointer+='/'+names[0].replace('~','~0').replace('/','~1')
         operation={'operation':'read_json_subtree','jsonPointer':pointer}
@@ -69,13 +87,17 @@ def read_selected(client,scope,item,question,filters,cache):
         if len(tables)!=1:raise ValueError('EVIDENCE_TABLE_AMBIGUOUS: 候选记录未能唯一绑定工作表或数组')
         table=tables[0]
         operation={'operation':'read_table','tableId':table['tableId'],'rowStart':locator['rawRow'],'rowEnd':locator['rawRow'],'limit':1}
-        fields=_fields(question,table,item)
+        fields=[] if full_record else _fields(question,table,item)
         if fields:operation['fields']=fields
     else:
         choices=[descriptor for descriptor in representations if descriptor.get('kind')=='text_passage' and descriptor.get('locator')==locator]
         if len(choices)==1:operation={'operation':'read_representation','representationId':choices[0]['representationId']}
     if operation is None:raise ValueError('EVIDENCE_OPERATION_UNRESOLVED: 当前候选没有可唯一定位的原生精读操作')
     bundle=client.read_evidence(*scope,asset_id,operation)
+    reference=item.get('provenance',{}).get('crossScopeReference')
+    if reference and not re.search(r'(?<![A-Za-z0-9_-])'+re.escape(reference)+r'(?![A-Za-z0-9_-])',
+                                   json.dumps(bundle.get('content',{}),ensure_ascii=False),re.I):
+        raise ValueError('EVIDENCE_SOURCE_MISMATCH: 原始记录中没有实际检索到的业务编号')
     output,record=source_from_bundle(scope,item,bundle,metadata,operation)
     if metadata['originalFormat']=='CSV' and operation['operation']=='read_table':
         requested=[fact['field'] for fact in bundle['facts'] if re.search(r'(?<![A-Za-z0-9_])'+re.escape(fact['field'])+r'(?![A-Za-z0-9_])',question,re.I)]
@@ -127,6 +149,8 @@ def source_from_bundle(scope,item,bundle,metadata,operation):
         'representationKind':bundle['representationKind'],'originalFormat':identity['originalFormat'],'rawCommitId':identity['rawCommitId'],
         'sourceSha256':identity['sourceSha256'],'nativeReadId':bundle['readId'],'nativeReadOperation':operation,'readOutputSha256':bundle['readOutputSha256'],
         'nativeContextVersion':'native-context-with-source-locator-2026-10-28.1'}
+    if item.get('frozenScope') and content.get('records'):
+        provenance['nativeRecordLocators'] = [row['locator'] for row in content['records']]
     # A newly projected native read may contain fewer fields than the candidate.
     # Old decoded-value/date claims cannot override the actual re-read facts.
     for key in ('factClaims','factPresentationVersion','temporalRoleVersion','temporalMetadata','expandedFields','contextProjection','unitResolutionVersion','validatedMetadataQuestion'):

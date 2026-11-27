@@ -243,6 +243,9 @@ public class DatasetAccessService {
         UUID org=actorOrg();
         List<Map<String,Object>> rows=jdbc.queryForList("""
             SELECT d.dataset_id AS "datasetId",d.dataset_name AS "datasetName",d.modality_type AS "modalityType",
+                   COALESCE(m.display_name,d.dataset_name) AS "displayName",
+                   COALESCE(e.enterprise_name,o.org_name) AS "orgName",
+                   array_to_string(m.business_codes,',') AS "businessCodesCsv",
                    v.version_id AS "versionId",v.version_name AS "versionName",v.sample_count AS "sampleCount",
                    i.index_version_id AS "indexVersionId",i.index_status AS "indexStatus",d.org_id AS "ownerOrgId",
                    COALESCE(i.index_version_id=v.active_index_version_id,false) AS "isActiveIndex",
@@ -250,6 +253,9 @@ public class DatasetAccessService {
                        WHERE pv.dataset_id=d.dataset_id AND pv.version_id=v.version_id AND pv.index_version_id=i.index_version_id
                        AND p.provider_org_id=d.org_id) AS "hasProductScope"
             FROM mm_dataset d JOIN mm_dataset_version v ON v.dataset_id=d.dataset_id
+            JOIN org o ON o.org_id=d.org_id
+            LEFT JOIN ds_enterprise_identity e ON e.org_id=d.org_id AND e.state='CONFIRMED'
+            LEFT JOIN ds_dashboard_business_metadata m ON m.version_id=v.version_id
             JOIN artifact_commit raw ON raw.commit_id=v.raw_commit_id AND raw.repo_id=d.raw_repo_id AND raw.commit_status='PUBLISHED'
             JOIN mm_index_version i ON i.dataset_id=d.dataset_id AND i.dataset_version_id=v.version_id AND i.index_status='READY'
             JOIN artifact_commit idx ON idx.commit_id=i.index_commit_id AND idx.repo_id=i.index_repo_id AND idx.commit_status='PUBLISHED'
@@ -257,7 +263,12 @@ public class DatasetAccessService {
             ORDER BY d.dataset_name,v.created_at DESC,i.created_at DESC
             """);
         return rows.stream().filter(row->canReadVersion((UUID)row.get("datasetId"),(UUID)row.get("versionId"),(UUID)row.get("indexVersionId")))
-            .peek(row->{row.put("isOwnerCandidate",org.equals(row.get("ownerOrgId")) && !Boolean.TRUE.equals(row.get("isActiveIndex"))
-                && !Boolean.TRUE.equals(row.get("hasProductScope")));row.remove("hasProductScope");}).toList();
+            .peek(row->{
+                row.put("isOwnerCandidate",org.equals(row.get("ownerOrgId")) && !Boolean.TRUE.equals(row.get("isActiveIndex"))
+                    && !Boolean.TRUE.equals(row.get("hasProductScope")));
+                row.remove("hasProductScope");
+                Object raw=row.remove("businessCodesCsv");
+                row.put("businessCodes",raw instanceof String csv && !csv.isBlank()?List.of(csv.split(",")):List.of());
+            }).toList();
     }
 }

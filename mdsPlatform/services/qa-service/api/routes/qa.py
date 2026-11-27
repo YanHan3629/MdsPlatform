@@ -10,7 +10,7 @@ from starlette.concurrency import run_in_threadpool
 
 from adapters.vllm_client import VllmClientError
 from core.request_budget import ACTIVE_PROFILE, CAPABILITIES, PROFILES, BudgetExceeded, RequestBudget, use_budget
-from core.worker_authority import AuthorityError, current_guard
+from core.worker_authority import AuthorityError, ScopeSet, current_guard, using_guard
 from schemas.qa_req import QaRequest
 from schemas.qa_resp import QAResponse
 from services.evidence_trace import TraceStorageError
@@ -87,7 +87,11 @@ def parse_texts(raw):
 
 async def parse_request(request):
     if 'application/json' in request.headers.get('content-type', '').lower():
-        return QaRequest.model_validate(await request.json()), []
+        body = await request.json()
+        if not isinstance(body,dict):
+            raise HTTPException(status_code=400,detail='问答请求必须是对象。')
+        credentials = body.pop('scope_credentials',None)
+        return QaRequest.model_validate(body), [], credentials
 
     form = await request.form(max_files=CAPABILITIES['maxImageCount'], max_fields=64)
     try:
@@ -114,7 +118,13 @@ async def parse_request(request):
         for key in ('queryPlan', 'query_plan'):
             if key in fields:
                 fields[key] = json.loads(fields[key] or 'null')
-        return QaRequest.model_validate({key: value for key, value in fields.items() if value != ''}), images
+        for key in ('scopes','scope_credentials'):
+            if len(form.getlist(key))>1:
+                raise HTTPException(status_code=400,detail='数据范围字段重复。')
+            if key in fields:
+                fields[key] = json.loads(fields[key])
+        credentials = fields.pop('scope_credentials',None)
+        return QaRequest.model_validate({key: value for key, value in fields.items() if value != ''}), images, credentials
     finally:
         await form.close()
 
@@ -124,7 +134,7 @@ def response_or_error(task):
         task.exception()
 
 
-async def execute(request, req, images, budget):
+async def execute(request, req, images, budget, credentials):
     global inflight
     if inflight >= maximum_inflight:
         raise BudgetExceeded('QA_QUEUE_FULL', '当前问答队列已满，请稍后重试。', 429)
@@ -151,12 +161,28 @@ async def execute(request, req, images, budget):
             budget.stage = 'validating'
             queued_ms = round((monotonic() - queued) * 1000, 3)
             authorization = request.headers.get('authorization', '')
-            request_service = QaService(client=service.client, bearer_token=authorization[7:].strip())
-            params = req.model_dump(exclude={'profile', 'query_plan'})
+            params = req.model_dump(exclude={'profile', 'query_plan','scopes'})
             params['query_plan'] = req.query_plan.model_dump(by_alias=True) if req.query_plan else None
             params['max_tokens'] = budget.output_tokens(req.max_tokens)
+            scopes = [scope.coordinates() for scope in (req.scopes or [])]
+            guard = current_guard()
+            if len(scopes)>1:
+                guard = await run_in_threadpool(ScopeSet,guard,scopes,credentials)
+                params['scope_set'] = guard
+            elif credentials is not None:
+                raise AuthorityError(403,'UNEXPECTED_MULTI_SCOPE_CREDENTIALS')
+            elif scopes:
+                params.update(zip(('dataset_id','version_id','index_version_id'),scopes[0]))
+            request_service = QaService(client=service.client, bearer_token=None if len(scopes)>1 else authorization[7:].strip())
             with use_budget(budget):
-                result = await run_in_threadpool(request_service.answer, images=images, **params)
+                with using_guard(guard):
+                    answer_started = monotonic()
+                    result = await run_in_threadpool(request_service.answer, images=images, **params)
+                    if len(scopes)>1:
+                        # Verify every frozen credential at the delivery
+                        # boundary, after both generation and trace persistence.
+                        await run_in_threadpool(guard.revalidate,True)
+                        result.processing_time_ms = int((monotonic() - answer_started) * 1000)
                 budget.remaining()
             result.meta.profile = budget.name
             result.meta.queue_ms = queued_ms
@@ -185,11 +211,11 @@ async def execute(request, req, images, budget):
 @router.post('/qa', response_model=QAResponse)
 async def ask_question(request: Request):
     try:
-        req, images = await parse_request(request)
+        req, images, credentials = await parse_request(request)
         deadline = request.headers.get('X-MDS-QA-Deadline-Ms')
         budget = RequestBudget(req.profile, int(deadline) if deadline is not None else None)
         budget.output_tokens(req.max_tokens)
-        return await execute(request, req, images, budget)
+        return await execute(request, req, images, budget, credentials)
     except HTTPException:
         raise
     except Exception as exc:

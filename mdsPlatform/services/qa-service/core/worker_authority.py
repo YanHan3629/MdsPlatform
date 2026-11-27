@@ -1,5 +1,7 @@
 """One live parent-session and immutable frozen scope per worker request."""
 import contextvars
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import hmac
 import json
 import os
@@ -12,6 +14,8 @@ import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
+
+from core.request_budget import MAX_DATA_SCOPES
 
 _current=contextvars.ContextVar("mds_worker_authority",default=None)
 class AuthorityError(RuntimeError):
@@ -69,12 +73,15 @@ class ScopeGuard:
                 raise AuthorityError(502,"INVALID_AUTHORITY_RESPONSE") from None
             if self.scope is not None and scope!=self.scope:raise AuthorityError(403,"WORKER_SCOPE_REBIND_DENIED")
             self.scope=scope;self._checked=time.monotonic();return dict(scope)
-    def require_scope(self,dataset,version,index):
+    def _assert_scope(self,dataset,version,index):
         if self.scope.get("purpose")!="GENERAL_READ":raise AuthorityError(403,"USER_INPUT_CORPUS_ACCESS_DENIED")
         try:actual=tuple(str(uuid.UUID(str(value))) for value in (dataset,version,index))
         except (ValueError,TypeError,AttributeError):raise AuthorityError(400,"EXPLICIT_FROZEN_SCOPE_REQUIRED") from None
         if actual!=tuple(self.scope[key] for key in ("datasetId","versionId","indexVersionId")):
             raise AuthorityError(404,"WORKER_FROZEN_SCOPE_NOT_AVAILABLE")
+
+    def require_scope(self,dataset,version,index):
+        self._assert_scope(dataset,version,index)
         self.revalidate(force=True);return self
     def require_qa_mode(self,mode,dataset,version,index,use_search_service,retrieval_mode,retrieval_type,query_plan):
         if self.scope.get("purpose")=="USER_INPUT_ONLY":
@@ -113,6 +120,57 @@ def require_scope(dataset,version,index):
 
 def bind(guard):return _current.set(guard)
 def reset(token):_current.reset(token)
+
+@contextmanager
+def using_guard(guard):
+    token=bind(guard)
+    try:
+        yield
+    finally:
+        reset(token)
+
+
+class ScopeSet:
+    """Batch coordination holds separate non-rebindable worker credentials."""
+    def __init__(self, parent, scopes, credentials):
+        if parent.scope.get('purpose') != 'USER_INPUT_ONLY' or not 2 <= len(scopes) <= MAX_DATA_SCOPES or (
+                not isinstance(credentials,list) or len(credentials) != len(scopes)):
+            raise AuthorityError(403,'MULTI_SCOPE_AUTHORITY_REQUIRED')
+        self.parent=parent
+        self.scope=dict(parent.scope)
+        self.headers=parent.headers
+        keys=('userId','orgId','sessionId')
+        if any(not isinstance(token,str) or not token.startswith('Bearer ') or len(token)>8192
+               for token in credentials):
+            raise AuthorityError(403,'SCOPED_WORKER_CREDENTIAL_REQUIRED')
+
+        def verified_child(entry):
+            scope, token = entry
+            child=ScopeGuard(token,parent.headers['X-MM-Internal-Token'],parent.backend,{'data.qa'})
+            # The constructor just performed the live check. Bind its returned
+            # coordinates and session without repeating the same HTTP request.
+            child._assert_scope(*scope)
+            if any(child.scope[key]!=self.scope[key] for key in keys):
+                raise AuthorityError(403,'MULTI_SCOPE_SESSION_MISMATCH')
+            return child
+
+        self.children=dict(zip(scopes,self._check_children(verified_child,list(zip(scopes,credentials)))))
+
+    @staticmethod
+    def _check_children(check, children):
+        with ThreadPoolExecutor(max_workers=min(3,len(children))) as pool:
+            return tuple(pool.map(check,children))
+
+    def revalidate(self,force=False):
+        self.parent.revalidate(force)
+        self._check_children(lambda child: child.revalidate(force),tuple(self.children.values()))
+        return self.scope
+
+    def for_scope(self, scope):
+        child=self.children.get(scope)
+        if child is None:
+            raise AuthorityError(404,'WORKER_FROZEN_SCOPE_NOT_AVAILABLE')
+        return using_guard(child)
 
 def download_atomic(url,target,timeout):
     import requests

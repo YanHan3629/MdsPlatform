@@ -119,7 +119,7 @@ def main():
             raise RuntimeError('Session is not ready on a single allocated node')
         # Read the host key through the authenticated login and our allocation,
         # rather than trusting an unauthenticated ssh-keyscan.
-        key = output(['srun', '--jobid=' + job, '--overlap', '-N1', '-n1', '-c1', '--mem=128M',
+        key = output(['srun', '--jobid=' + job, '--overlap', '--gres=none', '-N1', '-n1', '-c1', '--mem=128M',
                       'cat', '/etc/ssh/ssh_host_ed25519_key.pub'])
         if not re.fullmatch(r'ssh-ed25519 [A-Za-z0-9+/=]+(?: .*)?', key):
             raise RuntimeError('Unexpected compute host public key')

@@ -12,6 +12,9 @@ import time
 _raw = (Path(__file__).resolve().parents[1] / 'qa-capabilities.json').read_bytes()
 CAPABILITIES = json.loads(_raw)
 CAPABILITIES_SHA256 = sha256(_raw).hexdigest()
+MAX_DATA_SCOPES = CAPABILITIES['maxDataScopes']
+if type(MAX_DATA_SCOPES) is not int or not 1 <= MAX_DATA_SCOPES <= 8:
+    raise RuntimeError('Invalid QA scope capacity')
 ACTIVE_PROFILE = os.environ.get('MDS_QA_RUNTIME_PROFILE', 'standard')
 PROFILES = CAPABILITIES['profiles']
 if ACTIVE_PROFILE not in PROFILES:

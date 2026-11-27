@@ -20,6 +20,7 @@ import java.time.Duration;
 import java.util.UUID;
 import com.fwdrobo.sirius.security.IndexCacheScopeService;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 @Component
 public class SearchServiceClient {
@@ -57,25 +58,19 @@ public class SearchServiceClient {
             }
             return evidenceScope.bearer(ids[0],ids[1],ids[2]);
         }
-        var match=java.util.regex.Pattern.compile("^/indexes/([0-9a-fA-F-]{36})/([0-9a-fA-F-]{36})/([0-9a-fA-F-]{36})/capabilities$").matcher(path);
+        var match=java.util.regex.Pattern.compile("^/indexes/([0-9a-fA-F-]{36})/([0-9a-fA-F-]{36})/([0-9a-fA-F-]{36})/capabilities(?:\\?(?:summary=true|detail=qa))?$").matcher(path);
         if(!match.matches())throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.FORBIDDEN,"SCOPED_SEARCH_REQUEST_REQUIRED");
         return evidenceScope.bearer(UUID.fromString(match.group(1)),UUID.fromString(match.group(2)),UUID.fromString(match.group(3)));
     }
 
     /** Preserve validation/service status codes; credentials stay server-side. */
     public org.springframework.http.ResponseEntity<byte[]> scopedJson(String path, Object body) {
+        return scopedJson(path, body, "/search/execute".equals(path) ? COLD_INDEX_QUERY_TIMEOUT : Duration.ofMinutes(2));
+    }
+
+    public org.springframework.http.ResponseEntity<byte[]> scopedJson(String path, Object body, Duration timeout) {
         try {
-            HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(baseUrl + "/internal/v1" + path))
-                    .timeout("/search/execute".equals(path) ? COLD_INDEX_QUERY_TIMEOUT : Duration.ofMinutes(2))
-                    .header("Accept", "application/json").header("X-MM-Internal-Token", internalToken)
-                    .header("Authorization",scopedBearer(body,path));
-            if (body == null) builder.GET();
-            else builder.header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body), StandardCharsets.UTF_8));
-            var response = httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray());
-            return org.springframework.http.ResponseEntity.status(response.statusCode())
-                    .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
-                    .header("Cache-Control", "no-store").body(response.body());
+            return scopedResult(httpClient.send(scopedRequest(path,body,timeout), HttpResponse.BodyHandlers.ofByteArray()));
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
             throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.BAD_GATEWAY, "检索请求已中断");
@@ -84,8 +79,37 @@ public class SearchServiceClient {
         }
     }
 
+    private HttpRequest scopedRequest(String path, Object body, Duration timeout) throws JsonProcessingException {
+        // Bind the worker credential on the original servlet thread before dispatch.
+        var builder = HttpRequest.newBuilder(URI.create(baseUrl + "/internal/v1" + path))
+                .timeout(timeout).header("Accept", "application/json").header("X-MM-Internal-Token", internalToken)
+                .header("Authorization",scopedBearer(body,path));
+        if (body == null) builder.GET();
+        else builder.header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body), StandardCharsets.UTF_8));
+        return builder.build();
+    }
+
+    public CompletableFuture<HttpResponse<byte[]>> dispatchScopedJson(String path, Object body, Duration timeout)
+            throws JsonProcessingException {
+        return httpClient.sendAsync(scopedRequest(path,body,timeout), HttpResponse.BodyHandlers.ofByteArray());
+    }
+
+    public org.springframework.http.ResponseEntity<byte[]> scopedResult(HttpResponse<byte[]> response) {
+        if(response.statusCode()>=400)throw com.fwdrobo.sirius.handler.WorkerErrors.from(
+                org.springframework.http.HttpStatusCode.valueOf(response.statusCode()),response.body());
+        return org.springframework.http.ResponseEntity.status(response.statusCode())
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .header("Cache-Control", "no-store").body(response.body());
+    }
+
     public org.springframework.http.ResponseEntity<byte[]> scopedImage(UUID dataset, UUID version, UUID index,
                                                                         String plan, MultipartFile file) {
+        return scopedImage(dataset,version,index,plan,file,COLD_INDEX_QUERY_TIMEOUT);
+    }
+
+    public org.springframework.http.ResponseEntity<byte[]> scopedImage(UUID dataset, UUID version, UUID index,
+                                                                        String plan, MultipartFile file, Duration timeout) {
         try {
             String boundary = "----ScopedSearch" + UUID.randomUUID();
             byte[] original = buildImageToTextMultipartBody(boundary, dataset, version, index, 8, file);
@@ -95,12 +119,14 @@ public class SearchServiceClient {
             writeTextPart(buffer, boundary, "plan", plan, "\r\n");
             buffer.write(closing);
             var request = HttpRequest.newBuilder(URI.create(baseUrl + "/internal/v1/search/image-candidates"))
-                    .timeout(COLD_INDEX_QUERY_TIMEOUT)
+                    .timeout(timeout)
                     .header("X-MM-Internal-Token", internalToken)
                     .header("Authorization",evidenceScope.bearer(dataset,version,index))
                     .header("Content-Type", "multipart/form-data; boundary=" + boundary)
                     .POST(HttpRequest.BodyPublishers.ofByteArray(buffer.toByteArray())).build();
             var response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
+            if(response.statusCode()>=400)throw com.fwdrobo.sirius.handler.WorkerErrors.from(
+                    org.springframework.http.HttpStatusCode.valueOf(response.statusCode()),response.body());
             return org.springframework.http.ResponseEntity.status(response.statusCode())
                     .contentType(org.springframework.http.MediaType.APPLICATION_JSON).header("Cache-Control", "no-store").body(response.body());
         } catch (InterruptedException error) {

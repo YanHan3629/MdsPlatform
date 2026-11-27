@@ -12,6 +12,7 @@
   "minImagePixels": 65536,
   "maxDecodedImagePixels": 41943040,
   "maxSources": 24,
+  "maxDataScopes": 8,
   "intentDefaultTokens": 1024,
   "intentMaxTokens": 2048,
   "gpuProfiles": {
@@ -33,7 +34,7 @@
       "documentPagesPerBatch": 16,
       "documentReadOperationsPerBatch": 64,
       "deadlineSeconds": 180,
-      "maxConcurrentRequests": 2,
+      "maxConcurrentRequests": 1,
       "maxQueuedRequests": 4
     },
     "long": {

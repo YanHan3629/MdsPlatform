@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="./qa.css" />
   <link rel="stylesheet" href="./controlled-views.css?v=f04-r76" />
   <link rel="stylesheet" href="./sign-in.css?v=1" />
+  <link rel="stylesheet" href="./dashboard.css?v=6" />
 </head>
 <body>
   <noscript><main class="sign-in"><section class="card sign-in-card">请启用 JavaScript 后登录数据空间。</section></main></noscript>
@@ -18,10 +19,10 @@
   <div class="shell">
     <aside class="sidebar">
       <div class="brand">
-        <div class="logo">DS</div>
+        <div class="logo" >数</div>
         <div>
           <b>产业链数据空间平台</b>
-          <span>Haier Smart Home · Chain Data Space</span>
+          <span>家电产业链</span>
         </div>
       </div>
       <nav>
@@ -38,7 +39,7 @@
         <div class="business-title">业务链路</div>
         <div class="tree-root">
           <span class="caret">▾</span><span class="folder">📁</span>
-          <div><b id="currentOrgName">未登录</b><small>业务域分类，不代表企业认证</small></div>
+          <div><b id="currentOrgName">未登录</b></div>
         </div>
         <div id="businessTree" class="business-tree"></div>
       </section>
@@ -62,11 +63,7 @@
       </header>
 
       <p id="noBusinessPermission" class="card" hidden>暂无业务权限。可在“我的账号”查看当前账号和权限。</p>
-      <section id="multimodalShared" hidden>
-        <div class="card">
-          <div class="card-head"><h2>数据版本与模型状态</h2><span id="qaHealth" class="badge muted">检查模型状态</span></div>
-          <button id="qaRefresh" class="btn link" type="button">刷新数据集与模型状态</button>
-        </div>
+      <section id="dashboard" class="page">
         <details id="controlledViewExports" class="card mini-gap" hidden>
           <summary>授权视图导出</summary>
           <p>导出当前获准的独立视图，保留其行列和文件范围，并附范围与文件校验清单。</p>
@@ -77,9 +74,8 @@
           </form>
           <p id="viewExportNotice" role="status"></p>
         </details>
-        <details class="card mini-gap"><summary>上传、发布与索引任务</summary>
-          <div class="card-head"><div><p class="eyebrow">真实数据版本</p><h2>上传与自动索引</h2></div></div>
-          <p>工作台、检索和问答共用此上传入口。可选择已有数据集。创建新数据集时，先填写名称并点击“创建数据集”，权限核对完成后再选择文件和草稿版本。README 和数据集说明文件会排除。已发布版本保持不可变。</p>
+        <details id="dashboardIngestion" class="card mini-gap" hidden><summary>上传、发布与索引任务</summary>
+          <p>可选择已有数据集。创建新数据集时，先填写名称并点击“创建数据集”，权限核对完成后再选择文件和草稿版本。会跳过自述文件及数据集说明。已发布版本保持不可变。</p>
           <form method="post" onsubmit="return false" id="qaIngestForm" class="form-grid">
             <label>空间<select id="qaIngestSpace"><option value="">登录后加载</option></select></label>
             <label>新建空间名称<input id="qaNewSpace" maxlength="128" placeholder="留空则使用所选空间" /></label>
@@ -99,17 +95,36 @@
           </form>
           <p id="qaIngestProgress" role="status">登录后可操作真实数据版本。</p><div id="qaIndexing" class="compact-list"></div>
         </details>
-      </section>
-
-      <section id="dashboard" class="page">
         <div class="filters mini-gap"><span id="health" class="badge muted">连接中</span>
           <button id="demoDispatchBtn" class="btn primary" type="button">刷新业务与任务状态</button></div>
+        <section class="card" id="dashboardDirectory">
+          <div class="card-head">
+            <h2>数据集与内容预览</h2>
+            <div class="filters">
+              <input id="catalogKeyword" placeholder="搜索数据集名称" aria-label="搜索数据集名称" maxlength="160" />
+              <select id="catalogStatus" aria-label="按数据集状态筛选">
+                <option value="">全部状态</option>
+                <option value="READY">已就绪</option>
+                <option value="PUBLISHED">已发布</option>
+                <option value="DRAFT">草稿</option>
+                <option value="UPLOADING">上传中</option>
+                <option value="FAILED">失败</option>
+              </select>
+            </div>
+          </div>
+          <p id="dashboardStatus" role="status"></p>
+          <div id="dashboardDatasets"></div>
+          <div class="filters" id="dashboardPagination" hidden>
+            <button type="button" id="dashboardPrev" class="btn">上一页</button>
+            <span id="dashboardPage"></span>
+            <button type="button" id="dashboardNext" class="btn">下一页</button>
+          </div>
+        </section>
         <div id="kpis" class="kpi-grid"></div>
         <div class="grid two">
           <section class="card">
             <div class="card-head">
               <div>
-                <p class="eyebrow">Flow</p>
                 <h2>产业链数据存储与消费流程</h2>
               </div>
               <span class="badge">7 步闭环</span>
@@ -119,7 +134,6 @@
           <section class="card">
             <div class="card-head">
               <div>
-                <p class="eyebrow">Events</p>
                 <h2>实时流转事件</h2>
               </div>
               <span class="badge">自动刷新</span>
@@ -127,35 +141,13 @@
             <div id="events" class="events"></div>
           </section>
         </div>
-        <section class="card">
-          <div class="card-head">
-            <div>
-              <p class="eyebrow">Catalog</p>
-              <h2>家电产业链资源目录与治理数据集</h2>
-            </div>
-            <div class="filters">
-              <input id="catalogKeyword" placeholder="搜索目录 / 数据集 / 模态" />
-              <select id="catalogStatus">
-                <option value="">全部状态</option>
-                <option value="READY">READY</option>
-                <option value="PENDING">PENDING</option>
-              </select>
-            </div>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>名称 / 版本</th><th>业务域</th><th>来源</th><th>类型 / 格式</th><th>文件数量</th><th>实测质量</th><th>索引</th><th>状态</th></tr></thead>
-              <tbody id="catalogTable"></tbody>
-            </table>
-          </div>
-        </section>
       </section>
 
       <section id="provider" class="page">
-        <div class="card-head"><div><p class="eyebrow">Controlled sharing</p><h2>向企业分享受控范围</h2></div><button class="btn" id="controlledViewsOpenProvider" type="button" hidden>生成预览与管理分享</button></div>
+        <div class="card-head"><div><h2>向企业分享受控范围</h2></div><button class="btn" id="controlledViewsOpenProvider" type="button" hidden>生成预览与管理分享</button></div>
         <div class="grid two">
           <section class="card form-card">
-            <div class="card-head"><div><p class="eyebrow">Step 1</p><h2>当前组织与平台空间</h2></div></div>
+            <div class="card-head"><div><p class="eyebrow">第一步</p><h2>当前组织与平台空间</h2></div></div>
             <form method="post" onsubmit="return false" id="spaceForm" class="form-grid">
               <label>平台空间名称<input name="orgName" required placeholder="在当前账号组织内创建空间" /></label>
               <label class="full">说明<textarea name="description" placeholder="空间用途；创建空间不代表企业认证"></textarea></label>
@@ -165,23 +157,19 @@
           </section>
 
           <section class="card form-card">
-            <div class="card-head"><div><p class="eyebrow">Step 2</p><h2>数据源接入与文件上传</h2></div></div>
+            <div class="card-head"><div><p class="eyebrow">第二步</p><h2>关联既有数据源</h2></div></div>
             <form method="post" onsubmit="return false" id="sourceForm" class="form-grid">
               <label>已有数据集<select name="datasetId" id="sourceDatasetSelect" required></select></label>
-              <label>接入方式<select name="sourceType"><option value="EXISTING_DATASET">关联已有真实数据，不重新上传</option><option disabled>OBJECT_STORAGE · 连接器未配置</option><option disabled>API_STREAM · 连接器未配置</option><option disabled>DATABASE · 连接器未配置</option></select></label>
+              <label>接入方式<select name="sourceType"><option value="EXISTING_DATASET">关联已有真实数据，不重新上传</option><option disabled>对象存储 · 连接器未配置</option><option disabled>接口数据流 · 连接器未配置</option><option disabled>数据库 · 连接器未配置</option></select></label>
               <p class="full">所有权取自登录账号及真实数据集。格式、内容类型和数量由快照及解析结果确定。</p>
               <button class="btn primary" type="submit">关联已有数据集</button>
-            </form>
-            <form method="post" onsubmit="return false" id="uploadForm" class="upload-box">
-              <select name="sourceId" id="uploadSourceSelect"></select>
-              <button class="btn" type="submit">打开真实文件 / 目录上传与版本发布</button>
             </form>
           </section>
         </div>
 
         <div class="grid three">
           <section class="card form-card">
-            <p class="eyebrow">Step 3</p><h2>创建资源目录</h2>
+            <p class="eyebrow">第三步</p><h2>创建资源目录</h2>
             <form method="post" onsubmit="return false" id="catalogForm" class="stack-form">
               <select name="sourceId" id="catalogSourceSelect" required></select>
               <input name="catalogName" required placeholder="真实数据资源目录名称" />
@@ -192,7 +180,7 @@
             </form>
           </section>
           <section class="card form-card">
-            <p class="eyebrow">Step 4</p><h2>真实数据质量检查</h2>
+            <p class="eyebrow">第四步</p><h2>真实数据质量检查</h2>
             <form method="post" onsubmit="return false" id="governForm" class="stack-form">
               <select name="sourceId" id="governSourceSelect" required></select>
               <p>检查已发布版本的清单、文件及解析质量；报告列出覆盖率和问题，不改写原始文件，不接受手填数量或质量分。</p>
@@ -203,10 +191,10 @@
             <div id="qualityReport" aria-live="polite"><p>执行后可查看逐项报告，后台会独立完成检查。</p></div>
           </section>
           <section class="card form-card">
-            <p class="eyebrow">Step 5-6</p><h2>索引构建与产品发布</h2>
+            <p class="eyebrow">第五至第六步</p><h2>索引构建与产品发布</h2>
             <form method="post" onsubmit="return false" id="indexForm" class="stack-form mini-gap">
               <select name="datasetId" id="indexDatasetSelect" required></select>
-              <p>创建或复用真实后台任务，READY来自构建、校验及预热结果。</p>
+              <p>创建或复用真实后台任务，索引就绪状态来自构建、校验及预热结果。</p>
               <button class="btn" type="submit">创建 / 查看索引任务</button>
             </form>
             <form method="post" onsubmit="return false" id="publishForm" class="stack-form mini-gap">
@@ -225,11 +213,11 @@
       <section id="market" class="page">
         <section class="card">
           <div class="card-head">
-            <div><p class="eyebrow">Search</p><h2>发现已发布数据产品并申请消费</h2></div>
+            <div><h2>发现已发布数据产品并申请消费</h2></div>
             <div class="filters">
               <input id="productKeyword" placeholder="冰箱、质检、供应链、售后、压缩机..." />
               <select id="productBusiness"><option value="">全部业务域</option></select>
-              <select id="productModality"><option value="">全部模态</option><option>IMAGE_TEXT</option><option>IMAGE</option><option>TEXT</option><option>VIDEO</option><option>AUDIO</option><option>AUDIO_TEXT</option></select>
+              <select id="productModality"><option value="">全部模态</option><option value="IMAGE_TEXT">图文</option><option value="IMAGE">图像</option><option value="TEXT">文本</option><option value="VIDEO">视频</option><option value="AUDIO">音频</option><option value="AUDIO_TEXT">音频与文本</option></select>
               <button id="searchBtn" class="btn">搜索</button>
             </div>
           </div>
@@ -238,7 +226,7 @@
           <div class="filters"><button class="btn" type="button" id="productPrev">上一页</button><span id="productPage"></span><button class="btn" type="button" id="productNext">下一页</button></div>
         </section>
         <section class="card form-card">
-          <div class="card-head"><div><p class="eyebrow">Intent</p><h2>消费意向</h2></div></div>
+          <div class="card-head"><div><h2>消费意向</h2></div></div>
           <form method="post" onsubmit="return false" id="intentForm" class="form-grid">
             <label>数据产品及冻结版本<select name="productVersionId" id="intentProductSelect" required></select></label>
             <p>消费主体由当前登录账号确定，不能填写其他企业名称代为申请。</p>
@@ -258,7 +246,7 @@
             <div class="card-head"><div><p class="eyebrow">真实快照 · 条件检索</p><h2>多模态检索</h2></div></div>
             <p>按真实数据能力设置条件，返回原始命中或确定性计算结果。</p>
             <form method="post" onsubmit="return false" id="retrievalForm" class="form-grid">
-              <label class="full">检索数据集与版本<select id="retrievalDataset"></select></label>
+              <fieldset id="retrievalScopePicker" class="full scope-picker"></fieldset>
               <p id="retrievalCapabilityStatus" class="full" role="status">登录后加载快照能力。</p>
               <label>数据类型<select id="retrievalType"></select></label>
               <label>检索范围<select id="retrievalScope"><option value="corpus">业务证据</option><option value="catalog">目录元数据</option></select></label>
@@ -276,12 +264,16 @@
         </div>
       </section>
       <section id="qa" class="page">
+        <div class="card">
+          <div class="card-head"><h2>问答模型状态</h2><span id="qaHealth" class="badge muted">检查模型状态</span></div>
+          <button id="qaRefresh" class="btn link" type="button">刷新问答范围与模型状态</button>
+        </div>
         <div class="grid two mini-gap">
           <div class="card form-card">
             <h2>多模态问答</h2><p>直接提问，可补充文字或图片；系统按相关性选择依据。需要特定来源时，可在问题中说明“只依据 PDF”或“优先表格”。</p>
             <form method="post" onsubmit="return false" id="qaForm" class="form-grid">
-              <label class="full">检索数据集<select id="qaDataset"><option value="">不使用数据空间检索</option></select></label>
-              <p id="qaDatasetInfo" class="full">登录后加载当前组织真实的 READY 索引；演示目录不作为检索依据。</p>
+              <fieldset id="qaScopePicker" class="full scope-picker"></fieldset>
+              <p id="qaDatasetInfo" class="full">请选择当前获授权的就绪数据集。</p>
 
               <label>输入模式<select name="inputMode" id="qaInputMode"><option value="hybrid">用户资料 + 数据空间</option><option value="question_only">仅问题 + 数据空间</option><option value="user_data_only">仅使用用户资料</option></select></label>
               <label>任务<select name="taskType"><option value="general_qa">通用问答</option><option value="chain_risk_analysis">产业链风险分析</option><option value="demand_evaluation">需求评判</option><option value="data_summary">数据摘要</option></select></label>
@@ -308,11 +300,11 @@
       </section>
 
       <section id="contracts" class="page">
-        <section class="card"><div class="card-head"><div><p class="eyebrow">Applications</p><h2>消费申请与供给审核</h2></div></div><div id="applications" class="compact-list"></div></section>
+        <section class="card"><div class="card-head"><div><h2>消费申请与供给审核</h2></div></div><div id="applications" class="compact-list"></div></section>
         <section class="card form-card"><h2>当前消费组织的受控接收端</h2><form method="post" onsubmit="return false" id="receiverForm" class="filters"><input name="endpointName" required maxlength="128" placeholder="本地接收端名称" /><button class="btn" type="submit">配置本地真实接收端</button></form><p>使用独立本地服务身份及回执签名。外部 S3 / HTTP 接收器未配置，不接受任意输入地址。</p><div id="receiverConfigurations"></div></section>
         <div class="grid two">
           <section class="card form-card">
-            <div class="card-head"><div><p class="eyebrow">Contract</p><h2>提交技术授权条款</h2></div></div>
+            <div class="card-head"><div><h2>提交技术授权条款</h2></div></div>
             <form method="post" onsubmit="return false" id="contractForm" class="form-grid">
               <input type="hidden" name="contractId" /><input type="hidden" name="revision" />
               <label>消费意向<select name="intentId" id="contractIntentSelect" required></select></label>
@@ -335,12 +327,12 @@
             <p>条款绑定冻结版本或登记的受控视图。受控视图的消费方须在合约生效后另行取得按当前修订审阅的授权。只有约定交付的修订才生成受控交付计划。</p>
           </section>
           <section class="card">
-            <div class="card-head"><div><p class="eyebrow">Delivery</p><h2>推送结果</h2></div><span class="badge">根据合约自动执行</span></div>
+            <div class="card-head"><div><h2>推送结果</h2></div><span class="badge">根据合约自动执行</span></div>
             <div id="deliveries" class="compact-list"></div>
           </section>
         </div>
         <section class="card">
-          <div class="card-head"><div><p class="eyebrow">Contracts</p><h2>合约列表</h2></div></div>
+          <div class="card-head"><div><h2>合约列表</h2></div></div>
           <div class="table-wrap">
             <table>
               <thead><tr><th>合约</th><th>产品</th><th>提供方 / 消费方</th><th>发送时间</th><th>质量线</th><th>推送状态</th><th>操作</th></tr></thead>
@@ -353,7 +345,7 @@
 
       <section id="identity" class="page">
         <section class="card">
-          <div class="card-head"><div><p class="eyebrow">Account</p><h2>当前账号与企业</h2></div><button id="identityReload" class="btn" type="button">刷新身份</button></div>
+          <div class="card-head"><div><h2>当前账号与企业</h2></div><button id="identityReload" class="btn" type="button">刷新身份</button></div>
           <p id="identitySignedOut">请在上方登录后查看当前企业、账号类型和有效权限。</p>
           <div id="identitySummary" hidden></div>
           <div class="identity-actions"><button id="controlledViewsOpen" class="btn" type="button" hidden>企业受控视图</button><button id="resourceGrantsOpen" class="btn" type="button" hidden>资源授权与分享</button><button id="enterpriseMappingOpen" class="btn" type="button" hidden>企业与身份映射</button></div>
@@ -381,7 +373,7 @@
       </section>
       <section id="identityManagement" class="page">
         <section class="card">
-          <div class="card-head"><div><p class="eyebrow">Identity management</p><h2 id="identityManagerHeading">账号与类型管理</h2></div><button id="identityManagementReload" class="btn" type="button">刷新管理列表</button></div>
+          <div class="card-head"><div><h2 id="identityManagerHeading">账号与类型管理</h2></div><button id="identityManagementReload" class="btn" type="button">刷新管理列表</button></div>
           <p id="identityManagementNotice">仅向平台管理员或企业成员管理者开放。</p>
           <button id="identityBulkLogout" class="btn" type="button" hidden>强退所有非平台管理员</button>
           <button id="controlledViewsOpenManagement" class="btn" type="button" hidden>企业受控视图</button>
@@ -467,7 +459,7 @@
 
 
   <dialog id="enterpriseMappingDialog" class="enterprise-mapping-dialog">
-    <div class="card-head"><div><p class="eyebrow">Enterprise identity</p><h2>企业与身份映射</h2></div><button id="enterpriseMappingClose" class="btn" type="button">关闭</button></div>
+    <div class="card-head"><div><h2>企业与身份映射</h2></div><button id="enterpriseMappingClose" class="btn" type="button">关闭</button></div>
     <p>业务实体与登录组织分别管理。确认映射不会转移数据、合同或授权，也不代表法人认证。</p>
     <p id="enterpriseMappingStatus" role="status"></p>
     <div class="grid two">
@@ -512,7 +504,7 @@
 
 
   <dialog id="resourceGrantDialog" class="resource-grants-dialog">
-    <div class="card-head"><div><p class="eyebrow">Resource authorization</p><h2>资源授权与分享</h2></div><button id="resourceGrantClose" class="btn" type="button">关闭</button></div>
+    <div class="card-head"><div><h2>资源授权与分享</h2></div><button id="resourceGrantClose" class="btn" type="button">关闭</button></div>
     <p>账号业务操作与具体资源授权分别校验。管理资格不会自动开放内容；每次使用还须满足当前版本、用途、有效期及合同约束。</p>
     <p id="resourceGrantStatus" role="status"></p>
     <div class="grid two">
@@ -560,7 +552,7 @@
 
 
   <dialog id="controlledViewDialog" class="resource-grants-dialog controlled-view-dialog">
-    <div class="card-head"><div><p class="eyebrow">Enterprise collaboration</p><h2>企业受控视图</h2></div><button id="cvClose" class="btn" type="button">关闭</button></div>
+    <div class="card-head"><div><h2>企业受控视图</h2></div><button id="cvClose" class="btn" type="button">关闭</button></div>
     <p>先选择明确的文件与行列范围，生成并核对私有预览，再决定接收企业可执行的动作和有效期。原始综合数据保持不变。</p>
     <p id="cvStatus" role="status" aria-live="polite"></p>
     <ol class="cv-steps"><li>选择范围</li><li>生成私有预览</li><li>核对并批准</li><li>索引、授权与撤销</li></ol>
@@ -617,17 +609,36 @@
     <section class="card"><h3>最近可管理的发布记录</h3><p>展示最近 50 条当前获准管理的记录。策略有效与账号业务操作分别校验；拥有授权记录不表示所有成员都具备相应功能。</p><div id="cvPublicationRows" class="compact-list"></div></section>
   </dialog>
 
+  <dialog id="dashboardImageDialog" class="card" aria-labelledby="dashboardImageLabel">
+    <div class="card-head"><h2 id="dashboardImageLabel">内容预览</h2>
+      <button class="btn" type="button" id="dashboardImageClose">关闭</button></div>
+    <img id="dashboardImage" alt="" />
+  </dialog>
+  <dialog id="dashboardMetadata" class="card">
+    <form class="stack-form">
+      <h2>维护数据集业务资料</h2>
+      <label>中文显示名称<input name="displayName" required maxlength="160" /></label>
+      <fieldset><legend>适用业务</legend><div id="dashboardMetadataCodes" class="dashboard-metadata-codes"></div></fieldset>
+      <label>分类依据<textarea name="evidenceReference" required maxlength="300" placeholder="填写资料、记录或受控视图范围依据"></textarea></label>
+      <p id="dashboardMetadataStatus" role="status"></p>
+      <div class="filters"><button class="btn primary" type="submit">保存</button>
+        <button class="btn" type="button" id="dashboardMetadataClose">取消</button></div>
+    </form>
+  </dialog>
   <div id="toast" class="toast"></div>
   </div>
-  <script src="./identity-session.js?v=f05-r2"></script>
-  <script src="./sign-in.js?v=2"></script>
-  <script src="./app.js?v=f05-r2"></script>
-  <script src="./qa.js?v=f05-r3"></script>
+  <script src="./labels.js?v=7"></script>
+  <script src="./identity-session.js?v=f06-r39"></script>
+  <script src="./sign-in.js?v=f06"></script>
+  <script src="./app.js?v=f06"></script>
+  <script src="./scope-picker.js?v=6"></script>
+  <script src="./qa.js?v=f06-r41"></script>
+  <script src="./dashboard.js?v=7"></script>
   <script src="./retrieval.js?v=f05-r2"></script>
   <script src="./view-exports.js?v=f05-r2"></script>
-  <script src="./identity.js?v=f05-r2"></script>
-  <script src="./enterprise-mapping.js?v=f05-r2"></script>
-  <script src="./resource-grants.js?v=f05-r2"></script>
-  <script src="./controlled-views.js?v=f05-r2"></script>
+  <script src="./identity.js?v=f06"></script>
+  <script src="./enterprise-mapping.js?v=f06-r39"></script>
+  <script src="./resource-grants.js?v=f06-r39"></script>
+  <script src="./controlled-views.js?v=f06-r39"></script>
 </body>
 </html>

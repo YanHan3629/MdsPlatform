@@ -3,6 +3,9 @@
  const auth=window.mdsIdentity,$=id=>document.getElementById(id),proposals='/controlled-view-proposals',previews='/controlled-view-previews',publications='/controlled-view-publications';
  const ops=[['data.catalog.read','查看目录'],['data.preview','预览授权内容'],['data.search','专业检索'],['data.qa','证据问答'],['data.raw.download','下载完整文件'],['data.view.export','导出授权视图']];
  const states={BUILDING:'生成私有预览中',AWAITING_REVIEW:'私有预览已校验，等待核对',RAW_PUBLISHED:'独立原始版本已冻结，等待索引',INDEXING:'正在建立索引并校验',READY:'索引与授权已登记',FAILED:'本次未通过校验',CANCELED:'本次已取消',REVOKED:'分享已撤销'};
+ const stateLabel=state=>Object.hasOwn(states,state)?states[state]:mdsLabel(state,'视图状态待核验');
+ const taskLabel=state=>mdsLabel(state,'任务状态待核验');
+ const operationLabel=code=>ops.find(item=>item[0]===code)?.[1]||'待核验的授权动作 '+code;
  const errors={
   VIEW_RESPONSIBILITY_ORIGINAL_SOURCE_REQUIRED:'企业责任范围需要完整业务来源，请为父视图使用逐文件选择。',
   VIEW_RESPONSIBILITY_COMPLETE_RECORDS_REQUIRED:'请列出完整文件中全部业务记录的标识，并核对它们都属于接收企业。',
@@ -45,8 +48,7 @@
  const api=(path,options={})=>auth.api(path,{...options,signal:controller.signal});
  function report(error,c){
   if(error?.name==='AbortError'||c&&!current(c))return;
-  const text=String(error?.message||error||''),code=Object.keys(errors).find(k=>text.includes(k));
-  status(code?errors[code]:error?.status===401?'请重新登录后重试。':error?.status===403?'当前账号缺少本次操作能力。':error?.status===404?'该范围在当前身份和授权下不可见，请刷新记录。':error?.status>=500?'服务暂不可用，请保留记录并稍后刷新。':error?.status===409?'范围或状态已变化，请刷新后重新核对。':text||'操作未完成，请刷新记录。');
+  status(mdsErrorMessage(error,errors));
  }
  function line(root,label,value){const r=node('div'),b=node('b','',label),t=node('span','',value??'未设置');r.append(b,t);root.append(r);}
  function options(select,rows,placeholder){select.replaceChildren(new Option(placeholder,''));for(const row of rows)select.append(new Option(row.label,row.value));}
@@ -220,7 +222,7 @@
   }
  }
  function renderPreview(){
-  if(!preview)return;$('cvPreviewPanel').hidden=false;frozenDetails();$('cvPreviewState').textContent=(states[preview.state]||preview.state)+(preview.jobStatus?' · 任务 '+preview.jobStatus:'');
+  if(!preview)return;$('cvPreviewPanel').hidden=false;frozenDetails();$('cvPreviewState').textContent=stateLabel(preview.state)+(preview.jobStatus?' · 任务 '+taskLabel(preview.jobStatus):'');
   const ready=preview.state==='AWAITING_REVIEW'&&preview.preview?.actualStoredBytesVerified;
   $('cvPublicationForm').hidden=!ready;$('cvPreviewFiles').replaceChildren();$('cvSelections').replaceChildren();$('cvCopyNotice').hidden=!ready||!preview.preview.hasOriginalByteCopies;
   $('cvCopyNotice').textContent='此预览包含完整文件副本。接收方导出这类副本，还需要在同一条授权中明确包含完整文件下载，且账号自身具备相应业务能力。';
@@ -259,11 +261,11 @@
  async function loadRecords(c){
   const requests=[api(publications+'?maximum=50')];if(canBuild())requests.push(api(proposals+'?page=1&size=25'),api(previews+'?maximum=50'));
   const values=await Promise.all(requests);if(!current(c))return;
-  $('cvPublicationRows').replaceChildren();for(const p of values[0]){const row=node('div','resource-grant-row');row.append(node('b','',p.name),node('p','',(states[p.state]||p.state)+' · '+(p.targetOrgName||p.target.enterpriseName)),button('查看进度与授权',()=>void openPublication(p.publicationId)));$('cvPublicationRows').append(row);}
+  $('cvPublicationRows').replaceChildren();for(const p of values[0]){const row=node('div','resource-grant-row');row.append(node('b','',p.name),node('p','',stateLabel(p.state)+' · '+(p.targetOrgName||p.target.enterpriseName)),button('查看进度与授权',()=>void openPublication(p.publicationId)));$('cvPublicationRows').append(row);}
   if(!values[0].length)$('cvPublicationRows').append(node('p','','当前没有可管理的发布记录。'));
   $('cvDraftRows').replaceChildren();$('cvAttemptRows').replaceChildren();
   if(values[1])for(const p of values[1].items){const row=node('div','resource-grant-row');row.append(node('span','',p.target.enterpriseName+' · 范围草稿 · 到期 '+date(p.expiresAt)),button('继续生成私有预览',()=>void continueProposal(p.proposalId)));$('cvDraftRows').append(row);}
-  if(values[2])for(const p of values[2]){const row=node('div','resource-grant-row');row.append(node('span','',(states[p.state]||p.state)+' · '+(p.jobStatus||'')),button(p.publicationId?'查看发布记录':'查看私有预览',()=>void(p.publicationId?openPublication(p.publicationId):openAttempt(p.attemptId))));$('cvAttemptRows').append(row);}
+  if(values[2])for(const p of values[2]){const row=node('div','resource-grant-row');row.append(node('span','',stateLabel(p.state)+(p.jobStatus?' · '+taskLabel(p.jobStatus):'')),button(p.publicationId?'查看发布记录':'查看私有预览',()=>void(p.publicationId?openPublication(p.publicationId):openAttempt(p.attemptId))));$('cvAttemptRows').append(row);}
  }
  async function openAttempt(id,c=context()){
   try{
@@ -282,7 +284,7 @@
    const config={timezone:form.elements.timezone.value};if(form.elements.timeColumn.value)config.timeColumn=form.elements.timeColumn.value;const entities=lines(form.elements.entityColumns.value);if(entities.length)config.entityColumns=entities;
    setBusy(true);const result=await api(publications+'/review',{method:'POST',json:{attemptId:preview.attemptId,name:form.elements.name.value,operations,validFrom:instant(form.elements.validFrom),validTo:instant(form.elements.validTo),reason:form.elements.reason.value,indexConfig:config}});
    if(!current(c))return;review=result;const r=result.review,root=$('cvApprovalDetails');root.replaceChildren();
-   line(root,'视图名称',r.name);line(root,'接收组织',r.targetOrgName||r.target.enterpriseName);line(root,'业务企业',r.target.enterpriseName);line(root,'授权动作',r.consumerOperations.map(x=>ops.find(o=>o[0]===x)?.[1]||x).join('、'));
+   line(root,'视图名称',r.name);line(root,'接收组织',r.targetOrgName||r.target.enterpriseName);line(root,'业务企业',r.target.enterpriseName);line(root,'授权动作',r.consumerOperations.map(operationLabel).join('、'));
    line(root,'开始时间',date(r.validFrom));line(root,'结束时间',date(r.validTo));line(root,'实际文件数',r.files.length);line(root,'完整文件副本',r.hasOriginalByteCopies?'包含；请核对原件下载与导出动作':'不包含');
    line(root,'本次确认有效至',date(result.expiresAt));line(root,'审核校验值',result.reviewSha256);$('cvApprovalPanel').hidden=false;$('cvConfirmForm').reset();status('请逐项核对本次发布与授权，再输入接收组织名称确认。');
   }catch(e){report(e,c);}finally{if(current(c))setBusy(false);}
@@ -299,8 +301,8 @@
  }
  function renderPublication(){
   if(!publication)return;const p=publication,root=$('cvProgress');$('cvProgressPanel').hidden=false;root.replaceChildren();
-  line(root,'视图名称',p.name);line(root,'接收企业',(p.targetOrgName?p.targetOrgName+' · ':'')+p.target.enterpriseName);line(root,'当前状态',states[p.state]||p.state);
-  if(p.jobStatus)line(root,'索引任务',p.jobStatus);line(root,'授权动作',p.consumerOperations.map(x=>ops.find(o=>o[0]===x)?.[1]||x).join('、'));
+  line(root,'视图名称',p.name);line(root,'接收企业',(p.targetOrgName?p.targetOrgName+' · ':'')+p.target.enterpriseName);line(root,'当前状态',stateLabel(p.state));
+  if(p.jobStatus)line(root,'索引任务',taskLabel(p.jobStatus));line(root,'授权动作',p.consumerOperations.map(operationLabel).join('、'));
   line(root,'开始时间',date(p.validFrom));line(root,'结束时间',date(p.validTo));line(root,'本次接收企业策略',p.consumerGrantCurrentlyEffective?'当前有效；具体成员还须具备相应业务能力':'当前尚未生效或已失效');
   line(root,'尚未撤销的授权记录',p.activeGrantCount);$('cvStartIndex').hidden=p.state!=='RAW_PUBLISHED';$('cvRevokeForm').hidden=p.state!=='READY';
   $('cvProgressNotice').textContent=p.state==='READY'?(p.consumerGrantCurrentlyEffective?'已完成独立版本、索引和校验，接收企业可按所选动作及成员岗位使用。':'文件与索引已就绪，当前策略未开放读取；请核对有效期、企业身份和授权记录。'):p.state==='REVOKED'?'本视图授权已撤销，冻结文件、索引和历史记录保留。':['FAILED','CANCELED'].includes(p.state)?'本次未向接收企业开放新授权。记录保留；重新发布请重新生成私有预览。':'接收企业尚不能使用本次视图。仅在任务成功、索引预热及全部文件校验通过后开放。';
@@ -321,7 +323,7 @@
     else{publication=value;renderPublication();}
     if(value.state==='BUILDING'||value.state==='INDEXING'||value.state==='RAW_PUBLISHED')poll();
     else{await loadRecords(c);if(current(c))controls();}
-   }catch(e){report(e,c);if(current(c))status('当前状态暂未确认，请刷新已有记录。系统不会自动重复提交发布。');}
+   }catch(e){report(e,c);}
   },2500);
  }
  async function revoke(event){

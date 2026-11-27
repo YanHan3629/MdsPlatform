@@ -97,6 +97,56 @@ class ManifestLoader:
             self._verify_file(target, entry['sha256'])
         return {'manifest': manifest, 'professional_files': {logical_path: target}}
 
+    def load_professional_subset(self, dataset_id: str, version_id: str, index_version_id: str, spaces: set[str],
+                                 *, reference_only: bool = False):
+        """Load only the checksummed registrations required by this retrieval."""
+        base_dir = Path(settings.local_cache_dir) / dataset_id / version_id / index_version_id
+        bundle = self.backend.resolve_index_bundle(dataset_id, version_id, index_version_id)
+        manifest_path = self.backend.download_to(bundle['manifestUrl'],self._target_path(base_dir,bundle['manifestPath']))
+        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        files = self._registered_files(base_dir,bundle,manifest,spaces=spaces | {'snapshot.facets'},
+                                       reference_only=reference_only)
+        return manifest, files, bundle
+
+    def load_candidate_images(self, dataset_id: str, version_id: str, index_version_id: str, bundle: dict):
+        """Load the image index used by the same QA candidate ranking."""
+        base_dir = Path(settings.local_cache_dir) / dataset_id / version_id / index_version_id
+        index_path = self.backend.download_to(bundle["imageIndexUrl"], self._target_path(base_dir, bundle["imageIndexPath"]))
+        metadata_path = self.backend.download_to(bundle["imageMetadataUrl"], self._target_path(base_dir, bundle["imageMetadataPath"]))
+        return faiss.read_index(str(index_path)), pd.read_parquet(metadata_path)
+
+    def _registered_files(self, base_dir, bundle, manifest, *, spaces=None, reference_only=False):
+        professional_files = {}
+        transfers = {}
+        signed = {item.get("path"): item.get("url") for item in bundle.get("indexFiles", [])}
+        for registration in manifest.get("indexes", []):
+            semantic_space = registration.get("semanticSpace")
+            if spaces is not None and semantic_space not in spaces:
+                continue
+            entries = registration.get("files", [])
+            registered_checksum = registration.get("contentChecksum")
+            if registered_checksum and hashlib.sha256("".join(item.get("sha256", "") for item in entries).encode()).hexdigest() != registered_checksum:
+                raise ValueError(f"index registration checksum mismatch: {semantic_space}")
+            for item in entries:
+                logical_path = item.get("path")
+                if not logical_path or logical_path in professional_files:
+                    continue
+                if reference_only and semantic_space == 'structured.typed' and logical_path.rsplit('/', 1)[-1] != 'records.jsonl':
+                    continue
+                target = self._target_path(base_dir, logical_path)
+                checksum = item.get("sha256")
+                existing = transfers.get(target)
+                if existing and (not checksum or existing[1] != checksum):
+                    raise ValueError(f"conflicting registered index files share a cache target: {logical_path}")
+                transfers.setdefault(target, (target, checksum, signed.get(logical_path)))
+                professional_files[logical_path] = target
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            pending = [pool.submit(copy_context().run, self._cache_registered_file, spec)
+                       for spec in transfers.values()]
+            for transfer in pending:
+                transfer.result()
+        return professional_files
+
     def load(self, dataset_id: str, version_id: str, index_version_id: str):
         base_dir = Path(settings.local_cache_dir) / dataset_id / version_id / index_version_id
         base_dir.mkdir(parents=True, exist_ok=True)
@@ -130,32 +180,7 @@ class ManifestLoader:
             unified_index = faiss.read_index(str(unified_index_file))
             unified_metadata = pd.read_parquet(unified_meta_file)
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        professional_files = {}
-        transfers = {}
-        signed = {item.get("path"): item.get("url") for item in bundle.get("indexFiles", [])}
-        for registration in manifest.get("indexes", []):
-            entries = registration.get("files", [])
-            registered_checksum = registration.get("contentChecksum")
-            if registered_checksum and hashlib.sha256("".join(item.get("sha256", "") for item in entries).encode()).hexdigest() != registered_checksum:
-                raise ValueError(f"index registration checksum mismatch: {registration.get('semanticSpace')}")
-            for item in entries:
-                logical_path = item.get("path")
-                if not logical_path or logical_path in professional_files:
-                    continue
-                target = self._target_path(base_dir, logical_path)
-                checksum = item.get("sha256")
-                existing = transfers.get(target)
-                if existing and (not checksum or existing[1] != checksum):
-                    raise ValueError(f"conflicting registered index files share a cache target: {logical_path}")
-                transfers.setdefault(target, (target, checksum, signed.get(logical_path)))
-                professional_files[logical_path] = target
-        # Independent artifacts can transfer concurrently. Only verified files become visible in the cache.
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            # Each transfer inherits the same scoped authorization guard in its own context.
-            pending = [pool.submit(copy_context().run, self._cache_registered_file, spec)
-                       for spec in transfers.values()]
-            for transfer in pending:
-                transfer.result()
+        professional_files = self._registered_files(base_dir,bundle,manifest)
         # Ordinary queries prepare only their requested semantic spaces.
         # The explicit publication endpoint still prepares all spaces through
         # IndexRegistry.ensure_preloaded, including on an existing cache hit.

@@ -380,7 +380,7 @@ class SnapshotScope:
                 stages={value for c in plan.object_conditions if c.field=='business_stage' for value in (c.value if c.op=='in' else [c.value])}
                 if not stages or not stages<=set(field['applicableStages']):_fail('关联时间条件必须先明确适用的文档/图像业务类型；有效期不属于实际事件或拍摄时间')
             _check_type(condition, field)
-        if "structured" in plan.retrievers:
+        if "structured" in plan.retrievers and not plan.all_tables_search:
             table = self.tables.get(plan.table_id)
             if not table:
                 _fail("表格检索及计算必须先选择当前快照的业务表/工作表")

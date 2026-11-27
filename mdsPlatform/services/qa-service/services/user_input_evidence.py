@@ -213,7 +213,8 @@ def verify_context(sources,trace,call):
 
 def question_matches(source,question,mixed=False):
     if is_user(source):return source.provenance.get('validatedUserQuestion')==question
-    keys=['validatedDocumentQuestion','validatedTextQuestion','validatedEngineeringQuestion','validatedRecordQuestion']
+    keys=['validatedDocumentQuestion','validatedTextQuestion','validatedEngineeringQuestion','validatedRecordQuestion',
+          'validatedMultiScopeQuestion']
     declared=[source.provenance[k] for k in keys if k in source.provenance]
     return all(q==question for q in declared) if declared else bool(source.evidence_bundle)
 

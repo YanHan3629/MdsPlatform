@@ -4,11 +4,13 @@ import hashlib
 import gzip
 import json
 import math
+import re
 import time
 import uuid
 from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+from heapq import nsmallest
 from pathlib import Path
 from typing import Any, Callable
 from threading import Lock, RLock
@@ -320,8 +322,8 @@ class TextRetriever:
 
 
 class StructuredRetriever:
-    def __init__(self, records_path: Path | None, field_index_path: Path | None = None):
-        self.rows = _read_jsonl(records_path)
+    def __init__(self, records_path: Path | None, field_index_path: Path | None = None, *, rows: list[dict] | None = None):
+        self.rows = _read_jsonl(records_path) if rows is None else rows
         self.field_index = None
         if field_index_path is not None:
             with gzip.open(field_index_path, "rt", encoding="utf-8") as stream:
@@ -330,6 +332,29 @@ class StructuredRetriever:
             raise ValueError("Structured field index row count does not match its records")
         self.known_fields = (set(self.field_index["fields"]) if self.field_index
                              else {field for row in self.rows for field in row["values"]})
+
+    @classmethod
+    def from_references(cls, records_path: Path, terms: list[str], *, allowed: Callable[[dict], bool], limit: int):
+        patterns = cls._reference_patterns(terms)
+        def matching_rows(stream):
+            for position, line in enumerate(stream):
+                # Older artifacts may escape Unicode. Recheck those lines on
+                # decoded values so the frozen record matching rules stay identical.
+                if '\\u' not in line and not any(pattern.search(line) for pattern in patterns):
+                    continue
+                row = json.loads(line)
+                values = json.dumps(row["values"], ensure_ascii=False)
+                ranks = [index for index, pattern in enumerate(patterns) if pattern.search(values)]
+                if ranks and allowed(row):
+                    yield (-len(ranks), ranks[0], position, row)
+        with records_path.open('r', encoding='utf-8') as stream:
+            rows = [row for _, _, _, row in nsmallest(limit, matching_rows(stream), key=lambda entry: entry[:3])]
+        return cls(None, rows=rows)
+
+    @staticmethod
+    def _reference_patterns(terms: list[str]):
+        return [re.compile(r"(?<![A-Za-z0-9_-])" + re.escape(term) + r"(?![A-Za-z0-9_-])", re.I)
+                for term in terms]
 
     def unknown_fields(self, plan: QueryPlan) -> list[str]:
         fields = {condition.field for condition in plan.hard_conditions}
@@ -393,9 +418,17 @@ class StructuredRetriever:
         if any(row.get('calculationEligibility',{}).get(condition.field) is False
                for row in self.rows for condition in plan.hard_conditions):
             candidate_ids=None
+        patterns = self._reference_patterns(plan.reference_terms)
+        reference_ranks = {}
         matches = []
         for row_id in sorted(candidate_ids) if candidate_ids is not None else range(len(self.rows)):
             row = self.rows[row_id]
+            if patterns:
+                content = json.dumps(row["values"],ensure_ascii=False)
+                ranks = [rank for rank, pattern in enumerate(patterns) if pattern.search(content)]
+                if not ranks:
+                    continue
+                reference_ranks[id(row)] = (-len(ranks),ranks[0])
             if plan.query_text and plan.query_text.lower() not in json.dumps(row["values"], ensure_ascii=False).lower():
                 continue
             if plan.target_entity and plan.target_entity not in json.dumps(row["values"], ensure_ascii=False):
@@ -476,6 +509,8 @@ class StructuredRetriever:
             item.provenance['structuredCalculationInputs'] = receipt(matches, plan, field, len(self.rows))
             item.provenance['nullPredicatePolicy'] = 'Explicit null only; empty strings are present non-null values; absent fields match neither null predicate.'
             return [item]
+        if reference_ranks:
+            matches.sort(key=lambda row: reference_ranks[id(row)])
         result = []
         for rank, row in enumerate(matches[:plan.top_k], 1):
             item=_evidence(version=version, index_version=index_version, space="structured.typed", asset_id=row["assetId"],
@@ -946,7 +981,15 @@ class ProfessionalRetrieverSuite:
                 hits=execute(self,scope,plan,version,index_version)
                 for item in hits:item.provenance['validatedQuery']=plan.model_dump()
                 return [scope.enrich(item,plan) for item in hits],[]
-            retriever = self._prepare(name)
+            if name == 'structured' and plan.reference_terms:
+                path = self._path('structured.typed', 'records.jsonl')
+                if not path:
+                    return [], ['STRUCTURED_INDEX_NOT_READY']
+                retriever = StructuredRetriever.from_references(
+                    path, plan.reference_terms, limit=plan.top_k,
+                    allowed=lambda row: scope.allowed_unit(row, plan, row['values'], row['locator'].get('rawRow')))
+            else:
+                retriever = self._prepare(name)
             if retriever:
                 retriever = scope.scoped_retriever(retriever, name, plan)
                 hits = retriever.search(plan, version, index_version)

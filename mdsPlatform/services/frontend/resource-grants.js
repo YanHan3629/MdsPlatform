@@ -35,7 +35,10 @@
  const context=()=>({sequence,revision:auth.revision,draft});
  const current=(c,checkDraft=false)=>c.sequence===sequence&&c.revision===auth.revision&&(!checkDraft||c.draft===draft)&&$('resourceGrantDialog').open;
  function status(text){$('resourceGrantStatus').textContent=text;}
- function report(error,c){if(error?.name==='AbortError'||(c&&!current(c)))return;const text=String(error?.message||error),code=Object.keys(errors).find(key=>text.includes(key));status(code?errors[code]:text);}
+ function report(error,c){if(error?.name==='AbortError'||(c&&!current(c)))return;status(mdsErrorMessage(error,errors));}
+ const operationLabel=code=>labels[code]||'待核验的授权动作 '+code;
+ const purposeLabel=code=>purposeLabels[code]||'待核验的授权用途 '+code;
+ const scopeLabel=code=>scopeLabels[code]||'资源范围待核验';
  function options(select,items,placeholder){select.replaceChildren(new Option(placeholder,''));for(const item of items)select.append(new Option(item.label,item.value));}
  function clearReview(){draft++;review=null;$('resourceGrantReview').hidden=true;$('resourceGrantReviewContent').replaceChildren();$('resourceGrantConfirmForm').reset();}
  function clear(){
@@ -50,10 +53,10 @@
  function activeOrg(){return organizations.find(o=>o.orgId===$('resourceGrantOrg').value);}
  function purposes(){return [...$('resourceGrantPurposes').querySelectorAll('input:checked')].map(input=>input.value).sort();}
  function purposeKey(){return purposes().join(',');}
- function scopeName(r){return (r.datasetName||r.datasetId)+' · '+(scopeLabels[r.scopeKind]||r.scopeKind)+(r.versionName?' / '+r.versionName:'');}
+ function scopeName(r){return (r.datasetName||r.datasetId)+' · '+scopeLabel(r.scopeKind)+(r.versionName?' / '+r.versionName:'');}
  function showOperations(){
   const root=$('resourceGrantOperations');root.replaceChildren();
-  for(const op of operations){const label=document.createElement('label'),input=document.createElement('input'),text=document.createElement('span');input.type='checkbox';input.value=op.code;input.onchange=clearReview;text.textContent=labels[op.code]||op.label||op.code;label.append(input,text);root.append(label);}
+  for(const op of operations){const label=document.createElement('label'),input=document.createElement('input'),text=document.createElement('span');input.type='checkbox';input.value=op.code;input.onchange=clearReview;text.textContent=labels[op.code]||mdsSystemMessage(op.label,operationLabel(op.code))||operationLabel(op.code);label.append(input,text);root.append(label);}
  }
  async function loadResources(c){
   const expected=++resourceSequence;resources=[];listSequence++;clearReview();
@@ -94,12 +97,12 @@
    for(const item of value.items){
     const d=item.definition,row=document.createElement('article');row.className='resource-grant-row';
     const title=document.createElement('b'),text=document.createElement('p'),detail=document.createElement('p'),button=document.createElement('button');
-    title.textContent=item.grantId+' · '+(item.state==='ACTIVE'?(item.liveTimeWindow?(item.sourceConstraintsCurrent===false?(item.sourceCurrentOperations?.length?'原始授权动作受限':'原始授权约束已失效'):'授权期限内'):'尚未生效／已到期'):item.state==='EXPIRED'?'已到期':'已撤销');
+    title.textContent=item.grantId+' · '+(item.state==='ACTIVE'?(item.liveTimeWindow?(item.sourceConstraintsCurrent===false?(item.sourceCurrentOperations?.length?'原始授权动作受限':'原始授权约束已失效'):'授权期限内'):'尚未生效／已到期'):mdsLabel(item.state,'授权状态待核验'));
     const org=organizations.find(o=>o.orgId===d.granteeOrgId);
-    text.textContent=(org?.orgName||d.granteeOrgId)+' · '+(d.subjectKind==='ORG'?'组织全体成员':d.subjectId)+' · '+(scopeLabels[d.scopeKind]||d.scopeKind);
-    detail.textContent=(d.operations||[]).map(code=>labels[code]||code).join('、')+'；用途：'+(item.purposeCodes||[d.purpose]).map(p=>purposeLabels[p]||p).join('、');
+    text.textContent=(org?.orgName||d.granteeOrgId)+' · '+(d.subjectKind==='ORG'?'组织全体成员':d.subjectId)+' · '+scopeLabel(d.scopeKind);
+    detail.textContent=(d.operations||[]).map(operationLabel).join('、')+'；用途：'+(item.purposeCodes||[d.purpose]).map(purposeLabel).join('、');
     detail.textContent+='；来源约束：'+(item.sourceConstraintsCurrent===true?'全部动作当前有效':item.sourceConstraintsCurrent===false?(item.sourceCurrentOperations?.length?'部分动作当前有效':'已失效'):'待核验');
-    if(item.sourceCurrentOperations?.length)detail.textContent+='；来源支持：'+item.sourceCurrentOperations.map(code=>labels[code]||code).join('、');
+    if(item.sourceCurrentOperations?.length)detail.textContent+='；来源支持：'+item.sourceCurrentOperations.map(operationLabel).join('、');
     button.type='button';button.className='btn';button.textContent='预览撤销本条授权';button.disabled=item.state!=='ACTIVE';button.onclick=()=>void revoke(item);
     row.append(title,text,detail,button);$('resourceGrantRows').append(row);
    }
@@ -128,10 +131,10 @@
   review={id:result.reviewId,grantId:p.grantId,action:p.action,confirmation:expectedText,revision:auth.revision,draft};
   line(root,'操作',creating?'创建授权':'撤销本条授权');line(root,'授权 ID',p.grantId);
   line(root,'接收主体',creating?p.grantee.orgName+' · '+(d.subjectKind==='ORG'?'组织全体成员（当前 '+p.grantee.affectedMemberCount+' 人，后续有效成员也适用）':d.subjectId):d.granteeOrgId+' · '+d.subjectId);
-  line(root,'资源范围',(p.resource?.datasetName||d.datasetId)+' · '+(scopeLabels[d.scopeKind]||d.scopeKind));
+  line(root,'资源范围',(p.resource?.datasetName||d.datasetId)+' · '+scopeLabel(d.scopeKind));
   if(d.versionId)line(root,'冻结版本 / 索引',d.versionId+' / '+d.indexVersionId);
-  line(root,'业务动作',(d.operations||[]).map(code=>labels[code]||code).join('、'));
-  line(root,'用途',(p.purposeCodes||d.purposeCodes||[d.purpose]).map(v=>purposeLabels[v]||v).join('、'));
+  line(root,'业务动作',(d.operations||[]).map(operationLabel).join('、'));
+  line(root,'用途',(p.purposeCodes||d.purposeCodes||[d.purpose]).map(purposeLabel).join('、'));
   if(creating)line(root,'用途与动作','每一种所选用途均覆盖上述全部业务动作，由同一条完整授权承载。');
   line(root,'有效期',(d.validFrom?new Date(d.validFrom).toLocaleString():'立即')+' 至 '+(d.validTo?new Date(d.validTo).toLocaleString():'直到撤销'));
   if(d.contractId)line(root,'合同',d.contractId+' · 修订 '+d.contractRevision);

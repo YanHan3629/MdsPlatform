@@ -10,8 +10,6 @@ import org.springframework.security.web.access.AccessDeniedHandler;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
-import java.util.HashMap;
-import java.util.Map;
 
 /**
  * 权限拒绝处理器，统一返回 403 JSON 响应。
@@ -34,11 +32,7 @@ public class RestAccessDeniedHandler implements AccessDeniedHandler {
     @Override
     public void handle(HttpServletRequest request, HttpServletResponse response, AccessDeniedException accessDeniedException)
             throws IOException {
-        Map<String, Object> error = new HashMap<>();
-        error.put("success", false);
-        error.put("message", "权限不足，无法访问此资源");
-        error.put("status", HttpStatus.FORBIDDEN.value());
-        error.put("errorType", "ACCESS_DENIED");
+        var error = com.fwdrobo.sirius.handler.ApiErrors.body(403,"ACCESS_DENIED",null);
 
         response.setStatus(HttpStatus.FORBIDDEN.value());
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);

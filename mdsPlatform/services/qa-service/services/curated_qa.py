@@ -9,6 +9,7 @@ import math
 import re
 import time
 from datetime import datetime, timezone
+from decimal import InvalidOperation
 from io import BytesIO
 
 import requests
@@ -335,12 +336,34 @@ def _messages(question, task_type, sources, image_parts, status, *, visual_only=
     order_review = order_line_review_basis(question, sources, image_parts, status, prior_questions)
     if order_review:
         section_parts = ()
-    from services.user_input_evidence import image_label_selection, image_prompt_caption
+    from services.user_input_evidence import image_label_selection, image_prompt_caption, is_user
 
     content = []
     source_indices = {source.source_id: index for index, source in enumerate(sources, 1)}
     if sources:
         content.append({"type": "text", "text": _source_text_content(sources)})
+    if any(source.provenance.get('multiScopeSource') for source in sources):
+        from services.multi_scope_evidence import computation_prompt, measurement_quantities, record_review_prompt
+        computations = computation_prompt(question,sources)
+        if computations:
+            content.append({'type':'text','text':computations})
+        detail = record_review_prompt(question,sources)
+        if detail:
+            content.append({'type':'text','text':detail})
+        if re.search(r'检验|质检|终检|测量|限值|合格',question):
+            for index, source in enumerate(sources, 1):
+                measurements = measurement_quantities(source)
+                if measurements:
+                    values = '，'.join(f'{field} 为 {value} {unit}' for field,value,unit in measurements)
+                    content.append({'type':'text','text':f'[来源{index}] 检验原表记录的值与单位。{values}。'})
+    elif sources and all(source.evidence_bundle and not is_user(source) for source in sources):
+        from services.multi_scope_evidence import partial_dimension_prompt, record_review_prompt
+        detail = record_review_prompt(question,sources,single_scope=True)
+        if detail:
+            content.append({'type':'text','text':detail})
+        dimensions = partial_dimension_prompt(sources)
+        if dimensions:
+            content.append({'type':'text','text':dimensions})
     batch_summary = batch_quantity_summary(sources)
     purchase_summary = purchase_quantity_summary(sources)
     if batch_summary or purchase_summary:
@@ -448,6 +471,12 @@ def _messages(question, task_type, sources, image_parts, status, *, visual_only=
             "首句如回答时长，写完结论后在换行前紧跟来源。"
             "小标题只写事项名称，时刻、时长和日期写在有同行引用的正文里。"
         )
+    if re.search(r'终检|放行',question) and re.search(r'移交|交接|销账',question) and any(
+            source.provenance.get('verifiedBusinessRecord') for source in sources):
+        system += (
+            '\n按批次分别写出已核验的检验或放行时间与参考号，并引用各批自己的记录。'
+            '已入模的每批终检放行都要写各自原始时刻，已入模的各批移交都要单列原始时刻和节点，并保留对应来源。'
+            '两种事件分别使用自己的参考号。')
     if any(source.provenance.get('verifiedMovementPair') for source in sources):
         system += (
             "\n配对流水的首句结论写在一行，出现数量或净变动时，在该行末同时引用配对的两行。"
@@ -589,6 +618,7 @@ def _messages(question, task_type, sources, image_parts, status, *, visual_only=
         system += (
             "\n逐项列出终检项目、检验时刻和结果，引用终检报告；另列正式放行时刻与合格数，引用生产台账。"
             "终检时刻使用 measured_at，生产测试使用 tested_at，正式放行使用 released_at。分别说明这些字段所记录的业务动作。"
+            "终检原行已读取实测值和单位时一并列出。原行有统计方法时说明该值的口径。"
         )
     if any(source.provenance.get('verifiedProductionDuration') for source in sources):
         system += ("\n测试完成至正式放行的耗时使用同一生产记录的 verifiedCalculations。"
@@ -670,6 +700,19 @@ def _messages(question, task_type, sources, image_parts, status, *, visual_only=
             "共同的型号级声明不能擅自变成内外机分别的专属参数。"
             "任何一侧缺少字段、单位或轴定义时，说明具体粒度与缺项，不能判定一致。"
         )
+    component_headers = '、'.join(f'[来源{index}]' for index, source in enumerate(sources, 1)
+                                 if source.provenance.get('documentComponentUseQuantityHeader'))
+    if component_headers:
+        from services.document_evidence_plan import component_use_topics
+
+        components = '、'.join(component_use_topics(question))
+        if components:
+            system += (
+                f"\n分别用一行回答 {components}。对照同一原生表行逐项写出部件料号和版本、用途、接口、适用边界和该行数量。"
+                f"每套用量列名见 {component_headers}。每个部件的数量都需单独关联对应原表行与用量表头，保留数量单位。"
+                "兼容性和专用或共用的范围按该行原文说明。具体字段缺失时标出缺项。"
+                "最后引用技术页的范围声明，说明该页支持的采购核对及仍需其他凭证确认的结论。"
+            )
     if any(source.provenance.get('serviceContractBuyerRole') for source in sources):
         contract_labels = '、'.join(f'[来源{index}]' for index, source in enumerate(sources, 1)
                                    if source.provenance.get('serviceContractBuyerRole') == 'contract')
@@ -678,6 +721,7 @@ def _messages(question, task_type, sources, image_parts, status, *, visual_only=
         system += (
             f"\n合同买方从合同原表 {contract_labels} 核对，工单客户从工单 {work_order_labels} 核对。"
             "说明登记的买方和工单客户能证明的身份范围。合同有多个买方时保留全部登记，工单客户身份不能证明其是唯一买方或实际付款方。"
+            "原表登记的签约供方与工单实际记录的型号、序列号分别按各自来源说明。"
             "买方或客户的登记身份及合同关联本身不证明付款义务、退款责任或实际付款。"
             "责任结论须有当前来源中的明确条款，实际付款须有相应支付记录；缺少时只陈述已登记身份和关联，说明责任尚不能确认。"
             "按用户要求详略作答。未要求详细报告时，每项结论及其理由只写一次，答完所问即结束。"
@@ -1325,21 +1369,25 @@ def _product_pdf_comparison(client, scope, question, filters, intent, records):
 
 
 @traced_qa
-def answer_curated(service, *, dataset_id=None, version_id=None, index_version_id=None, **request):
+def answer_curated(service, *, dataset_id=None, version_id=None, index_version_id=None, scope_set=None, **request):
     started = time.perf_counter()
     response = _answer_curated(service, dataset_id=dataset_id, version_id=version_id,
-                               index_version_id=index_version_id, **request)
+                               index_version_id=index_version_id, scope_set=scope_set, **request)
     # Scoped diagnostic responses can contain evidence identifiers even with no sources.
     if (dataset_id and version_id and index_version_id
             and response.meta.retrieval_status not in {'USER_DATA_ONLY', 'USER_DISABLED', 'MISSING_SCOPE'}):
         service._get_search_client().check_scope(dataset_id, version_id, index_version_id)
         response.processing_time_ms = int((time.perf_counter() - started) * 1000)
+    unavailable = response.meta.evidence_selection.get('unavailableDimensionTarget')
+    if unavailable:
+        caveat = f'本次未读到 {unavailable} 的外形尺寸，依据不足以比较两个型号。'
+        response.notice = ' '.join(filter(None, (response.notice, caveat)))
     return response
 
 
 def _answer_curated(service, *, question, input_mode="hybrid", task_type="general_qa", dataset_id=None, version_id=None,
         index_version_id=None,texts=None,context=None,prior_questions=None,images=None,use_search_service=True,retrieval_mode="auto",retrieval_type="auto",
-        query_plan=None,top_k=8,max_tokens=None,temperature=None):
+        query_plan=None,top_k=8,max_tokens=None,temperature=None,scope_set=None):
     started=time.perf_counter();images=images or [];texts=[t for t in (texts or []) if t and t.strip()]
     if input_mode=="question_only" and (images or texts or context):raise ValueError("仅问题模式不能附带资料，请选择混合输入或仅用户资料")
     budget = current_budget()
@@ -1404,10 +1452,31 @@ def _answer_curated(service, *, question, input_mode="hybrid", task_type="genera
     intent=format_intent(question);diagnostics={"policyVersion":POLICY["version"],"candidateCount":0,"rejections":[]}
     budget.stage = "evidence"
     retrieval_started=time.perf_counter();selected=[];pack={}
-    scope=bool(dataset_id and version_id and index_version_id)
-    if scope and status not in {"USER_DATA_ONLY","USER_DISABLED"}:
+    scope=scope_set is not None or bool(dataset_id and version_id and index_version_id)
+    def check_all_sources():
+        if scope_set is not None:
+            scope_set.revalidate(force=True)
+        else:
+            service._get_search_client().check_scope(dataset_id,version_id,index_version_id)
+
+    scope_filters, scope_caches = {}, {}
+    logistics_review = False
+    if scope_set is not None and status not in {"USER_DATA_ONLY","USER_DISABLED"}:
+        from services.multi_scope_evidence import discover as discover_multiple
+        selected, diagnostics, scope_filters, scope_caches, multi_reads = discover_multiple(
+            scope_set, service._get_search_client(), question, intent, query_plan)
+        pack = {'nativeReads':multi_reads}
+        status = "OK" if selected else "NO_RELEVANT_EVIDENCE"
+    elif scope and status not in {"USER_DATA_ONLY","USER_DISABLED"}:
         client=service._get_search_client();caps=client.capabilities(dataset_id,version_id,index_version_id)
         exact=query_plan or _natural_calculation(question,caps["filters"])
+        partial = None
+        if not exact and not had_user_inputs and not prior_questions:
+            from services.multi_scope_evidence import partial_business_review, partial_dimension_comparison
+            frozen_scope = (dataset_id, version_id, index_version_id)
+            partial = partial_dimension_comparison(client, frozen_scope, question, caps['filters'], intent)
+            if partial is None and task_type == 'general_qa':
+                partial = partial_business_review(client, frozen_scope, question, caps['filters'], intent)
         if exact:
             ProfessionalQueryPlan.model_validate(exact)
             pack=client.professional_search(dataset_id,version_id,index_version_id,exact)
@@ -1415,6 +1484,10 @@ def _answer_curated(service, *, question, input_mode="hybrid", task_type="genera
             # Exact evidence is admitted only when its actual request matches the question.
             for item in candidates:
                 item.setdefault("provenance",{})["explicitEntities"]=[exact.get("targetEntity")] if exact.get("targetEntity") else [str(c["value"]) for c in exact.get("hardConditions",[]) if c["op"]=="eq"]
+        elif partial:
+            pack = partial
+            candidates = pack['evidence']
+            logistics_review = pack.get('businessReviewTopic') in {'包装签收', '仓储运输'}
         else:
             from services.native_evidence_read import direct_native_question
             from services.document_evidence_plan import direct_document_question, direct_scoped_raster_observation, locate_installation_image
@@ -1533,6 +1606,8 @@ def _answer_curated(service, *, question, input_mode="hybrid", task_type="genera
         if current():
             current().candidate_admission(candidates, selected, diagnostics['rejections'])
         status="UNKNOWN_ENTITY" if pack.get("status")=="UNKNOWN_ENTITY" else "EVIDENCE_CONFLICT" if pack.get("conflicts") else "OK" if selected else "NO_RELEVANT_EVIDENCE"
+        if pack.get('unavailableDimensionTarget'):
+            diagnostics['unavailableDimensionTarget'] = pack['unavailableDimensionTarget']
     retrieval_ms=round((time.perf_counter()-retrieval_started)*1000,3)
     record_scope=pack.get('recordPlan') or {}
     document_scope=pack.get('documentPlan') or {}
@@ -1565,6 +1640,21 @@ def _answer_curated(service, *, question, input_mode="hybrid", task_type="genera
         else:
             messages = _messages(question, task_type, proposed_sources, proposed_images, status, visual_only=visual_only,
                                  prior_questions=prior_questions, section_parts=answer_parts_for(proposed_sources, proposed_images))
+        if pack.get('unavailableDimensionTarget'):
+            messages[0]['content'] += (
+                '\n这是两件独立产品的对照。先报告当前原记录中已读型号的宽、深、高及原单位。'
+                '另一个型号的尺寸由页面标记为待核实。正文以“另一型号”交代缺项。'
+                '可报告已读尺寸。两型号的差值、用途、性能及能效比较均缺少依据。')
+        if scope_set is not None:
+            messages[0]['content'] += (
+                '\n跨数据集回答时，按引用中各自的冻结范围核对业务记录。使用可核对的业务外键、所属主体、'
+                '时间和单位建立关联。同一编号在不同企业的记录不可直接合并。区分一对多的分批记录与同一'
+                '事件的重复凭证。涉及计算时交代每个输入的依据，记录缺失或冲突时明确指出。'
+                '题目要求多笔凭证但实读记录不齐时，只报告已读的单笔或部分合计，不把已读的最后一笔当成业务最后一笔。'
+                '逐笔核验签收时列出原交付编号、实签数量和签收时刻。逐批追溯领料时列出领料号、数量和单位。'
+                '检验结果应与相应对象和时刻并列。来源有测量或检查计数时，一并给出实测值、单位、判定限值、检查数和结果。'
+                '订单关联产品时保留订单中的订量与单位。工单问题可简要交代实际记录的现场观察与操作。'
+                '逐段回答对应小问，避免重复其他段落。')
         begin = time.perf_counter()
         count=service.client.tokenize_messages(messages)
         timings['promptTokenization'] += (time.perf_counter() - begin) * 1000
@@ -1606,98 +1696,146 @@ def _answer_curated(service, *, question, input_mode="hybrid", task_type="genera
     diagnostics['textPlan']=pack.get('textPlan')
     if images:diagnostics['userImageRecall']=pack.get('userImageRecall')
     diagnostics['engineeringPlan']=pack.get('engineeringPlan')
-    for item in primary+additional_images:
+    evidence_order = primary + additional_images
+    large_scope = scope_set is not None and len(scope_set.children)>=4
+    asks_for_all_scopes = large_scope and re.search(
+        r'(?:每个|各个|所有|全部)(?:选中|所选|冻结)?(?:数据集|来源范围)|逐个(?:数据集|范围)', question)
+    pending_scope_coverage = {item['frozenScope']['datasetId'] for item in evidence_order} if large_scope else set()
+    if large_scope:
+        from services.multi_scope_evidence import read_table_batch
+        if not asks_for_all_scopes:
+            source_limit = min(source_limit, max(6, len(pending_scope_coverage)))
+        diagnostics['contextSourceLimit'] = source_limit
+    read_scopes = set()
+    prepared = {}
+    for position, item in enumerate(evidence_order):
         if len(final_items)>=source_limit:
             break
-        url=None
-        if item.get("facts",{}).get("visualOnly"):
-            if item in additional_images and len({original_format(source) for source in final_items})>=2:
-                diagnostics['rejections'].append({'evidenceId':item['evidenceId'],'reason':'VISUAL_FOCUS_WITH_COMPLEMENTARY_TEXT'});continue
-            if len(image_parts)>=prompt_image_limit:
-                diagnostics["rejections"].append({"evidenceId":item["evidenceId"],"reason":"IMAGE_BUDGET"});continue
-            try:
-                data=service._get_search_client().download_asset_image(dataset_id,version_id,item["assetId"],item.get("preview"),index_version_id=index_version_id)
-                if not data:raise ValueError("no decoded image")
-                url=encode_image(item['evidenceId'],"source.png",data)
-            except (BudgetExceeded, AuthorityError):
-                raise
-            except Exception as error:
-                if isinstance(error, requests.RequestException) and error.response is not None and error.response.status_code in {401, 403}:
+        enough_scope_coverage = not pending_scope_coverage or (not asks_for_all_scopes and len(read_scopes)>=2)
+        if large_scope and len(final_items)>=2 and enough_scope_coverage and budget.remaining()<=75:
+            diagnostics['nativeReadBudgetReached'] = True
+            break
+        if large_scope and position % 3 == 0:
+            limit = min(3, source_limit - len(final_items))
+            prepared, receipts = read_table_batch(
+                service._get_search_client(), scope_set, evidence_order[position:position + limit], question,
+                scope_filters, scope_caches)
+            native_reads.extend(receipts)
+        already_read = item['evidenceId'] in prepared
+        item = prepared.get(item['evidenceId'], item)
+        from contextlib import nullcontext
+        if scope_set is not None:
+            coordinates = item['frozenScope']
+            source_scope = tuple(coordinates[key] for key in ('datasetId','versionId','indexVersionId'))
+            source_filters = scope_filters[source_scope]
+            source_cache = scope_caches[source_scope]
+            authority = scope_set.for_scope(source_scope)
+        else:
+            source_scope = (dataset_id,version_id,index_version_id)
+            source_filters = caps['filters'] if scope else {}
+            source_cache = native_cache
+            authority = nullcontext()
+        source_dataset,source_version,source_index = source_scope
+        with authority:
+            url=None
+            if item.get("facts",{}).get("visualOnly"):
+                if item in additional_images and len({original_format(source) for source in final_items})>=2:
+                    diagnostics['rejections'].append({'evidenceId':item['evidenceId'],'reason':'VISUAL_FOCUS_WITH_COMPLEMENTARY_TEXT'});continue
+                if len(image_parts)>=prompt_image_limit:
+                    diagnostics["rejections"].append({"evidenceId":item["evidenceId"],"reason":"IMAGE_BUDGET"});continue
+                try:
+                    data=service._get_search_client().download_asset_image(source_dataset,source_version,item["assetId"],item.get("preview"),index_version_id=source_index)
+                    if not data:raise ValueError("no decoded image")
+                    url=encode_image(item['evidenceId'],"source.png",data)
+                except (BudgetExceeded, AuthorityError):
                     raise
-                diagnostics["rejections"].append({"evidenceId":item["evidenceId"],"reason":"IMAGE_DOWNLOAD_OR_DECODE_FAILED"});continue
-        if scope and not item.get('facts',{}).get('visualOnly'):
-            from services.native_evidence_read import read_selected
-            try:
-                item,read=read_selected(service._get_search_client(),(dataset_id,version_id,index_version_id),item,question,caps['filters'],native_cache)
-                if read:native_reads.append(read)
-            except (BudgetExceeded, AuthorityError):
-                raise
-            except Exception as error:
-                if isinstance(error,requests.RequestException) and error.response is not None and error.response.status_code in {401,403}:raise
-                code=str(error).split(':',1)[0] if isinstance(error,ValueError) else 'EVIDENCE_READ_FAILED'
-                if isinstance(error,requests.RequestException) and error.response is not None:
-                    code={404:'EVIDENCE_SOURCE_NOT_FOUND',409:'EVIDENCE_SNAPSHOT_OR_RECIPE_UNAVAILABLE',413:'EVIDENCE_READ_BUDGET_EXCEEDED',422:'EVIDENCE_READ_UNSUPPORTED'}.get(error.response.status_code,'EVIDENCE_READ_FAILED')
-                if isinstance(error,requests.Timeout):code='EVIDENCE_READ_TIMEOUT'
-                diagnostics['rejections'].append({'evidenceId':item['evidenceId'],'reason':'NATIVE_EVIDENCE_READ_FAILED','failureType':type(error).__name__,'failureCode':code})
-                continue
-            from services.native_evidence_read import native_region_request
-            try:
-                region=native_region_request(item,question,caps['filters'])
-                registered=item.get('nativeRegisteredView')
-                engineering_region=item.get('nativeEngineeringRegionRequest')
-                if engineering_region:
-                    if len(image_parts)>=prompt_image_limit:
-                        diagnostics['rejections'].append({'evidenceId':item['evidenceId'],'reason':'IMAGE_BUDGET'});continue
-                    data,rendered=service._get_search_client().render_engineering_region(dataset_id,version_id,index_version_id,item['assetId'],engineering_region,
-                        source_sha256=item['nativeBundle']['identity']['sourceSha256'])
-                    url=encode_image(item['evidenceId'],'engineering-region.png',data,rendered)
-                    item['nativeRenderedRegion']=rendered;item['provenance']['renderedRegion']=rendered
-                    native_reads.append({'state':'RENDERED_ENGINEERING_REGION','evidenceId':item['evidenceId'],'representationId':rendered['representationId'],
-                        'readId':rendered['readId'],'sourceSha256':rendered['identity']['sourceSha256'],'outputSha256':rendered['outputSha256'],
-                        'parameters':rendered['parameters'],'transform':rendered['transform'],'cacheStatus':rendered['cacheStatus']})
-                    registered=None
-                if registered:
-                    if len(image_parts)>=prompt_image_limit:
-                        diagnostics['rejections'].append({'evidenceId':item['evidenceId'],'reason':'IMAGE_BUDGET'});continue
-                    data=service._get_search_client().download_registered_image(dataset_id,version_id,index_version_id,item['assetId'],registered,item['nativeImageMetadata'])
-                    rendered={**registered,'identity':item['nativeBundle']['identity'],'readId':item['nativeBundle']['readId'],
-                        'parameters':{'view':registered.get('view','full-svg'),'registeredImageId':registered['imageId']},
-                        'transform':{'operation':'registered-source-render-read','recipeVersion':registered['recipeVersion'],'outputSha256':registered['outputSha256']},'cacheStatus':'IMMUTABLE_REGISTERED'}
-                    url=encode_image(item['evidenceId'],'engineering-surface.png',data,rendered)
-                    item['nativeRegisteredImage']=rendered;item['provenance']['registeredImage']=rendered
-                    native_reads.append({'state':'READ_REGISTERED_IMAGE','evidenceId':item['evidenceId'],'imageId':registered['imageId'],
-                        'readId':item['nativeBundle']['readId'],'representationId':registered['legacyRepresentationId'],
-                        'sourceSha256':registered['sourceSha256'],'outputSha256':registered['outputSha256'],'parameters':rendered['parameters']})
-                if region:
-                    if len(image_parts)>=prompt_image_limit:
-                        if item.get('provenance',{}).get('documentReadVersion') and not item['provenance'].get('documentVisualRead'):
-                            region=None
-                        else:
+                except Exception as error:
+                    if scope_set is not None or isinstance(error, requests.RequestException) and error.response is not None and error.response.status_code in {401, 403}:
+                        raise
+                    diagnostics["rejections"].append({"evidenceId":item["evidenceId"],"reason":"IMAGE_DOWNLOAD_OR_DECODE_FAILED"});continue
+            if scope and not item.get('facts',{}).get('visualOnly'):
+                from services.native_evidence_read import read_selected
+                try:
+                    if not already_read:
+                        item,read=read_selected(service._get_search_client(),(source_dataset,source_version,source_index),item,
+                                                question,source_filters,source_cache,full_record=scope_set is not None)
+                        if read:native_reads.append(read)
+                except (BudgetExceeded, AuthorityError):
+                    raise
+                except Exception as error:
+                    if scope_set is not None or isinstance(error,requests.RequestException) and error.response is not None and error.response.status_code in {401,403}:raise
+                    code=str(error).split(':',1)[0] if isinstance(error,ValueError) else 'EVIDENCE_READ_FAILED'
+                    if isinstance(error,requests.RequestException) and error.response is not None:
+                        code={404:'EVIDENCE_SOURCE_NOT_FOUND',409:'EVIDENCE_SNAPSHOT_OR_RECIPE_UNAVAILABLE',413:'EVIDENCE_READ_BUDGET_EXCEEDED',422:'EVIDENCE_READ_UNSUPPORTED'}.get(error.response.status_code,'EVIDENCE_READ_FAILED')
+                    if isinstance(error,requests.Timeout):code='EVIDENCE_READ_TIMEOUT'
+                    diagnostics['rejections'].append({'evidenceId':item['evidenceId'],'reason':'NATIVE_EVIDENCE_READ_FAILED','failureType':type(error).__name__,'failureCode':code})
+                    continue
+                from services.native_evidence_read import native_region_request
+                try:
+                    region=native_region_request(item,question,source_filters)
+                    registered=item.get('nativeRegisteredView')
+                    engineering_region=item.get('nativeEngineeringRegionRequest')
+                    if engineering_region:
+                        if len(image_parts)>=prompt_image_limit:
                             diagnostics['rejections'].append({'evidenceId':item['evidenceId'],'reason':'IMAGE_BUDGET'});continue
-                if region:
-                    data,rendered=service._get_search_client().render_asset_region(dataset_id,version_id,index_version_id,item['assetId'],region,
-                        source_sha256=item['nativeBundle']['identity']['sourceSha256'])
-                    url=encode_image(item['evidenceId'],'source-region.png',data,rendered)
-                    item['nativeRenderedRegion']=rendered;item['provenance']['renderedRegion']=rendered
-                    native_reads.append({'state':'RENDERED_REGION','evidenceId':item['evidenceId'],'representationId':rendered['representationId'],
-                        'readId':rendered['readId'],'sourceSha256':rendered['identity']['sourceSha256'],'outputSha256':rendered['outputSha256'],
-                        'parameters':rendered['parameters'],'transform':rendered['transform'],'cacheStatus':rendered['cacheStatus']})
-            except (BudgetExceeded, AuthorityError):
-                raise
-            except Exception as error:
-                if isinstance(error,requests.RequestException) and error.response is not None and error.response.status_code in {401,403}:raise
-                code=str(error).split(':',1)[0] if isinstance(error,ValueError) else 'EVIDENCE_REGION_RENDER_FAILED'
-                if isinstance(error,requests.Timeout):code='EVIDENCE_REGION_RENDER_TIMEOUT'
-                if isinstance(error,requests.RequestException) and error.response is not None:
-                    code={404:'EVIDENCE_REGION_NOT_FOUND',409:'EVIDENCE_RENDER_RECIPE_UNAVAILABLE',413:'EVIDENCE_RENDER_BUDGET_EXCEEDED',422:'EVIDENCE_REGION_RENDER_UNSUPPORTED',504:'EVIDENCE_REGION_RENDER_TIMEOUT'}.get(error.response.status_code,'EVIDENCE_REGION_RENDER_FAILED')
-                diagnostics['rejections'].append({'evidenceId':item['evidenceId'],'reason':'NATIVE_REGION_RENDER_FAILED','failureType':type(error).__name__,'failureCode':code});continue
-        candidate_source=_source(item,question)
-        valid,proposed,count=fits(sources+[candidate_source],image_parts+([url] if url else []))
-        if not valid:
-            diagnostics["rejections"].append({"evidenceId":item["evidenceId"],"reason":"TOKEN_BUDGET"});continue
-        sources.append(candidate_source);final_items.append(item)
-        if url:image_parts.append(url)
-        messages=proposed;prompt_tokens=count
+                        data,rendered=service._get_search_client().render_engineering_region(source_dataset,source_version,source_index,item['assetId'],engineering_region,
+                            source_sha256=item['nativeBundle']['identity']['sourceSha256'])
+                        url=encode_image(item['evidenceId'],'engineering-region.png',data,rendered)
+                        item['nativeRenderedRegion']=rendered;item['provenance']['renderedRegion']=rendered
+                        native_reads.append({'state':'RENDERED_ENGINEERING_REGION','evidenceId':item['evidenceId'],'representationId':rendered['representationId'],
+                            'readId':rendered['readId'],'sourceSha256':rendered['identity']['sourceSha256'],'outputSha256':rendered['outputSha256'],
+                            'parameters':rendered['parameters'],'transform':rendered['transform'],'cacheStatus':rendered['cacheStatus']})
+                        registered=None
+                    if registered:
+                        if len(image_parts)>=prompt_image_limit:
+                            diagnostics['rejections'].append({'evidenceId':item['evidenceId'],'reason':'IMAGE_BUDGET'});continue
+                        data=service._get_search_client().download_registered_image(source_dataset,source_version,source_index,item['assetId'],registered,item['nativeImageMetadata'])
+                        rendered={**registered,'identity':item['nativeBundle']['identity'],'readId':item['nativeBundle']['readId'],
+                            'parameters':{'view':registered.get('view','full-svg'),'registeredImageId':registered['imageId']},
+                            'transform':{'operation':'registered-source-render-read','recipeVersion':registered['recipeVersion'],'outputSha256':registered['outputSha256']},'cacheStatus':'IMMUTABLE_REGISTERED'}
+                        url=encode_image(item['evidenceId'],'engineering-surface.png',data,rendered)
+                        item['nativeRegisteredImage']=rendered;item['provenance']['registeredImage']=rendered
+                        native_reads.append({'state':'READ_REGISTERED_IMAGE','evidenceId':item['evidenceId'],'imageId':registered['imageId'],
+                            'readId':item['nativeBundle']['readId'],'representationId':registered['legacyRepresentationId'],
+                            'sourceSha256':registered['sourceSha256'],'outputSha256':registered['outputSha256'],'parameters':rendered['parameters']})
+                    if region:
+                        if len(image_parts)>=prompt_image_limit:
+                            if item.get('provenance',{}).get('documentReadVersion') and not item['provenance'].get('documentVisualRead'):
+                                region=None
+                            else:
+                                diagnostics['rejections'].append({'evidenceId':item['evidenceId'],'reason':'IMAGE_BUDGET'});continue
+                    if region:
+                        data,rendered=service._get_search_client().render_asset_region(source_dataset,source_version,source_index,item['assetId'],region,
+                            source_sha256=item['nativeBundle']['identity']['sourceSha256'])
+                        url=encode_image(item['evidenceId'],'source-region.png',data,rendered)
+                        item['nativeRenderedRegion']=rendered;item['provenance']['renderedRegion']=rendered
+                        native_reads.append({'state':'RENDERED_REGION','evidenceId':item['evidenceId'],'representationId':rendered['representationId'],
+                            'readId':rendered['readId'],'sourceSha256':rendered['identity']['sourceSha256'],'outputSha256':rendered['outputSha256'],
+                            'parameters':rendered['parameters'],'transform':rendered['transform'],'cacheStatus':rendered['cacheStatus']})
+                except (BudgetExceeded, AuthorityError):
+                    raise
+                except Exception as error:
+                    if scope_set is not None or isinstance(error,requests.RequestException) and error.response is not None and error.response.status_code in {401,403}:raise
+                    code=str(error).split(':',1)[0] if isinstance(error,ValueError) else 'EVIDENCE_REGION_RENDER_FAILED'
+                    if isinstance(error,requests.Timeout):code='EVIDENCE_REGION_RENDER_TIMEOUT'
+                    if isinstance(error,requests.RequestException) and error.response is not None:
+                        code={404:'EVIDENCE_REGION_NOT_FOUND',409:'EVIDENCE_RENDER_RECIPE_UNAVAILABLE',413:'EVIDENCE_RENDER_BUDGET_EXCEEDED',422:'EVIDENCE_REGION_RENDER_UNSUPPORTED',504:'EVIDENCE_REGION_RENDER_TIMEOUT'}.get(error.response.status_code,'EVIDENCE_REGION_RENDER_FAILED')
+                    diagnostics['rejections'].append({'evidenceId':item['evidenceId'],'reason':'NATIVE_REGION_RENDER_FAILED','failureType':type(error).__name__,'failureCode':code});continue
+            candidate_source=_source(item,question)
+            if scope_set is not None:
+                candidate_source.dataset_id = source_dataset
+                candidate_source.provenance['frozenScope'] = item['frozenScope']
+                candidate_source.provenance['multiScopeSource'] = True
+                candidate_source.provenance['validatedMultiScopeQuestion'] = question
+            valid,proposed,count=fits(sources+[candidate_source],image_parts+([url] if url else []))
+            if not valid:
+                diagnostics["rejections"].append({"evidenceId":item["evidenceId"],"reason":"TOKEN_BUDGET"});continue
+            sources.append(candidate_source);final_items.append(item)
+            if large_scope:
+                read_scopes.add(source_dataset)
+                pending_scope_coverage.discard(source_dataset)
+            if url:image_parts.append(url)
+            messages=proposed;prompt_tokens=count
     formats=sorted({original_format(item) for item in final_items})
     diagnostics.update(finalEvidenceIds=[i["evidenceId"] for i in final_items],finalFormats=formats,promptTokens=prompt_tokens,outputReserved=output_tokens)
     diagnostics['nativeReads']=native_reads
@@ -1818,6 +1956,8 @@ def _answer_curated(service, *, question, input_mode="hybrid", task_type="genera
                 planning_ms=planning_ms, retrieval_ms=retrieval_ms, evidence_selection=diagnostics))
     if any(source.provenance.get('textReadVersion') for source in sources):
         notice=(notice+' ' if notice else '')+'以下为当前模型对已读原文的解释；完整事实、语义及最终结论引用链尚未全部核验。'
+    if diagnostics.get('nativeReadBudgetReached'):
+        notice=(notice+' ' if notice else '')+'本次在处理时限内使用已核验的相关来源，其他候选未继续精读。'
     budget.stage = "generating"
     generation_started=time.perf_counter()
     if any(fact.get('evidenceNature')=='ocr_text' for source in sources for fact in (source.evidence_bundle or {}).get('facts',[])):
@@ -1827,7 +1967,8 @@ def _answer_curated(service, *, question, input_mode="hybrid", task_type="genera
     if any(source.original_format=='SVG' for source in sources):
         notice=(notice+' ' if notice else '')+'SVG 图纸文字和 metadata 是源声明，不能视作三维几何实测值。'
     from services.native_claim_qa import eligible as native_claim_eligible,answer as answer_native_claims
-    if scope and not analytical and native_claim_eligible(sources,image_parts,task_type=task_type,status=status):
+    if (scope and scope_set is None and not analytical and not logistics_review
+            and native_claim_eligible(sources,image_parts,task_type=task_type,status=status)):
         result = answer_native_claims(service,question=question,sources=sources,items=final_items,
             scope=(dataset_id,version_id,index_version_id),diagnostics=diagnostics,started=started,retrieval_ms=retrieval_ms,
             output_tokens=output_tokens,temperature=temperature if temperature is not None else 0.0)
@@ -1858,7 +1999,7 @@ def _answer_curated(service, *, question, input_mode="hybrid", task_type="genera
     if current():
         source_part = _source_text_content(sources) if sources else None
         current().generation_inputs(sources,image_parts,source_part=source_part)
-    if scope and status not in {'USER_DATA_ONLY','USER_DISABLED','MISSING_SCOPE'}:service._get_search_client().check_scope(dataset_id,version_id,index_version_id)
+    if scope and status not in {'USER_DATA_ONLY','USER_DISABLED','MISSING_SCOPE'}:check_all_sources()
     options = {'temperature': temperature if temperature is not None else 0.0, 'presence_penalty': 0.0, 'logprobs': False}
     step_cylinders = any(source.provenance.get('stepCylinderDimensions') for source in sources)
     native_prose = (analytical or step_cylinders) and all(
@@ -1942,7 +2083,7 @@ def _answer_curated(service, *, question, input_mode="hybrid", task_type="genera
         trace.event('numericRevisionInitialCheck', analysis_check)
         def recheck_scope():
             if scoped_revision:
-                service._get_search_client().check_scope(dataset_id, version_id, index_version_id)
+                check_all_sources()
 
         revision_failure = {}
         revision = _revise_cited_numbers(service.client, messages, options, sources, result, budget,
@@ -1969,7 +2110,7 @@ def _answer_curated(service, *, question, input_mode="hybrid", task_type="genera
         professional_timings_ms={phase: round(milliseconds, 3) for phase, milliseconds in timings.items()},
     )
     if order_review:
-        service._get_search_client().check_scope(dataset_id,version_id,index_version_id)
+        check_all_sources()
         try:
             presentation = finish_order_line_review(question, result, sources[0], order_review, trace)
         except (KeyError, TypeError, ValueError) as error:
@@ -2021,6 +2162,36 @@ def _answer_curated(service, *, question, input_mode="hybrid", task_type="genera
         diagnostics['businessAnswerChecks'] = analysis_check
         if current():
             current().event('businessAnswerChecks', analysis_check)
+    if scope and status == 'OK' and not (had_user_inputs or image_parts or prior_questions or query_plan or report):
+        from services.prose_answer_lineage import finish_fulfillment
+
+        try:
+            signed = finish_fulfillment(question, answer, result, sources, trace,
+                                        allow_prose=bool(analysis_check and analysis_check['accepted']))
+        except (InvalidOperation, KeyError, TypeError, ValueError) as error:
+            signed = None
+            if trace:
+                trace.event('fulfillmentPresentationRejected', {'reason': type(error).__name__})
+        if signed:
+            check_all_sources()
+            visible = [SourceItem.model_validate(source) for source in signed['sources']]
+            kept = {source.evidence_id for source in visible}
+            diagnostics['answerComposition'] = 'verified-fulfillment-input'
+            diagnostics['finalCitationIndexMapping'] = signed['presentationProof']['modelToFinalSourceIndices']
+            diagnostics.update(finalEvidenceIds=[source.evidence_id for source in visible],
+                               finalFormats=sorted({source.original_format for source in visible if source.original_format}))
+            trace.event('finalClaims', signed['claims'])
+            return QAResponse(answer=signed['answer'], answer_claims=signed['claims'], sources=visible, confidence=0.0,
+                processing_time_ms=int((time.perf_counter()-started)*1000), model=settings.model_name,
+                task_type=task_type, notice=signed['notice'], retrieval_mode='search_service', backend='vllm',
+                retrieved=[RetrievedItem(asset_id=item.get('assetId'), logical_path=(item.get('preview') or {}).get('logicalPath'),
+                                         score=item['relevance'], source_type=item['semanticSpace'])
+                           for item in final_items if item['evidenceId'] in kept],
+                meta=QAMeta(**model_meta, retrieval_type='curated', retrieval_status=status,
+                            generation_status=signed['generationStatus'], finish_reason=finish_reason,
+                            intent_analysis_used=plan is not None, planning_ms=planning_ms, retrieval_ms=retrieval_ms,
+                            evidence_selection=diagnostics))
+    if analysis_check is not None:
         if not analysis_check['accepted']:
             reason = ((diagnostics.get('numericRevisionFailure') or {}).get('reason')
                       or analysis_check.get('reason'))
@@ -2149,7 +2320,7 @@ def _answer_curated(service, *, question, input_mode="hybrid", task_type="genera
         try:
             presentation=finish_engineering(question,result,sources,image_parts,current(),output_check)
             def recheck_svg_scope():
-                service._get_search_client().check_scope(dataset_id, version_id, index_version_id)
+                check_all_sources()
 
             revision = _revise_svg_property_explanation(question, presentation, result, output_check,
                 sources, image_parts, current(), service.client, messages, options, budget, output_tokens,
@@ -2216,7 +2387,8 @@ def _answer_curated(service, *, question, input_mode="hybrid", task_type="genera
             diagnostics['documentExcerptLineage']={'status':'VERIFIED_EXACT_ACTUAL_INPUT_QUOTES','version':presentation['version'],'modelInterpretationVerified':False}
             diagnostics['finalCitationIndexMapping']={str(source.provenance['modelSourceIndex']):index for index,source in enumerate(sources,1)}
             diagnostics.update(finalEvidenceIds=[source.evidence_id for source in sources],finalFormats=sorted({source.original_format for source in sources if source.original_format}))
-    open_native_prose = (analytical or step_cylinders) and all(source.evidence_bundle for source in sources)
+    open_native_prose = (scope_set is not None or analytical or step_cylinders or logistics_review) and all(
+        source.evidence_bundle for source in sources)
     if sources and not claims and output_status not in {'validation_failed','output_limit'} and (open_native_prose or prose_eligible(sources) or all(
             source.provenance.get('documentReadVersion') or source.provenance.get('textReadVersion') for source in sources)):
         from services.prose_answer_lineage import finish as finish_prose,finish_duration

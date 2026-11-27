@@ -5,6 +5,7 @@ from contextvars import ContextVar
 from datetime import datetime,timezone
 from functools import wraps
 from pathlib import Path
+from threading import Lock
 
 _current=ContextVar('qa_evidence_trace',default=None)
 logger=logging.getLogger(__name__)
@@ -21,6 +22,9 @@ def source_frame(source, position):
     context = source.model_context or source.content_preview
     if source.source_type == 'user_image' and not source.provenance.get('userInputReceipt', {}).get('imageLabels'):
         context = '用户所附图片，文件名不构成图片内容依据。'
+    if source.provenance.get('multiScopeSource'):
+        identity = source.provenance['frozenScope']
+        context = '冻结来源 ' + '/'.join(identity[key] for key in ('datasetId','versionId','indexVersionId')) + '\n' + context
     return f'[来源{position}] {source.original_format or source.source_type} {context}'
 
 
@@ -29,14 +33,21 @@ class EvidenceTrace:
         self.id=str(uuid.uuid4());self.contexts=[];self.inputs=[]
         self.source_part_sha256 = None
         self.source_frame_hashes = []
+        self._event_lock = Lock()
         self.data={'schemaVersion':'qa-actual-evidence-trace-1','traceId':self.id,'startedAt':datetime.now(timezone.utc).isoformat(),
             'questionSha256':_sha(str(kwargs.get('question','')).encode()),
             'snapshot':{key:str(kwargs[key]) for key in ('dataset_id','version_id','index_version_id') if kwargs.get(key)},
             'events':[],'modelCalls':[],'intentModelCalls':[],'tokenizerCalls':[]}
+        if kwargs.get('scope_set') is not None:
+            self.data['scopes'] = [dict(zip(('datasetId','versionId','indexVersionId'),scope))
+                                   for scope in kwargs['scope_set'].children]
     def event(self,kind,value):
-        self.data['events'].append({'kind':kind,'value':copy.deepcopy(value)});self.checkpoint()
+        with self._event_lock:
+            self.data['events'].append({'kind':kind,'value':copy.deepcopy(value)})
+            self.checkpoint()
     def candidate_admission(self, candidates, selected, rejections):
         """Link request-local evidence IDs to the source and location used at admission."""
+        from services.evidence_policy import record_locator
         self.event('candidateAdmission', {
             'candidates': [{
                 'evidenceId': item['evidenceId'],
@@ -44,7 +55,9 @@ class EvidenceTrace:
                 'semanticSpace': item.get('semanticSpace'),
                 'dataVersion': item.get('dataVersion'),
                 'indexVersion': item.get('indexVersion'),
-                'locatorSha256': _sha(json.dumps(item.get('locator') or {}, ensure_ascii=False, sort_keys=True,
+                **({'datasetId':item['frozenScope']['datasetId']} if item.get('frozenScope') else {}),
+                'locatorSha256': _sha(json.dumps((record_locator(item) if item.get('frozenScope') else None)
+                                                or item.get('locator') or {}, ensure_ascii=False, sort_keys=True,
                                                 separators=(',', ':'), default=str).encode()),
             } for item in candidates],
             'selectedEvidenceIds': [item['evidenceId'] for item in selected],
@@ -62,6 +75,14 @@ class EvidenceTrace:
                 'factIds':source.fact_ids,'assetId':str(source.asset_id) if source.asset_id else None,'locator':source.locator,
                 'contextTextSha256':_sha(text.encode()),'readId':source.provenance.get('nativeReadId'),
                 'readOutputSha256':source.provenance.get('readOutputSha256'),'sourceSha256':source.provenance.get('sourceSha256')}
+            if source.dataset_id is not None:
+                value['scope'] = copy.deepcopy(source.provenance.get('frozenScope'))
+            role = source.provenance.get('scopedMaterialTraceRole')
+            if role in ('consumption', 'receipt', 'inspection'):
+                value['scopedMaterialTraceRole'] = role
+            role = source.provenance.get('scopedFulfillmentRole')
+            if role in ('commitment', 'receipt'):
+                value['scopedFulfillmentRole'] = role
             if source.calculation_lineage:
                 value['calculationLineage']=source.calculation_lineage
             receipt=(source.evidence_bundle or {}).get('clientReadReceipt')

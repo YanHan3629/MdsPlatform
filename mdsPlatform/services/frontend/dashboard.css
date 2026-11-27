@@ -1,0 +1,84 @@
+.dashboard-dataset {
+  display: grid;
+  grid-template-columns: minmax(175px, 240px) minmax(0, 1fr);
+  min-height: 142px;
+  padding: 10px 0;
+  gap: 14px;
+  border-top: 1px solid var(--line, #dce7ee);
+}
+
+.dashboard-dataset h3 {
+  margin: 0 0 5px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.dashboard-dataset p { margin: 5px 0; }
+.dashboard-dataset select { max-width: 100%; }
+.dashboard-dataset .btn { padding: 4px 8px; }
+
+.dashboard-preview {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: 92px 24px;
+  align-content: center;
+}
+
+.dashboard-preview-images {
+  display: flex;
+  align-items: center;
+  overflow-x: auto;
+  gap: 8px;
+  scrollbar-width: thin;
+}
+
+.dashboard-preview-image {
+  flex: 0 0 142px;
+  width: 142px;
+  height: 84px;
+  margin: 0;
+  border: 1px solid var(--line, #dce7ee);
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: #f6f9fb;
+  overflow: hidden;
+  text-align: center;
+}
+
+.dashboard-preview-image img { width: 100%; height: 100%; object-fit: contain; }
+.dashboard-preview-image button { width: 100%; height: 100%; padding: 4px; }
+#dashboardImage { display: block; width: min(640px, 85vw); height: auto; }
+.dashboard-preview-summary { display: flex; gap: 8px; align-items: center; font-size: 12px; }
+.dashboard-preview-summary button { padding-block: 2px !important; }
+.dashboard-metadata-codes { display: flex; gap: 8px; flex-wrap: wrap; }
+.dashboard-metadata-codes label { display: inline-flex; align-items: center; gap: 4px; }
+
+.scope-picker { min-width: 0; margin: 0; padding: 8px; border: 1px solid var(--line, #dce7ee); }
+.scope-picker-controls { display: flex; flex-wrap: wrap; gap: 9px; }
+.scope-picker-controls label { flex: 1 1 210px; min-width: 0; }
+.scope-picker-controls select { width: 100%; }
+.scope-picker-tags { display: flex; flex-wrap: wrap; gap: 5px; padding: 7px 0; }
+.scope-picker-tag {
+  max-width: 100%;
+  padding: 3px 7px;
+  background: #edf4f8;
+  border-radius: 5px;
+  overflow-wrap: anywhere;
+}
+.scope-picker-tag button { margin-left: 7px; }
+
+@media (max-width: 650px) {
+  .sidebar { padding: 14px 12px; }
+  .sidebar .brand { margin-bottom: 12px; }
+  .sidebar nav { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
+  .sidebar nav a { padding: 8px 10px; }
+  .sidebar .business-panel { margin-block: 10px; padding: 10px; }
+  .sidebar .api-box { margin-top: 0; padding: 4px; }
+  .dashboard-dataset { grid-template-columns: minmax(115px, 37%) minmax(0, 1fr); gap: 8px; }
+  .dashboard-preview-image { flex-basis: 112px; width: 112px; height: 72px; }
+  .dashboard-preview { grid-template-rows: 80px 30px; }
+}

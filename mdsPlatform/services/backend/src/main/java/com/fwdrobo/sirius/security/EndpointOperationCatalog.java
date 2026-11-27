@@ -70,6 +70,9 @@ public final class EndpointOperationCatalog {
   put(m,"DataSpaceQaController","data.qa","askJson","askMultipart","qaRequestProgress","cancelQaRequest");
   put(m,"DataSpaceQaController","data.search","search","capabilities","retrieve","imageRetrieval");
   put(m,"DataSpaceQaController","data.raw.download","source");
+  put(m,"DashboardController","data.catalog.read","datasets");
+  put(m,"DashboardController","data.preview","previews","thumbnail");
+  put(m,"DashboardController","dataset.draft.manage","metadata");
   put(m,"QaEvidenceController","data.preview","read","render","describe","image");
   put(m,"DataSpaceQualityController","dataset.quality.run","request");
   put(m,"DataSpaceQualityController","dataset.quality.read","get","list");

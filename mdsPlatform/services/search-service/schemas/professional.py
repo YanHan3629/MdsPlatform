@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+import re
 from typing import Any, Literal, Optional
 from uuid import UUID
 
@@ -92,9 +93,19 @@ class QueryPlan(BaseModel):
     tolerance: float = Field(default=0.01, ge=0, le=1)
     top_k: int = Field(default=8, validation_alias=AliasChoices("top_k", "topK"), ge=1, le=50)
     depends_on: dict[str, list[str]] = Field(default_factory=dict, validation_alias=AliasChoices("depends_on", "dependsOn"))
+    all_tables_search: bool = Field(default=False, exclude=True)
+    reference_terms: list[str] = Field(default_factory=list, max_length=4, exclude=True)
 
     @model_validator(mode="after")
     def validate_semantics(self):
+        if self.all_tables_search and ("structured" not in self.retrievers or self.operation != "search"
+                or self.table_id or self.hard_conditions or self.target_entity or self.sort_field
+                or self.aggregate_field or self.retriever_operations or self.depends_on):
+            raise ValueError("跨表模式只支持无硬条件的文本检索")
+        if self.reference_terms and (not self.all_tables_search or self.retrievers != ["structured"]
+                or self.query_text or any(not re.fullmatch(r"[A-Za-z]{2,12}-[A-Za-z0-9-]{1,80}",term)
+                                           for term in self.reference_terms)):
+            raise ValueError("业务编号匹配只能用于已授权范围的无条件表格检索")
         if self.threshold_expression is not None:
             number=Decimal(self.threshold_expression)
             if not number.is_finite() or len(number.as_tuple().digits)>4096 or abs(number.as_tuple().exponent)>4096:
@@ -177,6 +188,7 @@ class CandidateRequest(BaseModel):
     question: str = Field(min_length=1, max_length=settings.qa_candidate_max_question_characters)
     formats: list[str] = Field(default_factory=list, max_length=20)
     per_format: int = Field(default=8, ge=1, le=16)
+    multi_scope: bool = False
 
 
 class Evidence(BaseModel):

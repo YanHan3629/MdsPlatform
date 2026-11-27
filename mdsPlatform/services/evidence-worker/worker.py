@@ -14,6 +14,7 @@ MAX_BODY=24*1024*1024
 MAX_OUTPUT=16*1024*1024
 MAX_ATTACHMENT_LABEL_BYTES=8*1024*1024
 ATTACHMENT_LABEL_PATH='/internal/v1/evidence/attachment-labels'
+DASHBOARD_PATH='/internal/v1/evidence/dashboard-thumbnail'
 QUEUE_FILE='/app/professional/cpu_queue.py'
 spec=importlib.util.spec_from_file_location('evidence_cpu_queue',QUEUE_FILE)
 queue_module=importlib.util.module_from_spec(spec);spec.loader.exec_module(queue_module)
@@ -87,6 +88,9 @@ def _child(connection,raw,format,parameters):
         if format=='attachment_labels':
             from professional.image_label_observations import observe
             connection.send(observe(raw,parameters['seconds']));return
+        if parameters.get('dashboard'):
+            from dashboard_thumbnail import render
+            connection.send(render(raw,format));return
         if format in {'SVG','OBJ','STEP'}:
             for name in ('OMP_NUM_THREADS','OPENBLAS_NUM_THREADS','MKL_NUM_THREADS'):os.environ[name]='1'
             from professional.engineering_render import render_source
@@ -141,7 +145,7 @@ def _child(connection,raw,format,parameters):
     finally:connection.close()
 
 def execute(raw,format,parameters,*,deadline_seconds=40):
-    guard=None if format=='attachment_labels' else current_guard()
+    guard=None if format=='attachment_labels' or parameters.get('dashboard') else current_guard()
     if guard is not None:guard.revalidate(force=True)
     context=multiprocessing.get_context('spawn');receiver,sender=context.Pipe(duplex=False)
     process=context.Process(target=_child,args=(sender,raw,format,parameters));process.start();sender.close()
@@ -251,9 +255,33 @@ class Handler(BaseHTTPRequestHandler):
         except Invalid as error:self.reply(error.status,{'error':error.code})
         except (ValueError,TypeError):self.reply(400,{'error':'ATTACHMENT_LABEL_REQUEST_INVALID'})
         except (TimeoutError,OSError):self.reply(503,{'error':'ATTACHMENT_LABEL_UNAVAILABLE'})
+    def dashboard_thumbnail(self):
+        # Only the authenticated application can submit bytes after resolving
+        # and validating the full catalog and preview authorization.
+        from dashboard_thumbnail import FORMATS, RECIPE as recipe
+        try:
+            body=self.read_json_body(MAX_BODY,'PREVIEW_REQUEST_LIMIT')
+            if set(body)!={'format','recipeVersion','sourceSha256','sourceBase64'} or body['recipeVersion']!=recipe or body['format'] not in FORMATS:
+                raise Invalid('PREVIEW_REQUEST_INVALID')
+            raw=base64.b64decode(body['sourceBase64'],validate=True)
+            if len(raw)>MAX_SOURCE:raise Invalid('PREVIEW_SOURCE_LIMIT',413)
+            if digest(raw)!=body['sourceSha256']:raise Invalid('PREVIEW_HASH_MISMATCH',409)
+            with queue_module.cpu_evidence_slot(timeout=1):
+                result=execute(raw,body['format'],{'dashboard':True},deadline_seconds=15)
+            jpeg=result['jpeg']
+            self.send_response(200)
+            self.send_header('Content-Type','image/jpeg');self.send_header('Content-Length',str(len(jpeg)))
+            self.send_header('X-Source-Sha256',body['sourceSha256']);self.send_header('X-Render-Recipe',recipe)
+            self.send_header('Cache-Control','no-store');self.send_header('Connection','close');self.end_headers()
+            self.close_connection=True
+            self.wfile.write(jpeg)
+        except Invalid as error:self.reply(error.status,{'error':error.code})
+        except TimeoutError:self.reply(429,{'error':'PREVIEW_CPU_QUEUE_FULL'})
+        except (ValueError,TypeError,KeyError):self.reply(400,{'error':'PREVIEW_REQUEST_INVALID'})
     def do_POST(self):
         if self.path==ATTACHMENT_LABEL_PATH:return self.attachment_labels()
         if not self.authorized():return self.reply(401,{'error':'INTERNAL_IDENTITY_REQUIRED'})
+        if self.path==DASHBOARD_PATH:return self.dashboard_thumbnail()
         if self.path!='/internal/v1/evidence/render':return self.reply(404,{'error':'NOT_FOUND'})
         binding=None;self._response_started=False
         try:

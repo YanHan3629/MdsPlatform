@@ -148,6 +148,11 @@ public class FileService {
     public FileStream downloadContentById(UUID artifactId, UUID commitId, UUID fileId) throws Exception {
         log.info("downloadContentById: artifactId={}, commitId={}, fileId={}", artifactId, commitId, fileId);
 
+        FileResp file = describeFileById(artifactId, commitId, fileId);
+        return getFileStream(file.getContentType(), file.getFileKey(), file.getLogicalPath());
+    }
+
+    public FileResp describeFileById(UUID artifactId, UUID commitId, UUID fileId) throws Exception {
         ensureCommitExists(artifactId, commitId);
 
         // 确认这个仓库的 commit 有这个 file
@@ -165,10 +170,7 @@ public class FileService {
             throw ExceptionUtils.notFound("file not found: " + fileId);
         }
         origins.requireFile(fileId);
-        String logicalPath = file.getLogicalPath();
-        String objectKey = file.getFileKey();
-
-        return getFileStream(file.getContentType(), objectKey, logicalPath);
+        return file;
     }
 
 

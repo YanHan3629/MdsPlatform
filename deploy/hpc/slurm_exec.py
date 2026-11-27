@@ -109,7 +109,11 @@ def main():
             binding.verify_source('index-builder')
             binding.verify_image('index')
             payload = payload[4:]
-        os.execvp(payload[0], payload)
+        # Singularity's Go launcher shares the UID-wide process limit with the
+        # services in this allocation. Keep its startup parallelism separate
+        # from the container's Slurm CPU allotment and clean payload environment.
+        launcher_env = dict(os.environ, GOMAXPROCS='1')
+        os.execvpe(payload[0], payload, launcher_env)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--manifest', required=True)
     parser.add_argument('--image', required=True)

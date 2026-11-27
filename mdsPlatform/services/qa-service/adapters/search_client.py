@@ -42,13 +42,14 @@ class SearchServiceClient:
         """Use the scoped authenticated gateway, never arbitrary evidence URLs."""
         from urllib.parse import quote
         url = f"{self.backend_base_url}/api/data-space/qa/assets/{dataset_id}/{version_id}/{asset_id}"
-        params = None
+        params = {'indexVersionId':index_version_id} if index_version_id else None
         if preview and (preview.get("derived") or preview.get("artifactPath")):
             representation=preview.get('representationId')
             if not index_version_id or not isinstance(representation,str) or not representation or len(representation)>200 or '/' in representation or '\\' in representation:
                 raise ValueError('EVIDENCE_ID_MISSING: derived image requires a frozen index and representation identity')
             url=(f"{self.backend_base_url}/api/data-space/qa/evidence/{dataset_id}/{version_id}/"
                  f"{index_version_id}/{asset_id}/{quote(representation,safe='')}")
+            params = None
         with requests.get(url, params=params, headers=self.backend_headers, timeout=timeout_seconds(30), stream=True) as response:
             response.raise_for_status()
             content = bytearray()
@@ -98,10 +99,11 @@ class SearchServiceClient:
         resp.raise_for_status()
         return resp.json()
 
-    def capabilities(self, dataset_id, version_id, index_version_id):
+    def capabilities(self, dataset_id, version_id, index_version_id, *, discovery=False):
         # The public QA port must also enforce organisation scope before using
         # an internal service credential. No cross-user capability cache.
-        response = requests.get(f"{self.backend_base_url}/api/data-space/qa/capabilities/{dataset_id}/{version_id}/{index_version_id}",
+        suffix = '?qaDiscovery=true' if discovery else ''
+        response = requests.get(f"{self.backend_base_url}/api/data-space/qa/capabilities/{dataset_id}/{version_id}/{index_version_id}{suffix}",
             headers=self.backend_headers, timeout=timeout_seconds(self.timeout))
         response.raise_for_status()
         return response.json()
@@ -186,10 +188,13 @@ class SearchServiceClient:
         return self.render_asset_region(dataset_id,version_id,index_version_id,asset_id,parameters,
             source_sha256=source_sha256,_operation='render_engineering_image')
 
-    def candidates(self, dataset_id, version_id, index_version_id, question, formats=()):
+    def candidates(self, dataset_id, version_id, index_version_id, question, formats=(), per_format=8, *, multi_scope=False):
+        payload = {"datasetId":str(dataset_id),"versionId":str(version_id),"indexVersionId":str(index_version_id),
+                   "question":question,"formats":list(formats),"per_format":per_format}
+        if multi_scope:
+            payload["multi_scope"] = True
         response = requests.post(f"{self.base_url}/internal/v1/search/candidates", headers=self.search_headers,
-            json={"datasetId":str(dataset_id),"versionId":str(version_id),"indexVersionId":str(index_version_id),
-                  "question":question,"formats":list(formats),"per_format":8}, timeout=timeout_seconds(self.timeout))
+            json=payload, timeout=timeout_seconds(self.timeout))
         response.raise_for_status()
         return response.json()
 

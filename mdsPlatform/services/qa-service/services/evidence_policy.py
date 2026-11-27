@@ -444,7 +444,24 @@ def _engineering_visual(item):
     return bool(item.get('provenance',{}).get('engineeringVisualRead') and item.get('nativeBundle'))
 
 
+def record_locator(item):
+    bundle = item.get('nativeBundle', {})
+    locator = bundle.get('locator', item.get('locator', {}))
+    rows = bundle.get('content', {}).get('records', [])
+    if rows:
+        return {'table':locator.get('sheet') or locator.get('table') or locator.get('jsonPointer'),
+                'rows':[row['locator'] for row in rows]}
+    if any(key in locator for key in ('rawRow', 'jsonlLine', 'jsonPointer')):
+        return locator
+    return None
+
+
 def identity(item):
+    if item.get('frozenScope'):
+        locator = record_locator(item)
+        if locator:
+            return ('scoped-native-record', tuple(sorted(item['frozenScope'].items())), item.get('assetId'),
+                    json.dumps(locator, sort_keys=True, separators=(',', ':')))
     if item.get('provenance',{}).get('documentImageOnly') and item.get('nativeBundle'):
         return ('native-document-page',item['assetId'],item['nativeBundle']['representationId'])
     if (item.get('provenance',{}).get('documentRowContext') or item.get('provenance',{}).get('documentHeaderForRows')) and item.get('nativeBundle'):
@@ -483,8 +500,11 @@ def identity(item):
 
 
 def redundancy(left, right):
-    if identity(left) == identity(right):
+    left_identity, right_identity = identity(left), identity(right)
+    if left_identity == right_identity:
         return 1.0
+    if left_identity[0] == right_identity[0] == 'scoped-native-record':
+        return 0.0
     if any(item.get('provenance',{}).get('documentImageOnly') for item in (left,right)):
         return 0.0
     if any(item.get('provenance',{}).get('recordReadVersion') or item.get('provenance',{}).get('verifiedBusinessRecord')

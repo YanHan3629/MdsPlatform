@@ -4,7 +4,8 @@
   const entry = '/data-space/index.html';
   const cover = '/data-space/login.html';
   const pages = {
-    dashboard: operations => operations.has('data.catalog.read') || operations.has('data.view.export') || operations.has('platform.runtime.manage'),
+    dashboard: operations => ['data.catalog.read', 'data.view.export', 'dataset.upload',
+      'dataset.create', 'dataset.index.build', 'platform.runtime.manage'].some(code => operations.has(code)),
     provider: operations => [...operations].some(code => code.startsWith('dataset.')),
     market: operations => operations.has('data.catalog.read') || operations.has('application.submit'),
     retrieval: operations => operations.has('data.search'),
@@ -179,8 +180,6 @@
       byId('noBusinessPermission').hidden = businessPages.length > 0;
       byId('businessTools').hidden = !businessPages.length;
       byId('businessSync').hidden = !operations.has('data.catalog.read');
-      byId('multimodalShared').hidden = !(['provider', 'retrieval', 'qa'].includes(page) ||
-        page === 'dashboard' && operations.has('data.view.export'));
     }
 
     async function signOut(notice = '') {
@@ -214,7 +213,7 @@
       }
       const identity = detail.identity;
       renderRoute(identity);
-      byId('businessSessionSummary').textContent = identity.username + ' · ' + (identity.orgName || identity.org?.orgName || identity.orgId);
+      byId('businessSessionSummary').textContent = identity.username + ' · ' + mdsOrganizationName(identity);
       if (!started) {
         started = true;
         window.dispatchEvent(new Event('dataspace-business-ready'));

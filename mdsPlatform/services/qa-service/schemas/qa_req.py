@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
-from core.request_budget import CAPABILITIES, PROFILES
+from core.request_budget import CAPABILITIES, MAX_DATA_SCOPES, PROFILES
 
 
 class HardCondition(BaseModel):
@@ -152,6 +152,16 @@ class ProfessionalQueryPlan(BaseModel):
         return self
 
 
+class FrozenScope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    dataset_id: UUID = Field(validation_alias=AliasChoices("dataset_id","datasetId"))
+    version_id: UUID = Field(validation_alias=AliasChoices("version_id","versionId"))
+    index_version_id: UUID = Field(validation_alias=AliasChoices("index_version_id","indexVersionId"))
+
+    def coordinates(self):
+        return tuple(str(value) for value in (self.dataset_id,self.version_id,self.index_version_id))
+
+
 class QaRequest(BaseModel):
     """统一问答请求（JSON 请求体；multipart 表单字段同名，texts 为 JSON 数组字符串）。
 
@@ -182,6 +192,7 @@ class QaRequest(BaseModel):
     index_version_id: Optional[UUID] = Field(
         default=None, validation_alias=AliasChoices("index_version_id", "indexVersionId")
     )
+    scopes: Optional[list[FrozenScope]] = Field(default=None, max_length=MAX_DATA_SCOPES)
     texts: Optional[List[str]] = None
     context: Optional[str] = None
     use_search_service: bool = Field(
@@ -213,6 +224,17 @@ class QaRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_user_input(self):
+        if self.scopes is not None:
+            if self.input_mode == 'user_data_only' and self.scopes:
+                raise ValueError('仅附件模式不能选择数据空间范围。')
+            if self.input_mode != 'user_data_only' and not self.scopes:
+                raise ValueError('请选择至少一个数据集。')
+            if len({scope.dataset_id for scope in self.scopes}) != len(self.scopes):
+                raise ValueError('同一数据集只能选择一个冻结版本。')
+            legacy = (self.dataset_id,self.version_id,self.index_version_id)
+            if any(value is not None for value in legacy) and (
+                    len(self.scopes) != 1 or tuple(map(str,legacy)) != self.scopes[0].coordinates()):
+                raise ValueError('新旧数据集范围设置不一致。')
         total = len(self.question) + len(self.context or "") + sum(map(len, self.texts or [])) + sum(map(len, self.prior_questions))
         if total > CAPABILITIES["maxUserCharacters"]:
             raise ValueError("QA_USER_CHARACTER_LIMIT: 问题和补充文字合计超过字符上限。")

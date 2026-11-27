@@ -3,6 +3,7 @@ package com.fwdrobo.sirius.dataspace;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
 import com.fwdrobo.sirius.dto.mm.InternalTextToImageReq;
@@ -31,13 +32,14 @@ import java.util.*;
 @RestController
 @RequestMapping("/api/data-space/qa")
 public class DataSpaceQaController {
+    private static final ObjectMapper JSON = new ObjectMapper();
     private static final String[][] SCOPE_FIELDS = {
             {"datasetId", "dataset_id"}, {"versionId", "version_id"},
             {"indexVersionId", "index_version_id"}
     };
     // Local reader: ambiguous requests must be rejected before Map binding can
     // discard duplicate JSON keys, without changing other controllers' parsing.
-    private static final ObjectReader REQUEST_READER = new ObjectMapper()
+    private static final ObjectReader REQUEST_READER = JSON
             .readerFor(new TypeReference<LinkedHashMap<String, Object>>() {})
             .with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
@@ -51,15 +53,17 @@ public class DataSpaceQaController {
     private final DatasetAccessService access;
     private final com.fwdrobo.sirius.security.WorkerEvidenceScopeService evidenceScope;
     private final com.fwdrobo.sirius.security.InteractiveRequestActivity activity;
+    private final MultiScopeSearch multiSearch;
 
     public DataSpaceQaController(JdbcTemplate jdbc, SearchServiceClient search,
                                  MmAssetService assets, MmSourceFileService sourceFiles, DatasetAccessService access,
                                  @Value("${QA_SERVICE_BASE_URL:http://localhost:18081}") String qaUrl,
                                  @Value("${MDS_QA_RUNTIME_PROFILE:standard}") String qaProfile,
                                  com.fwdrobo.sirius.security.WorkerEvidenceScopeService evidenceScope,
-                                 com.fwdrobo.sirius.security.InteractiveRequestActivity activity) {
+                                 com.fwdrobo.sirius.security.InteractiveRequestActivity activity, MultiScopeSearch multiSearch) {
         this.evidenceScope=evidenceScope;
         this.activity=activity;
+        this.multiSearch=multiSearch;
         this.jdbc = jdbc;
         this.search = search;
         this.assets = assets;
@@ -140,7 +144,19 @@ public class DataSpaceQaController {
         if(!Set.of("question_only","hybrid","user_data_only").contains(mode))
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"INVALID_QA_INPUT_MODE");
         body.remove("inputMode");body.put("input_mode",mode);
-        if(!"user_data_only".equals(mode))return validatedBody(body,true);
+        if(body.containsKey("scope_credentials") || body.containsKey("scopeCredentials"))
+            throw FrozenScopes.invalid("请求含有不受支持的字段。");
+        var scopes = FrozenScopes.from(body, "user_data_only".equals(mode), limits.maxDataScopes());
+        for(String[] names:SCOPE_FIELDS) body.remove(names[1]);
+        body.remove("scopes");
+        if(!"user_data_only".equals(mode)) {
+            if(scopes.items().size()==1) body.putAll(scopes.items().get(0).fields());
+            else {
+                body.put("scopes",scopes.items());
+                body.put("scope_credentials", authorizeScopes(scopes));
+            }
+            return body;
+        }
         for(String[] names:SCOPE_FIELDS){
             if(!Objects.toString(body.get(names[1]),"").isBlank())
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"USER_INPUT_CORPUS_SCOPE_NOT_ALLOWED");
@@ -216,7 +232,17 @@ public class DataSpaceQaController {
             if (values != null && values.stream().map(DataSpaceQaController::scopeValue).distinct().count() > 1)
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, name + " 包含冲突的重复字段");
         }
-        return normalizeScope(fields.toSingleValueMap());
+        var normalized = normalizeScope(fields.toSingleValueMap());
+        if(fields.containsKey("scopes")){
+            if(fields.get("scopes").size()!=1)throw FrozenScopes.invalid("数据集范围不能有重复字段。");
+            try {
+                normalized.put("scopes", JSON.readerFor(List.class).with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+                        .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readValue(fields.getFirst("scopes")));
+            } catch (java.io.IOException e) {
+                throw FrozenScopes.invalid("数据集范围格式不正确。");
+            }
+        }
+        return normalized;
     }
 
     @GetMapping("/health")
@@ -248,7 +274,10 @@ public class DataSpaceQaController {
             throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "所有图片附件的总大小超过上限");
         var headers = qaHeaders(normalized, MediaType.MULTIPART_FORM_DATA, requestId);
         MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
-        normalized.forEach((key,value)->{if(value!=null)body.add(key,value);});
+        for(var entry:normalized.entrySet()){
+            Object value=entry.getValue();
+            if(value!=null)body.add(entry.getKey(), value instanceof List<?> ? JSON.writeValueAsString(value) : value.toString());
+        }
         if (images != null) for (MultipartFile image : images) {
             if (image.getSize() > limits.maxImageBytes())
                 throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "每张图片不得超过 10 MB");
@@ -322,37 +351,57 @@ public class DataSpaceQaController {
 
     @GetMapping("/capabilities/{datasetId}/{versionId}/{indexVersionId}")
     public ResponseEntity<byte[]> capabilities(@PathVariable UUID datasetId, @PathVariable UUID versionId,
-                                               @PathVariable UUID indexVersionId) {
+                                               @PathVariable UUID indexVersionId,
+                                               @RequestParam(defaultValue="false") boolean qaDiscovery) {
         validateScope(Map.of("datasetId", datasetId, "versionId", versionId, "indexVersionId", indexVersionId));
-        return search.scopedJson("/indexes/" + datasetId + "/" + versionId + "/" + indexVersionId + "/capabilities", null);
+        String path = "/indexes/" + datasetId + "/" + versionId + "/" + indexVersionId + "/capabilities";
+        return search.scopedJson(qaDiscovery ? path + "?detail=qa" : path, null);
     }
 
     @PostMapping("/retrieval/execute")
-    public ResponseEntity<byte[]> retrieve(@RequestBody String rawBody) {
-        Map<String, Object> body = validatedBody(parseJson(rawBody), true);
-        return search.scopedJson("/search/execute", body);
+    public ResponseEntity<byte[]> retrieve(@RequestBody String rawBody) throws java.io.IOException {
+        Map<String, Object> body = normalizeScope(parseJson(rawBody));
+        JsonNode query = JSON.valueToTree(body.get("plan"));
+        if(query.has("all_tables_search") || query.has("reference_terms"))
+            throw FrozenScopes.invalid("请求包含内部检索字段。");
+        var scopes = FrozenScopes.from(body,false,limits.maxDataScopes());
+        authorizeScopes(scopes);
+        if(scopes.items().size()>1)return multiSearch.search(scopes,body,null);
+        body.remove("scopes");
+        body.putAll(scopes.items().get(0).fields());
+        return search.scopedJson("/search/execute",body);
     }
 
     @PostMapping(value="/retrieval/image-to-text", consumes=MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<byte[]> imageRetrieval(@RequestParam MultiValueMap<String, String> fields,
-            @RequestParam String plan, @RequestParam MultipartFile file) {
-        Map<String, Object> body = validatedBody(multipartFields(fields), true);
-        UUID datasetId = UUID.fromString(body.get("dataset_id").toString());
-        UUID versionId = UUID.fromString(body.get("version_id").toString());
-        UUID indexVersionId = UUID.fromString(body.get("index_version_id").toString());
+            @RequestParam String plan, @RequestParam MultipartFile file) throws java.io.IOException {
+        Map<String, Object> body = multipartFields(fields);
+        var scopes = FrozenScopes.from(body,false,limits.maxDataScopes());
         if (file.getSize()>10*1024*1024) throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE,"查询图片不得超过10 MB");
-        return search.scopedImage(datasetId,versionId,indexVersionId,plan,file);
+        authorizeScopes(scopes);
+        if(scopes.items().size()>1){
+            var query = parseJson(plan);
+            if(query.containsKey("all_tables_search") || query.containsKey("reference_terms"))
+                throw FrozenScopes.invalid("请求包含内部检索字段。");
+            body.put("plan",query);
+            return multiSearch.search(scopes,body,file);
+        }
+        var scope = scopes.items().get(0);
+        return search.scopedImage(scope.datasetId(),scope.versionId(),scope.indexVersionId(),plan,file);
     }
 
     @PostMapping("/source-files/{datasetId}/{versionId}")
     public List<MmSourceFileService.Source> sourceFiles(@PathVariable UUID datasetId,
-            @PathVariable UUID versionId, @RequestBody List<UUID> assetIds) throws Exception {
+            @PathVariable UUID versionId, @RequestParam(required=false) UUID indexVersionId,
+            @RequestBody List<UUID> assetIds) throws Exception {
+        if(indexVersionId!=null) access.requireVersionRead(datasetId,versionId,indexVersionId);
         return sourceFiles.resolve(datasetId, versionId, assetIds);
     }
 
     @GetMapping("/assets/{datasetId}/{versionId}/{assetId}")
     public ResponseEntity<org.springframework.core.io.InputStreamResource> source(@PathVariable UUID datasetId, @PathVariable UUID versionId,
-                                         @PathVariable UUID assetId) throws Exception {
+                                         @PathVariable UUID assetId, @RequestParam(required=false) UUID indexVersionId) throws Exception {
+        if(indexVersionId!=null) access.requireVersionRead(datasetId,versionId,indexVersionId);
         var asset = sourceFiles.resolve(datasetId, versionId, List.of(assetId)).get(0);
         var stream=sourceFiles.open(datasetId,versionId,asset);
         return ResponseEntity.ok().contentType(MediaType.parseMediaType(
@@ -376,10 +425,15 @@ public class DataSpaceQaController {
     private HttpHeaders headers(Map<String,Object> scope, MediaType type) {
         var headers = new HttpHeaders();
         headers.setContentType(type);
-        headers.set(HttpHeaders.AUTHORIZATION,"user_data_only".equals(scope.get("input_mode"))?evidenceScope.userInputBearer():
+        headers.set(HttpHeaders.AUTHORIZATION,scope.containsKey("scopes")||"user_data_only".equals(scope.get("input_mode"))?evidenceScope.userInputBearer():
                 evidenceScope.bearer(UUID.fromString(scope.get("dataset_id").toString()),UUID.fromString(scope.get("version_id").toString()),UUID.fromString(scope.get("index_version_id").toString())));
         headers.set(com.fwdrobo.sirius.security.InternalTokenFilter.HEADER,evidenceScope.internalCredential());
         return headers;
+    }
+
+    private List<String> authorizeScopes(FrozenScopes scopes) {
+        return scopes.items().stream().map(scope ->
+                evidenceScope.bearer(scope.datasetId(),scope.versionId(),scope.indexVersionId())).toList();
     }
 
     private ResponseEntity<byte[]> forward(String path, HttpMethod method, Object body, HttpHeaders headers) {
@@ -393,8 +447,7 @@ public class DataSpaceQaController {
                     .header(HttpHeaders.CACHE_CONTROL, "no-store").body(response.getBody());
         } catch (HttpStatusCodeException exc) {
             if(task!=null)task.acknowledged();
-            return ResponseEntity.status(exc.getStatusCode()).contentType(MediaType.APPLICATION_JSON)
-                    .body(exc.getResponseBodyAsByteArray());
+            throw com.fwdrobo.sirius.handler.WorkerErrors.from(exc.getStatusCode(),exc.getResponseBodyAsByteArray());
         } catch (ResourceAccessException exc) {
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "问答服务尚未就绪或请求超时，请检查模型状态");
         } finally {

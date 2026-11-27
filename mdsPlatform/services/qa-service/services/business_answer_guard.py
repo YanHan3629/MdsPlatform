@@ -980,11 +980,14 @@ def _numbers(text):
     return {_decimal(match[1]) for pattern in (NUMBER, QUANTITY) for match in pattern.finditer(normalized)} - {None}
 
 
-def _quantities(text, *, purchase=False):
+def _quantities(text, *, purchase=False, length_aliases=False):
     value = unicodedata.normalize('NFKC', text)
     aliases = {'人民币': 'cny', '元': 'cny', '美元': 'usd', '公斤': 'kg', '千克': 'kg', '吨': 't',
                '伏特': 'v', '伏': 'v', '赫兹': 'hz'}
     patterns = (QUANTITY, PURCHASE_COUNT_QUANTITY) if purchase else (QUANTITY,)
+    if length_aliases:
+        aliases.update({'毫米': 'mm', '厘米': 'cm', '微米': 'μm', 'um': 'μm', '米': 'm'})
+        patterns += (IMAGE_LENGTH_QUANTITY,)
     return {(_decimal(match[1]), aliases.get(match[2].casefold(), match[2].casefold()))
             for pattern in patterns for match in pattern.finditer(value)}
 
@@ -1573,6 +1576,18 @@ def _source_text(source):
         model_context += f"\n{value} {unit}"
     values = [model_context, source.content_preview or '',
               json.dumps(source.locator, ensure_ascii=False, default=str)]
+    if source.provenance.get('multiScopeSource'):
+        from services.multi_scope_evidence import measurement_quantities, row_quantity_literals
+        values.extend(f'{value} {unit}' for _, value, unit in measurement_quantities(source))
+        values.extend(f'{value} {unit}' for value, unit in row_quantity_literals(source))
+    elif source.provenance.get('productionQualityRole') == 'inspection':
+        from services.multi_scope_evidence import measurement_quantities
+        values.extend(f'{value} {unit}' for _, value, unit in measurement_quantities(source, allow_single=True))
+    if source.provenance.get('scopedPartialDimensionSku'):
+        from services.multi_scope_evidence import partial_dimension_values
+        dimensions = partial_dimension_values(source)
+        if dimensions:
+            values.extend(f'{value} mm' for value in dimensions[1].values())
     values.extend(f"{amount['exactValue']} {amount['unit'] or ''}" for amount in amounts
                   if amount and amount['factId'] in source.fact_ids)
     for fact in (source.evidence_bundle or {}).get('facts', []):
@@ -1742,6 +1757,11 @@ def validate(answer, sources, *, legacy_image_quantities=False):
     label_statements = {index: set(image_label_statements(sources[index - 1])) for index in cites} if image_only else {}
     has_located_labels = any(label_statements.values())
     calculations = [group['difference'] for group in _batch_quantities(sources).values() if group.get('difference')]
+    multi_questions = {source.provenance.get('validatedMultiScopeQuestion') for source in sources
+                       if source.provenance.get('multiScopeSource')}
+    if len(multi_questions) == 1 and None not in multi_questions:
+        from services.multi_scope_evidence import verified_computations
+        calculations.extend(verified_computations(next(iter(multi_questions)),sources))
     order_total = selected_order_amount_total(sources)
     if order_total:
         calculations.append(order_total)
@@ -1861,9 +1881,14 @@ def validate(answer, sources, *, legacy_image_quantities=False):
         if not numbers <= _numbers(cited_text):
             return {'accepted': False, 'reason': 'NUMERIC_VALUE_NOT_FOUND_IN_CITED_INPUT', 'answerLine': line_number}
         packaging_quantities = any(source.provenance.get('packagingChangeRole') for source in sources)
-        quantities = _quantities(clean, purchase=purchase_view is not None or packaging_quantities)
+        partial_dimensions = any(sources[index-1].provenance.get('scopedPartialDimensionSku') for index in references)
+        structured_counts = purchase_view is not None or packaging_quantities
+        quantities = _quantities(clean, purchase=structured_counts, length_aliases=partial_dimensions)
         # When a cited source carries explicit quantity literals, enforce their unit pairings.
-        source_quantities = _quantities(cited_text, purchase=purchase_view is not None or packaging_quantities)
+        source_quantities = _quantities(cited_text, purchase=structured_counts, length_aliases=partial_dimensions)
+        if partial_dimensions and any(unit in {'mm', 'cm', 'm', 'μm'} and (value, unit) not in source_quantities
+                                      for value, unit in quantities):
+            return {'accepted': False, 'reason': 'UNIT_NOT_FOUND_WITH_VALUE_IN_CITED_INPUT', 'answerLine': line_number}
         if packaging_quantities and any(unit in {'台','套','件','个','箱'} and (value,unit) not in source_quantities
                                        for value,unit in quantities):
             return {'accepted':False,'reason':'UNIT_NOT_FOUND_WITH_VALUE_IN_CITED_INPUT','answerLine':line_number}

@@ -63,6 +63,13 @@ public class BusinessOperationInterceptor implements HandlerInterceptor,WebMvcCo
     throw new ResponseStatusException(HttpStatus.FORBIDDEN,"SCOPED_SERVICE_SUBJECT_REQUIRED");
    operation=EndpointOperationCatalog.operation(controller,name,request.getMethod());
    if(operation==null)throw new ResponseStatusException(HttpStatus.FORBIDDEN,"UNMAPPED_OPERATION");
+   if("data.catalog.read".equals(operation)&&"true".equals(request.getParameter("ingestion"))&&
+      Set.of("MmSpaceController.list","MmDatasetController.listDatasets","MmDatasetController.getDataset",
+          "MmDatasetController.listVersions").contains(controller+"."+name)){
+    if(auth.hasOperation("dataset.upload"))operation="dataset.upload";
+    else if(auth.hasOperation("dataset.index.build"))operation="dataset.index.build";
+    else if(auth.hasOperation("dataset.create"))operation="dataset.create";
+   }
    if("MmIngestTaskController".equals(controller)&&"mapping".equals(name)&&"dataset.index.build".equals(operation))
     operation=mappingReadOperation(request);
    if("DataSpaceFlowController".equals(controller)){

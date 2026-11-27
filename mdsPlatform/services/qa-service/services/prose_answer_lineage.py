@@ -1,5 +1,6 @@
 """Read/model bindings for cited prose; these do not certify model semantics."""
 import base64,copy,hashlib,json,re,uuid
+from decimal import Decimal, InvalidOperation
 from core.request_budget import max_image_pixels
 from services.answer_lineage import Catalogue,IDENTITY,require,same,canonical
 from services.read_receipt import verify,digest
@@ -229,7 +230,14 @@ def _verify_numeric_revision_pair(trace, calls, sources, *, selected_end_key='se
 def _identity(source,trace):
     bundle=source.evidence_bundle or {};identity=bundle.get('identity',{});provenance=source.provenance
     require(all(identity.get(k) for k in IDENTITY),'CLAIM_PROSE_IDENTITY_INCOMPLETE')
-    require(all(identity[k]==str(trace.data['snapshot'][name]) for k,name in [('datasetId','dataset_id'),('versionId','version_id'),('indexVersionId','index_version_id')]),'CLAIM_PROSE_SNAPSHOT_CHANGED')
+    coordinates=('datasetId','versionId','indexVersionId')
+    if trace.data.get('scopes'):
+        frozen={key:identity[key] for key in coordinates}
+        require(frozen in trace.data['scopes'] and frozen==provenance.get('frozenScope')
+                and frozen['datasetId']==str(source.dataset_id),'CLAIM_PROSE_SNAPSHOT_CHANGED')
+    else:
+        requested=tuple(str(trace.data['snapshot'].get(key)) for key in ('dataset_id','version_id','index_version_id'))
+        require(tuple(identity[key] for key in coordinates)==requested,'CLAIM_PROSE_SNAPSHOT_CHANGED')
     require(identity['assetId']==str(source.asset_id) and identity['logicalPath']==source.logical_path and identity['originalFormat']==source.original_format
         and identity['sourceSha256']==provenance.get('sourceSha256') and identity['rawCommitId']==provenance.get('rawCommitId')
         and identity['versionId']==source.data_version and identity['indexVersionId']==source.index_version,'CLAIM_PROSE_SOURCE_CHANGED')
@@ -253,6 +261,9 @@ def _native_link(source,trace,call):
     observed={digest(e['value']) for e in trace.data['events'] if e['kind']=='nativeReadReceipt'}
     require(digest(receipt) in observed and digest(receipt)==actual.get('clientReadReceiptSha256')
         and receipt['decodedBodySha256']==actual.get('clientDecodedBodySha256'),'CLAIM_PROSE_NATIVE_RECEIPT_NOT_IN_TRACE')
+    if trace.data.get('scopes'):
+        require(actual.get('scope')==receipt.get('scope')==source.provenance.get('frozenScope'),
+                'CLAIM_PROSE_ACTUAL_SCOPE_CHANGED')
     return dict(sourceId=source.source_id,evidenceId=source.evidence_id,representationId=source.representation_id,
         identity=identity,locator=source.locator,readIds=[receipt['readId']],readOutputSha256=receipt['readOutputSha256'],
         clientReadReceiptSha256=digest(receipt),modelCallId=call['callId'],modelRequestBodySha256=call['requestBodySha256'])
@@ -282,7 +293,7 @@ def _text_links(question,sources,indices,trace,call,mixed=False):
             link['factIds'] = list(source.fact_ids)
             link['factLocators'] = {key: facts[key]['locator'] for key in source.fact_ids}
             link['factNatures'] = {key: facts[key]['evidenceNature'] for key in source.fact_ids}
-        elif mixed:
+        elif mixed or trace.data.get('scopes'):
             facts={f['factId']:f for f in source.evidence_bundle.get('facts',[])}
             require(set(source.fact_ids)<=set(facts),'CLAIM_PROSE_MIXED_FACT_NOT_READ')
             link['factIds']=list(source.fact_ids);link['factLocators']={k:facts[k]['locator'] for k in source.fact_ids}
@@ -378,6 +389,835 @@ def _model_slots(sources,call):
     return by_model,by_input
 
 
+def _append_verified_claim(presentation, statement, links, sources, input_to_model, recipe, heading='\n',
+                           operation=None):
+    mapping = presentation['presentationProof']['modelToFinalSourceIndices']
+    for link in links:
+        source = sources[link['sourceIndex'] - 1]
+        model_index = input_to_model[link['sourceIndex']]
+        if str(model_index) not in mapping:
+            mapping[str(model_index)] = len(mapping) + 1
+            presentation['sources'].append(source.model_copy(update={'provenance': {
+                **source.provenance, 'modelSourceIndex': model_index, 'finalSourceIndex': mapping[str(model_index)],
+                'citationScopeCheck': recipe,
+            }}).model_dump(mode='json'))
+        link.update(sourceIndex=mapping[str(model_index)], modelSourceIndex=model_index)
+    indices = [link['sourceIndex'] for link in links]
+    text = statement + ' ' + ''.join(f'[来源{index}]' for index in indices)
+    start = len(presentation['answer']) + len(heading)
+    presentation['answer'] += heading + text
+    claim = dict(claimId=str(uuid.uuid5(uuid.NAMESPACE_URL, canonical([recipe, start, text, links]))),
+        kind='registered_operation' if operation else 'source_value',
+        evidenceNature='program_calculation' if operation else 'source_record',
+        verification='recomputed-from-actual-model-input' if operation else 'exact-native-fields-from-actual-model-input',
+        text=text, answerStart=start, answerEnd=len(presentation['answer']), offsetUnit='unicode-code-points',
+        sourceIndices=indices, evidenceIds=[link['evidenceId'] for link in links],
+        factIds=list(dict.fromkeys(fact for link in links for fact in link['factIds'])),
+        readIds=list(dict.fromkeys(read for link in links for read in link['readIds'])), inputLinks=links)
+    if operation:
+        claim['operation'] = operation
+    presentation['claims'].append(claim)
+    return claim['claimId']
+
+
+def _append_material_receipts(presentation, sources, cited_indices, input_to_model, trace, call):
+    """Show linked consumption, receipt and inspection fields from verified native inputs."""
+    if not trace.data.get('scopes') or not any(source.provenance.get('scopedMaterialTraceRole')
+                                               in {'receipt', 'inspection'} for source in sources):
+        return
+    from services.multi_scope_evidence import IDENTIFIER, _count, _signed_at, _source_row
+
+    related = set()
+    consumption_links = {}
+    for index in cited_indices:
+        source = sources[index-1]
+        if source.provenance.get('scopedMaterialTraceRole') == 'consumption':
+            row, _ = _source_row(source)
+            pair = row.get('supplier_batch_id'), row.get('part_id')
+            if all(isinstance(value, str) and value for value in pair):
+                try:
+                    consumption_links[index] = _native_link(source, trace, call)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                related.add(pair)
+    if not related:
+        return
+    identifiers = {'receipt': [], 'inspection': [], 'consumption': []}
+    displayed = set()
+    receipt_fields = ('supplier_batch_id', 'part_id', 'received_at', 'final_state')
+    consumption_fields = ('manufacturing_batch_id', 'consumption_id', 'supplier_batch_id', 'part_id', 'quantity', 'unit')
+    batches = {batch for batch, _ in related}
+    for index, source in enumerate(sources, 1):
+        role = source.provenance.get('scopedMaterialTraceRole')
+        if role not in identifiers:
+            continue
+        row, facts = _source_row(source)
+        if role == 'consumption':
+            fields = consumption_fields
+            if index not in consumption_links or not set(fields) <= row.keys():
+                continue
+            production, movement, batch, part, quantity, unit = (row[field] for field in fields)
+            if (not all(isinstance(value, str) and IDENTIFIER.fullmatch(value) for value in (production, movement, batch, part))
+                    or not _displayable_cell(unit)):
+                continue
+            try:
+                amount = _count(quantity)
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            statement = f'制造批 {production}，领料记录 {movement}，料号 {part}，来料批 {batch}，领料 {amount}{unit}。'
+            title = '原表领料记录'
+        elif role == 'receipt':
+            fields = receipt_fields
+            if not set(fields) <= row.keys():
+                continue
+            batch, part, instant, state = (row[field] for field in fields)
+            if (not all(_displayable_cell(value) for value in (batch, part, state)) or (batch, part) not in related
+                    or not IDENTIFIER.fullmatch(batch) or not IDENTIFIER.fullmatch(part)):
+                continue
+            statement = f'来料批 {batch}，料号 {part}，原表接收时刻 {instant}，状态为{state}。'
+            title = '原表来料接收记录'
+        else:
+            inspection = _inspection_statement(source, row, '来料批')
+            if inspection is None or row['object_id'] not in batches:
+                continue
+            statement, fields = inspection
+            instant = row['measured_at']
+            title = '原表来料检验记录'
+        try:
+            if role == 'consumption':
+                link = consumption_links[index]
+            else:
+                _signed_at(instant)
+                link = _native_link(source, trace, call)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if statement in displayed:
+            continue
+        displayed.add(statement)
+        link.update(sourceIndex=index, factIds=[facts[field] for field in fields],
+                    referenceRole=f'exact-material-{role}-fields')
+        heading = f'\n\n{title}。\n' if not identifiers[role] else '\n'
+        identifiers[role].append(_append_verified_claim(presentation, statement, [link], sources, input_to_model,
+                                                        f'verified-material-{role}-input', heading))
+    for role, key in (('receipt', 'verifiedMaterialReceiptClaimIds'), ('inspection', 'verifiedMaterialInspectionClaimIds'),
+                      ('consumption', 'verifiedMaterialConsumptionClaimIds')):
+        if identifiers[role]:
+            presentation['presentationProof'][key] = identifiers[role]
+
+
+def _displayable_cell(value):
+    return isinstance(value, str) and bool(value.strip()) and len(value) <= 128 and not re.search(r'[\[\]\r\n]', value)
+
+
+def _dimension_comparison(question, targets, rows, sources, *, multi):
+    from services.multi_scope_evidence import DIMENSION_FIELDS, _dimension_differences, dimension_values
+
+    rows_for_comparison = rows
+    differences = {}
+    if multi:
+        differences = {fact['field']:fact for fact in _dimension_differences(question, sources)}
+        if not differences:
+            return []
+        input_rows = {index for fact in differences.values() for index in fact['sourceIndices']}
+        rows_for_comparison = {index:row for index, row in rows.items() if index in input_rows}
+    records, comparable = [], []
+    identifiers = ('sku_id',) if multi else ('model', 'sku_id')
+    include_category = multi and re.search(r'品类|用途|性能|能效', question)
+    for target in targets:
+        matches = [(index, row, key) for index, row in rows_for_comparison.items() if DIMENSION_FIELDS.keys() <= row.keys()
+                   for key in identifiers if str(row.get(key, '')).casefold() == target]
+        if len(matches) != 1:
+            return []
+        index, row, key = matches[0]
+        sizes = dimension_values(sources[index-1], row)
+        if not sizes:
+            return []
+        name = row[key]
+        fields = [key, *DIMENSION_FIELDS]
+        text = f'{name} 的外形宽×深×高为 ' + '×'.join(map(str, sizes.values())) + ' mm'
+        if multi:
+            fields.append('manufacturer_id')
+        if include_category:
+            for field, label in (('category_id', '品类编号'), ('form_factor', '产品形态'), ('spec_condition', '规格条件')):
+                if _displayable_cell(row.get(field)):
+                    fields.append(field)
+                    text += f'，原表{label}为{row[field]}'
+        if _displayable_cell(row.get('installation_type')):
+            fields.append('installation_type')
+            text += f'，安装方式为{row["installation_type"]}'
+        records.append((text + '。', {index: fields}, None))
+        comparable.append((index, name, sizes, key))
+    if comparable[0][0] == comparable[1][0]:
+        return []
+    for axis, label in DIMENSION_FIELDS.items():
+        if label[0] not in question:
+            continue
+        ranked = sorted(comparable, key=lambda item: item[2][axis], reverse=True)
+        larger, smaller = ranked
+        delta = Decimal(differences[label]['exactValue']) if multi else larger[2][axis] - smaller[2][axis]
+        text = (f'{larger[1]} 比 {smaller[1]} 的{label}多 {delta} mm。' if delta
+                else f'{larger[1]} 与 {smaller[1]} 的{label}相同。')
+        operation = {'operation': 'product_dimension_difference', 'field': axis, 'exactValue': str(delta or 0), 'unit': 'mm'}
+        identity = ('manufacturer_id',) if multi else ()
+        records.append((text, {index: (key, axis, *identity) for index, _, _, key in ranked}, operation))
+    return records
+
+
+def _warehouse_comparison(targets, rows, sources):
+    from services.multi_scope_evidence import IDENTIFIER, _signed_at
+
+    batches = [value for value in targets if value.startswith('fg-')]
+    skus = [value for value in targets if value.startswith('sku-')]
+    if len(batches) != 1 or len(skus) > 1 or len(batches) + len(skus) != len(targets):
+        return []
+    fields = ('batch_id', 'movement_id', 'movement_type', 'occurred_at', 'quantity_change', 'unit')
+    if skus:
+        fields += ('sku_id',)
+    entries = {}
+    for index, row in rows.items():
+        if str(row.get('batch_id', '')).casefold() != batches[0] or not set(fields) <= row.keys():
+            continue
+        if skus and str(row['sku_id']).casefold() != skus[0]:
+            continue
+        movement = row['movement_id']
+        if (not isinstance(movement, str) or not IDENTIFIER.fullmatch(movement) or movement in entries
+                or not all(_displayable_cell(row.get(key)) for key in ('unit', 'movement_type', 'occurred_at'))):
+            return []
+        amount = Decimal(str(row['quantity_change']))
+        if not amount.is_finite():
+            return []
+        entries[movement] = (index, row, amount, _signed_at(row['occurred_at']))
+    outbounds = [item for item in entries.values() if item[1]['movement_type'] == '运输交接出库']
+    if len(outbounds) != 1:
+        return []
+    out_index, out, deducted, outbound_time = outbounds[0]
+    shipment = out.get('source_document_id')
+    if deducted >= 0 or not isinstance(shipment, str) or not re.fullmatch(r'SHIP-[A-Za-z0-9-]+', shipment):
+        return []
+    pairs = []
+    for index, moved, quantity, moment in entries.values():
+        paired = moved.get('paired_movement_id')
+        if quantity >= 0 or moment >= outbound_time or not isinstance(paired, str) or paired not in entries:
+            continue
+        other_index, staged, received, stage_time = entries[paired]
+        if (staged.get('paired_movement_id') == moved['movement_id'] and received == -quantity
+                and moved['unit'] == staged['unit'] and moment == stage_time
+                and re.search(r'拣货|暂存', moved['movement_type'] + staged['movement_type'])
+                and sources[index-1].asset_id == sources[other_index-1].asset_id == sources[out_index-1].asset_id):
+            pairs.append((index, moved, quantity, other_index, staged, received))
+    if len(pairs) != 1:
+        return []
+    index, moved, quantity, other_index, staged, received = pairs[0]
+    before = (f'{moved["batch_id"]} 于 {moved["occurred_at"]} 在仓内移位，'
+              f'{moved["movement_id"]}（{moved["movement_type"]}）{quantity}{moved["unit"]}，'
+              f'{staged["movement_id"]}（{staged["movement_type"]}）+{received}{staged["unit"]}，两条流水互为配对。')
+    pair_fields = (*fields, 'paired_movement_id')
+    after = (f'{out["batch_id"]} 于 {out["occurred_at"]} 发生运输交接出库，'
+             f'流水 {out["movement_id"]} 扣减 {abs(deducted)}{out["unit"]}，关联运输单 {shipment}。')
+    out_fields = (*fields, 'source_document_id')
+    if _displayable_cell(out.get('note')) and re.search(r'发车|启运', out['note']):
+        after += f'出库流水备注记载“{out["note"]}”。'
+        out_fields += ('note',)
+    return [(before, {index: pair_fields, other_index: pair_fields}, None), (after, {out_index: out_fields}, None)]
+
+
+def _packaging_comparison(question, delivery, rows, sources, *, multi):
+    from services.multi_scope_evidence import IDENTIFIER, PACKAGE_BOX_FIELDS, _paired_boxes, whole_count
+
+    links = {index:row for index, row in rows.items() if str(row.get('delivery_line_id', '')).casefold()==delivery}
+    waybill_fields = ('waybill_line_id', 'delivery_line_id', 'signed_quantity', 'unit')
+    waybills = [(index, row) for index, row in links.items() if set(waybill_fields)<=row.keys()
+                and isinstance(row['waybill_line_id'], str) and row['waybill_line_id'].lower().startswith('wbl-')
+                and IDENTIFIER.fullmatch(row['waybill_line_id']) and _displayable_cell(row['unit'])]
+    pair = _paired_boxes(question, sources, allow_single=not multi)
+    complete_pair = len(pair)==1 and set(pair[0]['sourceIndices']) <= links.keys()
+    records, limits = [], []
+    boxes_on_waybill = None
+    waybill_index, waybill = waybills[0] if len(waybills)==1 else (None,{})
+    signed = whole_count(waybill.get('signed_quantity'))
+    if signed is not None:
+        text = f'交付行 {waybill["delivery_line_id"]} 的运单行 {waybill["waybill_line_id"]} 实际签收 {signed}{waybill["unit"]}'
+        fields = waybill_fields
+        boxes_on_waybill = whole_count(waybill.get('box_count'))
+        if boxes_on_waybill is not None:
+            fields += ('box_count',)
+            text += f'，运单登记 {boxes_on_waybill} 箱'
+        records.append((text+'。', {waybill_index:fields}, None))
+    else:
+        limits.append('当前引证缺少同一交付行的承运签收凭证，实签数量待核对。')
+
+    if complete_pair:
+        total, = pair
+        indices = sorted(total['sourceIndices'], key=lambda index:links[index]['component_type']!='室内机')
+        accessories = False
+        for index in indices:
+            row = links[index]
+            text = (f'交付行 {row["delivery_line_id"]} 的{row["component_type"]}组 {row["package_id"]} '
+                    f'登记 {whole_count(row["box_count"])} 箱，配对包装组为 {row["paired_package_id"]}')
+            fields = PACKAGE_BOX_FIELDS
+            part = row.get('accessory_part_id')
+            quantity = whole_count(row.get('accessory_quantity'))
+            if isinstance(part, str) and IDENTIFIER.fullmatch(part) and quantity is not None:
+                fields += ('accessory_part_id', 'accessory_quantity')
+                text += f'，登记配件 {part} 共 {quantity} 件'
+                accessories = True
+            records.append((text+'。', {index:fields}, None))
+        count = total['exactValue']
+        operation = {key:total[key] for key in ('operation', 'delivery', 'exactValue', 'unit')}
+        records.append((f'同一交付行的两个包装组合计 {count} 箱。',
+                        {index:PACKAGE_BOX_FIELDS for index in indices}, operation))
+        if boxes_on_waybill is not None and boxes_on_waybill!=Decimal(count):
+            limits.append('运单与配对包装组的登记箱数有差异，请核对交付凭证和包装清单。')
+        if any(waybill.get(field) and waybill[field]!=links[indices[0]][field] for field in ('sku_id', 'finished_batch_id')):
+            limits.append('运单与包装组登记的型号或成品批有差异，请核对各自的交付关联。')
+        if not accessories:
+            limits.append('配件所在组及数量还需核对配件登记。')
+    else:
+        limits.append('当前引证缺少同一交付行的配对包装原表，内外机箱数和配件归属待核对。')
+    return records, ''.join(limits)
+
+
+def _transport_comparison(question, target, rows, sources, *, multi):
+    from services.multi_scope_evidence import _shipment_durations, _signed_at, shipment_stage
+
+    titles = {'count':'装车清点', 'release':'仓储出库', 'depart':'发车', 'arrive':'到达', 'sign':'客户签收'}
+    needed = {'release':'仓储扣减流水', 'depart':'承运发车记录', 'arrive':'承运到达记录', 'sign':'承运签收记录'}
+    timeline = {}
+    for index, row in rows.items():
+        stage, fields = shipment_stage(row)
+        reference, time_field, _ = fields
+        if stage is None or str(row.get(reference, '')).casefold()!=target or not set(fields)<=row.keys():
+            continue
+        try:
+            moment = _signed_at(row[time_field])
+        except ValueError:
+            continue
+        timeline.setdefault(stage,{}).setdefault(moment,(index,fields))
+
+    records, limits = [], []
+    for stage, label in titles.items():
+        values = timeline.get(stage,{})
+        if len(values)>1:
+            limits.append(f'{label}时刻有冲突，请核对相应原表。')
+        elif not values and stage in needed:
+            limits.append(f'当前引证缺少{needed[stage]}，{label}时刻待核对。')
+
+    complete = sorted((moment, stage, index, fields) for stage, values in timeline.items()
+                      if len(values)==1 for moment,(index,fields) in values.items())
+    duration_inputs = {}
+    for _, stage, index, raw_fields in complete:
+        row = rows[index]
+        reference, time_field, _ = raw_fields
+        text = f'运输单 {row[reference]} 的{titles[stage]}时刻为 {row[time_field]}'
+        fields = raw_fields
+        for field, label in (('movement_id', '流水'), ('event_id', '事件'), ('waybill_line_id', '运单行'), ('node_id', '节点')):
+            if _displayable_cell(row.get(field)):
+                fields += (field,)
+                text += f'，{label} {row[field]}'
+        if stage=='release' and row.get('quantity_change') not in (None, '') and _displayable_cell(row.get('unit')):
+            fields += ('quantity_change','unit')
+            text += f'，扣减 {abs(Decimal(str(row["quantity_change"])))}{row["unit"]}'
+        records.append((text+'。', {index:fields}, None))
+        duration_inputs[index] = raw_fields
+
+    for fact in _shipment_durations(question, sources, allow_single=not multi):
+        if fact['shipment'].casefold()!=target or not set(fact['sourceIndices'])<=duration_inputs.keys():
+            continue
+        text = f'{fact["field"]}相隔 {fact["exactValue"]}{fact["unit"]}。'
+        operation = {key:fact[key] for key in ('operation', 'shipment', 'field', 'exactValue', 'unit')}
+        records.append((text, {index:duration_inputs[index] for index in fact['sourceIndices']}, operation))
+    return records, ''.join(limits)
+
+
+def _counting_event_comparison(target, rows):
+    from services.multi_scope_evidence import IDENTIFIER, SHIPMENT_EVENT_STAGES, _signed_at, whole_count
+
+    fields = ('shipment_id', 'event_id', 'event_type', 'node_id', 'timestamp', 'box_count', 'waybill_line_ids')
+    matches = [(index, row) for index, row in rows.items() if set(fields) <= row.keys()
+               and str(row['shipment_id']).casefold() == target
+               and SHIPMENT_EVENT_STAGES.get(row['event_type']) == 'count']
+    if len(matches) != 1:
+        return []
+    index, row = matches[0]
+    _signed_at(row['timestamp'])
+    count = whole_count(row['box_count'])
+    waybills = row['waybill_line_ids']
+    if isinstance(waybills, str):
+        waybills = json.loads(waybills)
+    if (count is None or not isinstance(waybills, list) or not waybills
+            or not all(isinstance(value, str) and IDENTIFIER.fullmatch(value) for value in
+                       (row['event_id'], row['node_id'], *waybills))
+            or not all(value.upper().startswith('WBL-') for value in waybills)
+            or len(set(waybills)) != len(waybills)):
+        return []
+    text = (f'运输单 {row["shipment_id"]} 的{row["event_type"]}事件为 {row["event_id"]}，'
+            f'发生于 {row["timestamp"]}，节点为 {row["node_id"]}，关联运单行 {"、".join(waybills)}，清点 {count} 箱。')
+    return [(text, {index:fields}, None)]
+
+
+def _allocated_batch_comparison(question, target, rows, sources):
+    from services.business_records import CHINESE_LINE_COUNTS, PRODUCTION_BATCH_COUNT, _exact_decimal_sum
+    from services.multi_scope_evidence import IDENTIFIER, whole_count
+
+    fields = ('order_line_id', 'finished_batch_id', 'quantity')
+    allocations = [(index, row) for index, row in rows.items() if set(fields) <= row.keys()
+                   and str(row['order_line_id']).casefold() == target
+                   and sources[index-1].provenance.get('verifiedOrderAllocation')]
+    expected_counts = {int(value) if value.isdecimal() else CHINESE_LINE_COUNTS[value]
+                       for value in PRODUCTION_BATCH_COUNT.findall(question)}
+    if not allocations or expected_counts != {len(allocations)}:
+        return []
+    if len({sources[index-1].asset_id for index, _ in allocations}) != 1:
+        return []
+    batches = [row['finished_batch_id'] for _, row in allocations]
+    if not all(isinstance(batch, str) and batch.startswith('FG-') and IDENTIFIER.fullmatch(batch) for batch in batches):
+        return []
+    if len(batches) != len(set(batches)):
+        return []
+    quantities = [whole_count(row['quantity']) for _, row in allocations]
+    if any(quantity is None for quantity in quantities):
+        return []
+    units = {row.get('unit') for _, row in allocations}
+    if len(units) != 1:
+        return []
+    unit, = units
+    if unit is not None and not _displayable_cell(unit):
+        return []
+    shown_unit = unit or ''
+    total = _exact_decimal_sum(quantities)
+    distribution = (f'{"、".join(batches)} 各 {quantities[0]}{shown_unit}' if len(set(quantities)) == 1
+                    else '，'.join(f'{batch} 分配 {quantity}{shown_unit}' for batch, quantity in zip(batches, quantities)))
+    text = f'订单行 {allocations[0][1]["order_line_id"]} 的成品批分配为 {distribution}，合计 {total}{shown_unit}。'
+    if unit is None:
+        text += '原表字段未标明共同计量单位。'
+    operation = {'operation':'order_batch_allocation_sum', 'field':'quantity', 'exactValue':str(total)}
+    if unit:
+        operation['unit'] = unit
+    bound_fields = fields + ('unit',) if unit else fields
+    return [(text, {index:bound_fields for index, _ in allocations}, operation)]
+
+
+def _append_record_comparison(question, presentation, sources, cited_indices, input_to_model, trace, call):
+    from services.business_records import asks_warehouse_handoff
+    from services.multi_scope_evidence import IDENTIFIER, NAMED_RECORD_SOURCE, _compares_dimensions, _single_review_topic, _source_row
+
+    if NAMED_RECORD_SOURCE.search(question) or re.search(r'只看|仅看|只用|仅用|排除|剔除|不含|不引用', question):
+        return
+    multi = len(trace.data.get('scopes') or ()) > 1
+    targets = tuple(dict.fromkeys(match.group().casefold() for match in IDENTIFIER.finditer(question)))
+    dimensions = len(targets) == 2 and _compares_dimensions(question)
+    topic = _single_review_topic(question) if len(targets)==1 else None
+    if not targets or not (dimensions or topic in {'包装签收','仓储运输','运输清点'}
+                           or (not multi and (topic == '批次分配' or asks_warehouse_handoff(question)))):
+        return
+    limits = ''
+    try:
+        evidence = {index: _source_row(source, allow_single=not multi) for index, source in enumerate(sources, 1)
+                    if index in input_to_model and not is_user(source)}
+        rows = {index: row for index, (row, _) in evidence.items() if row}
+        if dimensions:
+            records = _dimension_comparison(question, targets, rows, sources, multi=multi)
+        elif topic=='包装签收':
+            records, limits = _packaging_comparison(question, targets[0], rows, sources, multi=multi)
+        elif topic=='仓储运输':
+            records, limits = _transport_comparison(question, targets[0], rows, sources, multi=multi)
+        elif topic=='运输清点':
+            records = _counting_event_comparison(targets[0], rows)
+        elif topic=='批次分配':
+            records = _allocated_batch_comparison(question, targets[0], rows, sources)
+            limits = '分配记录只说明批次分配，实际出库仍需核对对应批次的出库流水。'
+        else:
+            records = _warehouse_comparison(targets, rows, sources)
+        indices = {index for _, references, _ in records for index in references}
+        if not indices.intersection(cited_indices):
+            return
+        verified = {index: _native_link(sources[index-1], trace, call) for index in indices}
+        claims = [(text, [dict(verified[index], sourceIndex=index, referenceRole='exact-record-comparison-fields',
+                               factIds=list(dict.fromkeys(evidence[index][1][field] for field in fields)))
+                          for index, fields in references.items()], operation) for text, references, operation in records]
+    except (InvalidOperation, KeyError, TypeError, ValueError):
+        return
+    heading = '\n\n原表对照。\n'
+    if limits:
+        heading += limits+'\n'
+    if dimensions and multi and re.search(r'用途|性能|能效', question):
+        heading += '外形尺寸用于比较空间占用。适用场景需核对各自的产品资料，性能和能效比较还需一致的测试条件和计量口径。\n'
+    for statement, links, operation in claims:
+        _append_verified_claim(presentation, statement, links, sources, input_to_model, 'verified-record-comparison',
+                               heading, operation=operation)
+        heading = '\n'
+
+
+def _inspection_statement(source, row, object_label):
+    from services.multi_scope_evidence import IDENTIFIER, measurement_quantities
+
+    fields = ('object_id', 'qc_id', 'measured_at', 'item', 'result', 'unit')
+    if not all(_displayable_cell(row.get(field)) for field in fields):
+        return None
+    if not all(IDENTIFIER.fullmatch(row[field]) for field in ('object_id', 'qc_id')):
+        return None
+    quantities = {field: (value, unit) for field, value, unit in measurement_quantities(source, allow_single=True)}
+    numeric = ('actual_value', 'lower_limit', 'upper_limit')
+    if not all(field in quantities for field in numeric):
+        return None
+    actual, lower, upper = (quantities[field][0] for field in numeric)
+    unit = row['unit']
+    text = (f'{object_label} {row["object_id"]} 的检验 {row["qc_id"]}，时刻 {row["measured_at"]}，'
+            f'测项为{row["item"]}，原表实测值 {actual} {unit}，限值 {lower} 至 {upper} {unit}，结果为{row["result"]}')
+    if 'quantity_checked' in quantities and _displayable_cell(row.get('quantity_checked_unit')):
+        count, count_unit = quantities['quantity_checked']
+        text += f'，检查量 {count} {count_unit}'
+        numeric += ('quantity_checked', 'quantity_checked_unit')
+    if _displayable_cell(row.get('aggregation_method')):
+        text += f'，原表统计方法为{row["aggregation_method"]}'
+        fields += ('aggregation_method',)
+    return text + '。', fields + numeric
+
+
+def _service_statements(target, rows):
+    from services.multi_scope_evidence import IDENTIFIER
+
+    fields = ('service_id', 'serial_id', 'sku_id', 'customer_id', 'inspection', 'action', 'service_contract_id')
+    sites = [(index, row) for index, row in rows.items()
+             if isinstance(row.get('service_id'), str) and row['service_id'].casefold() == target
+             and all(_displayable_cell(row.get(field)) for field in fields)
+             and all(IDENTIFIER.fullmatch(row[field]) for field in (*fields[:4], fields[-1]))]
+    if len(sites) != 1:
+        return []
+    index, site = sites[0]
+    statement = (f'工单 {site["service_id"]} 的现场设备为 {site["sku_id"]}，序列号 {site["serial_id"]}，'
+                 f'现场客户为 {site["customer_id"]}。现场检查记录为{site["inspection"]}，'
+                 f'处置记录为{site["action"]}，登记合同为 {site["service_contract_id"]}。')
+    records = [(index, statement, fields, 'service-site')]
+    contracts = [(position, row) for position, row in rows.items()
+                 if row.get('contract_id') == site['service_contract_id'] and position != index]
+    if len(contracts) != 1:
+        return records
+    contract_index, contract = contracts[0]
+    buyer, sellers = contract.get('buyer_id'), contract.get('seller_ids')
+    parties = sellers if isinstance(sellers, list) else [sellers]
+    if (not parties or len(parties) > 8 or not all(isinstance(party, str) and IDENTIFIER.fullmatch(party)
+                                                    for party in [buyer, *parties])):
+        return records
+    fields = ('contract_id', 'buyer_id', 'seller_ids')
+    statement = f'服务合同 {contract["contract_id"]} 的签约买方为 {buyer}，签约供方为 {"、".join(parties)}'
+    if _displayable_cell(contract.get('settlement')):
+        statement += f'，合同结算条款为{contract["settlement"]}'
+        fields += ('settlement',)
+    records.append((contract_index, statement + '。', fields, 'service-contract'))
+    return records
+
+
+def _contract_parties(row, fields):
+    from services.multi_scope_evidence import IDENTIFIER
+
+    registers = {}
+    for field in fields:
+        value = row.get(field)
+        if value is None or value == '':
+            continue
+        if isinstance(value, str) and value.startswith('['):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                return (), ()
+        values = value if isinstance(value, list) else [value]
+        if not 1 <= len(values) <= 8 or not all(isinstance(item, str) and IDENTIFIER.fullmatch(item) for item in values):
+            return (), ()
+        registers[field] = tuple(dict.fromkeys(values))
+    groups = sorted(registers.values(), key=len, reverse=True)
+    if not groups or any(not set(group).issubset(groups[0]) for group in groups[1:]):
+        return (), ()
+    return groups[0], tuple(registers)
+
+
+def _append_service_contract_parties(presentation, sources, cited_indices, input_to_model, trace, call):
+    from services.multi_scope_evidence import IDENTIFIER, _source_row
+
+    roles = {}
+    for index, source in enumerate(sources, 1):
+        role = source.provenance.get('serviceContractBuyerRole')
+        if role in ('contract', 'workOrder'):
+            roles.setdefault(role, []).append(index)
+    if any(len(roles.get(role, ())) != 1 for role in ('contract', 'workOrder')):
+        return
+    contract_index = roles['contract'][0]
+    order_index = roles['workOrder'][0]
+    if not {contract_index, order_index}.intersection(cited_indices):
+        return
+    contract_source, order_source = sources[contract_index - 1], sources[order_index - 1]
+    if (contract_source.dataset_id, contract_source.data_version, contract_source.index_version) != (
+            order_source.dataset_id, order_source.data_version, order_source.index_version):
+        return
+    contract, contract_facts = _source_row(contract_source, allow_single=True)
+    order, order_facts = _source_row(order_source, allow_single=True)
+    order_fields = ('service_contract_id', 'service_id', 'customer_id')
+    if (not all(isinstance(order.get(field), str) and IDENTIFIER.fullmatch(order[field]) for field in order_fields)
+            or order['service_contract_id'] != contract.get('contract_id')):
+        return
+    buyers, buyer_fields = _contract_parties(contract, ('buyer_id', 'buyer_ids_json'))
+    providers, provider_fields = _contract_parties(contract, ('seller_id', 'seller_ids', 'seller_ids_json'))
+    if not buyers or not providers:
+        return
+    try:
+        contract_link = _native_link(contract_source, trace, call)
+        order_link = _native_link(order_source, trace, call)
+    except (KeyError, TypeError, ValueError):
+        return
+    contract_link.update(sourceIndex=contract_index,
+                         factIds=[contract_facts[field] for field in ('contract_id', *buyer_fields, *provider_fields)],
+                         referenceRole='exact-contract-party-fields')
+    text = f'合同 {contract["contract_id"]} 的登记买方为 {"、".join(buyers)}，签约服务供方为 {"、".join(providers)}。'
+    order_text = f'工单 {order["service_id"]} 对应合同 {order["service_contract_id"]}，登记的受服务客户为 {order["customer_id"]}'
+    for field, label in (('sku_id', '设备型号标识'), ('serial_id', '设备序列号')):
+        if isinstance(order.get(field), str) and IDENTIFIER.fullmatch(order[field]):
+            order_text += f'，{label}为 {order[field]}'
+            order_fields += (field,)
+    order_link.update(sourceIndex=order_index, factIds=[order_facts[field] for field in order_fields],
+                      referenceRole='exact-work-order-party-fields')
+    _append_verified_claim(presentation, text, [contract_link], sources, input_to_model, 'verified-contract-party-input', '\n\n')
+    _append_verified_claim(presentation, order_text + '。', [order_link], sources, input_to_model, 'verified-work-order-party-input')
+
+
+def _release_statement(row, target):
+    from services.multi_scope_evidence import IDENTIFIER, _count, _signed_at
+
+    fields = ('finished_batch_id', 'manufacturing_batch_id', 'qc_id', 'released_at', 'final_good', 'unit')
+    if not set(fields) <= row.keys():
+        return None
+    batch, manufacturing, inspection, instant, quantity, unit = (row[field] for field in fields)
+    if (not all(isinstance(value, str) and IDENTIFIER.fullmatch(value) for value in (batch, manufacturing, inspection))
+            or batch.casefold() != target or not _displayable_cell(unit)):
+        return None
+    try:
+        _signed_at(instant)
+        count = _count(quantity)
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return (f'成品批 {batch} 对应制造批 {manufacturing}，原表放行时刻 {instant}，放行合格数 {count}{unit}，终检单 {inspection}。',
+            fields)
+
+
+def _append_business_review(question, presentation, sources, cited_indices, input_to_model, trace, call):
+    from services.multi_scope_evidence import IDENTIFIER, _signed_at, _single_review_topic, _source_row
+
+    topic = _single_review_topic(question)
+    if topic not in ('放行终检', '工单合同') or re.search(r'排除|剔除|不含|不引用|不用|不要用', question):
+        return
+    named = {match.group().casefold() for match in IDENTIFIER.finditer(question)}
+    if len(named) != 1:
+        return
+    target, = named
+    evidence = {index: _source_row(source, allow_single=True) for index, source in enumerate(sources, 1)}
+    rows = {index: row for index, (row, _) in evidence.items()}
+    if topic == '工单合同':
+        records = _service_statements(target, rows)
+    else:
+        records = []
+        releases = {}
+        for index, row in rows.items():
+            release = _release_statement(row, target)
+            if release:
+                text, fields = release
+                if text not in releases or index in cited_indices:
+                    releases[text] = (index, text, fields, 'production-release')
+            if not isinstance(row.get('object_id'), str) or row['object_id'].casefold() != target:
+                continue
+            category = row.get('qc_type')
+            if not _displayable_cell(category) or not re.search(r'终检|final', category, re.I):
+                continue
+            statement = _inspection_statement(sources[index-1], row, '成品批')
+            if statement and 'quantity_checked' in statement[1]:
+                text, fields = statement
+                records.append((index, f'原表类别为{category}。{text}', (*fields, 'qc_type'), 'final-inspection'))
+        if len(releases) == 1:
+            records.extend(releases.values())
+    verified = []
+    for index, statement, fields, role in records:
+        try:
+            if role == 'final-inspection':
+                _signed_at(rows[index]['measured_at'])
+            link = _native_link(sources[index-1], trace, call)
+        except (KeyError, TypeError, ValueError):
+            continue
+        link.update(sourceIndex=index, factIds=[evidence[index][1][field] for field in fields], referenceRole=f'exact-{role}-fields')
+        verified.append((statement, link, role))
+    if not {link['sourceIndex'] for _, link, _ in verified}.intersection(cited_indices):
+        return
+    if topic == '工单合同':
+        if verified[0][2] != 'service-site':
+            return
+        heading = '\n\n原表服务核对。退款状态需对应退款凭证。\n'
+    else:
+        roles = {role for _, _, role in verified}
+        if 'final-inspection' in roles:
+            heading = '\n\n原表终检核对。单次终检的检查量和实测值仅覆盖本条记录，长期运行需相应记录。\n'
+            if 'production-release' not in roles:
+                heading += '制造放行需另核对同批生产记录。\n'
+        else:
+            heading = '\n\n原表制造放行核对。终检测项、检查量及长期运行情况需相应记录。\n'
+    for statement, link, role in verified:
+        _append_verified_claim(presentation, statement, [link], sources, input_to_model, f'verified-{role}-input', heading)
+        heading = '\n'
+
+
+def _append_inspection_handoff(presentation, sources, cited_indices, input_to_model, trace, call):
+    from services.multi_scope_evidence import IDENTIFIER, _source_row
+
+    matching = [index for index in cited_indices if sources[index-1].provenance.get('finalInspectionHandoffRecord')]
+    if len(matching) != 1:
+        return
+    index = matching[0]
+    source = sources[index-1]
+    row, facts = _source_row(source, allow_single=True)
+    labels = ('qc_id','object_id','item','aggregation_method','quantity_checked_unit','unit')
+    measurements = ('lower_limit','min_value','actual_value','max_value','upper_limit')
+    counts = ('qualified_count','quantity_checked')
+    if not all(_displayable_cell(row.get(field)) for field in labels) or not set((*measurements, *counts)) <= row.keys():
+        return
+    if not all(IDENTIFIER.fullmatch(row[field]) for field in ('qc_id','object_id')):
+        return
+    try:
+        lower, minimum, actual, maximum, upper = (Decimal(str(row[field])) for field in measurements)
+        qualified, checked = (Decimal(str(row[field])) for field in counts)
+        if not all(value.is_finite() for value in (lower, minimum, actual, maximum, upper, qualified, checked)):
+            return
+        if lower > upper or not (minimum <= actual <= maximum) or not (0 <= qualified <= checked):
+            return
+        link = _native_link(source, trace, call)
+    except (InvalidOperation, KeyError, TypeError, ValueError):
+        return
+    unit = row['unit']
+    count_unit = row['quantity_checked_unit']
+    statement = (f'成品批 {row["object_id"]} 的终检记录 {row["qc_id"]}，测项为{row["item"]}。'
+                 f'检查 {checked} {count_unit}，合格 {qualified} {count_unit}。原表统计方法为{row["aggregation_method"]}，'
+                 f'汇总值为 {actual} {unit}。实测区间为 {minimum} 至 {maximum} {unit}，'
+                 f'判定上下限为 {lower} 至 {upper} {unit}。')
+    link.update(sourceIndex=index, factIds=[facts[field] for field in (*labels,*measurements,*counts)],
+                referenceRole='exact-inspection-handoff-fields')
+    _append_verified_claim(presentation, statement, [link], sources, input_to_model,
+                           'verified-inspection-handoff-input', '\n\n原表终检交接记录。\n')
+
+
+def _user_text_sha(call, text):
+    text_sha = hashlib.sha256(text.encode()).hexdigest()
+    return text_sha if any(part.get('textSha256') == text_sha for message in call['request']['messages']
+                           if message['role'] == 'user' and isinstance(message['content'], list)
+                           for part in message['content']) else None
+
+
+def _fulfillment_parts(question, sources, call):
+    from services.multi_scope_evidence import IDENTIFIER, _count, _signed_at, _single_review_topic, _source_row
+    from services.multi_scope_evidence import computation_prompt, fulfillment
+
+    named = {match.group().casefold() for match in IDENTIFIER.finditer(question)}
+    if (_single_review_topic(question) != '订单签收' or len(named) != 1
+            or re.search(r'排除|剔除|不含|不引用|不用|不要用', question)):
+        return None
+    calculations = fulfillment(question, sources)
+    reconciliation = next((fact for fact in calculations if fact['operation'] == 'deadline_receipt_sum'), None)
+    computation_sha = None
+    if reconciliation:
+        computation_sha = _user_text_sha(call, computation_prompt(question, sources))
+        require(computation_sha, 'CLAIM_FULFILLMENT_COMPUTATIONS_NOT_TRANSMITTED')
+    commitment_fields = ('order_line_id', 'quantity', 'unit', 'due_at')
+    receipt_fields = ('order_line_id', 'delivery_line_id', 'signed_quantity', 'unit', 'signed_at')
+    records, shown = [], set()
+    has_commitment = False
+    for index, source in enumerate(sources, 1):
+        row, facts = _source_row(source, allow_single=True)
+        order = row.get('order_line_id')
+        if not isinstance(order, str) or order.casefold() not in named or not IDENTIFIER.fullmatch(order):
+            continue
+        commitment = set(commitment_fields) <= row.keys()
+        has_commitment |= commitment
+        if reconciliation and index not in reconciliation['sourceIndices']:
+            continue
+        fields = commitment_fields if commitment else receipt_fields
+        if not set(fields) <= row.keys() or not _displayable_cell(row['unit']):
+            continue
+        unit = row['unit']
+        if commitment:
+            _signed_at(row['due_at'])
+            text = f'订单行 {order} 承诺 {_count(row["quantity"])}{unit}，交期 {row["due_at"]}。'
+        else:
+            _signed_at(row['signed_at'])
+            delivery = row['delivery_line_id']
+            if not isinstance(delivery, str) or not IDENTIFIER.fullmatch(delivery):
+                continue
+            text = f'交付行 {delivery}（订单行 {order}）于 {row["signed_at"]} 签收 {_count(row["signed_quantity"])}{unit}。'
+        if text not in shown:
+            shown.add(text)
+            records.append((index, text, [facts[field] for field in fields]))
+    if reconciliation:
+        require({index for index, _, _ in records} == set(reconciliation['sourceIndices']),
+                'CLAIM_FULFILLMENT_SOURCE_ROWS_INCOMPLETE')
+    elif has_commitment or not records:
+        return None
+    return records, calculations, computation_sha
+
+
+def finish_fulfillment(question, answer, result, sources, trace, *, allow_prose):
+    """Retain signed rows and calculations even when the model's narrative is withheld."""
+    if not trace or not sources or any(not source.evidence_bundle or is_user(source) for source in sources):
+        return None
+    calls = trace.data.get('modelCalls', [])
+    if not calls or calls[0].get('status') != 'response_received' or calls[0].get('purpose'):
+        return None
+    call = calls[0]
+    parts = _fulfillment_parts(question, sources, call)
+    if parts is None:
+        return None
+    require(hashlib.sha256(question.encode()).hexdigest() == trace.data['questionSha256'], 'CLAIM_FULFILLMENT_QUESTION_CHANGED')
+    records, operations, computation_sha = parts
+    _, input_to_model = _model_slots(sources, call)
+    native_links = {index: _native_link(sources[index-1], trace, call) for index, _, _ in records}
+    presentation = None
+    if allow_prose:
+        try:
+            presentation = _compose(question, answer, result, sources, [], trace)
+        except (KeyError, TypeError, ValueError):
+            pass
+    if presentation is None:
+        proof = dict(recipeVersion='verified-fulfillment-1', modelCallId=call['callId'],
+                     modelRequestBodySha256=call['requestBodySha256'], modelToFinalSourceIndices={})
+        presentation = dict(answer='', claims=[], sources=[], presentationProof=proof,
+                            modelInterpretationVerified=False, generationStatus='partial',
+                            notice='已交付原表签收依据。模型解释未纳入本次答复。')
+    presentation['presentationProof']['fulfillmentModelCallId'] = call['callId']
+    if computation_sha:
+        presentation['presentationProof']['multiScopeComputationsSha256'] = computation_sha
+    heading = '\n\n原表签收核对。\n' if presentation['answer'] else ''
+    if not operations:
+        heading += '当前来源缺少订单承诺和交期，无法核对是否按期收齐或计算提前时间。\n'
+        presentation['generationStatus'] = 'partial'
+    for index, statement, facts in records:
+        link = dict(native_links[index], sourceIndex=index, factIds=facts, referenceRole='exact-fulfillment-fields')
+        _append_verified_claim(presentation, statement, [link], sources, input_to_model, 'verified-fulfillment-input', heading)
+        heading = '\n'
+    for operation in operations:
+        links = []
+        for index in operation['sourceIndices']:
+            facts = [fact for fact in operation['factIds'] if fact in sources[index-1].fact_ids]
+            require(facts, 'CLAIM_FULFILLMENT_CALCULATION_FACTS_MISSING')
+            links.append(dict(native_links[index], sourceIndex=index, factIds=facts, referenceRole='fulfillment-calculation-input'))
+        value = operation['exactValue'] + operation['unit']
+        if operation['operation'] == 'deadline_receipt_sum':
+            state = '已达到承诺数量' if operation['orderFulfilledAtDeadline'] else '现有签收凭证不足以确认收齐'
+            statement = f'按交期核算签收合计 {value}，{state}。'
+        else:
+            direction = '提前' if operation['early'] else '晚于交期'
+            statement = ('累计达到承诺数量的时刻与交期相同。' if operation['exactValue'] == '0'
+                         else f'累计达到承诺数量的时刻{direction} {value}。')
+        _append_verified_claim(presentation, statement, links, sources, input_to_model, 'verified-fulfillment-calculation',
+                               operation={**operation, 'inputSourceIndices': operation['sourceIndices'],
+                                          'sourceIndices': [presentation['presentationProof']['modelToFinalSourceIndices']
+                                                            [str(input_to_model[index])] for index in operation['sourceIndices']]})
+    presentation['presentationProof']['finalAnswerSha256'] = hashlib.sha256(presentation['answer'].encode()).hexdigest()
+    trace.event('fulfillmentPresentation', presentation)
+    return presentation
+
+
 def _compose(question,answer,result,sources,image_parts,trace):
     """Recompute the registered display using native proofs and the real response."""
     from services.ordered_text_report import PURPOSE, row_ids, verify as verify_ordered_report
@@ -416,6 +1256,14 @@ def _compose(question,answer,result,sources,image_parts,trace):
     )
     from services.user_input_evidence import image_label_selection
     quantity_views = {}
+    if trace.data.get('scopes'):
+        from services.multi_scope_evidence import computation_prompt
+        view = computation_prompt(question,sources)
+        if view:
+            view_sha = _user_text_sha(call, view)
+            require(view_sha,
+                    'CLAIM_PROSE_MULTISCOPE_COMPUTATIONS_NOT_TRANSMITTED')
+            quantity_views['multiScopeComputationsSha256'] = view_sha
     for render, key, error in (
         (batch_quantity_summary, 'batchQuantityViewSha256', 'CLAIM_PROSE_BATCH_QUANTITY_VIEW_NOT_TRANSMITTED'),
         (purchase_quantity_summary, 'purchaseQuantityViewSha256', 'CLAIM_PROSE_PURCHASE_QUANTITY_VIEW_NOT_TRANSMITTED'),
@@ -541,7 +1389,12 @@ def _compose(question,answer,result,sources,image_parts,trace):
     final_sources=[sources[i-1].model_copy(update={'provenance':{**sources[i-1].provenance,'modelSourceIndex':input_to_model[i],'finalSourceIndex':mapping[i],'citationScopeCheck':'actual-input-binding-only'}}).model_dump(mode='json') for i in indices]
     presentation=dict(version=VERSION,answer=final,claims=[claim],sources=final_sources,generationStatus='source_interpretation_unverified',modelInterpretationVerified=False,
         notice='引用已关联实际读取和入模的文字或图片；模型解释的事实语义尚未认证。',verificationScope='Native receipts, exact actual contexts/images, declared citations and final offsets only; no semantic correctness or independent corroboration claim.',
-        presentationTransforms=display_edits,presentationProof=proof)
+        presentationTransforms=display_edits,presentationProof={**proof, 'modelToFinalSourceIndices': dict(proof['modelToFinalSourceIndices'])})
+    _append_material_receipts(presentation, sources, indices, input_to_model, trace, call)
+    _append_service_contract_parties(presentation, sources, indices, input_to_model, trace, call)
+    _append_business_review(question, presentation, sources, indices, input_to_model, trace, call)
+    _append_record_comparison(question, presentation, sources, indices, input_to_model, trace, call)
+    _append_inspection_handoff(presentation, sources, indices, input_to_model, trace, call)
     return presentation
 
 
@@ -550,10 +1403,15 @@ def verify_presentation(question,answer,result,sources,image_parts,trace,present
     expected=_compose(question,answer,result,sources,image_parts,trace)
     supplied=dict(presentation);previous=supplied.pop('finalClaimCheck',None)
     require(same(supplied,expected),'CLAIM_PROSE_FINAL_PRESENTATION_CHANGED')
-    final=expected['answer'];claims=expected['claims'];require(len(claims)==1,'CLAIM_PROSE_FINAL_CLAIM_COUNT_CHANGED')
-    claim=claims[0]
-    require(claim['offsetUnit']=='unicode-code-points' and claim['answerStart']==len(HEADER) and claim['answerEnd']==len(final)
-        and final[claim['answerStart']:claim['answerEnd']]==claim['text'],'CLAIM_PROSE_FINAL_CLAIM_SPAN_CHANGED')
+    final=expected['answer'];claims=expected['claims']
+    require(claims and claims[0]['answerStart']==len(HEADER) and claims[-1]['answerEnd']==len(final),
+            'CLAIM_PROSE_FINAL_CLAIM_SPAN_CHANGED')
+    previous_end = len(HEADER)
+    for claim in claims:
+        start,end=claim['answerStart'],claim['answerEnd']
+        require(claim['offsetUnit']=='unicode-code-points' and previous_end<=start<end<=len(final)
+                and final[start:end]==claim['text'],'CLAIM_PROSE_FINAL_CLAIM_SPAN_CHANGED')
+        previous_end=end
     check=dict(version=FINAL_DISPLAY_VERSION,status='VERIFIED_NATIVE_INPUTS_REGISTERED_DISPLAY_AND_EXACT_SPANS',
         answerSha256=hashlib.sha256(final.encode()).hexdigest(),claimsSha256=hashlib.sha256(canonical(claims).encode()).hexdigest(),
         presentationTransformsSha256=hashlib.sha256(canonical(expected['presentationTransforms']).encode()).hexdigest(),

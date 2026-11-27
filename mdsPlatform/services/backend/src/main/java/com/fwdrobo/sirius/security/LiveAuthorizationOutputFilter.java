@@ -23,8 +23,8 @@ public final class LiveAuthorizationOutputFilter extends OncePerRequestFilter {
     int status=guarded.denial.getStatusCode().value();response.reset();response.setStatus(status);
     response.setCharacterEncoding("UTF-8");response.setContentType("application/json");
     response.setHeader("Cache-Control","no-store, private");response.setHeader("Pragma","no-cache");
-    json.writeValue(response.getOutputStream(),Map.of("success",false,"status",status,
-      "errorType",status==401?"ACCESS_REVOKED_OR_EXPIRED":status==503?"AUTHORITY_UNAVAILABLE":"AUTHORIZATION_CHANGED_DURING_OUTPUT"));
+    String code=status==401?"ACCESS_REVOKED_OR_EXPIRED":status==503?"AUTHORITY_UNAVAILABLE":"AUTHORIZATION_CHANGED_DURING_OUTPUT";
+    json.writeValue(response.getOutputStream(),com.fwdrobo.sirius.handler.ApiErrors.body(status,code,null));
     return;
    }
    throw error;

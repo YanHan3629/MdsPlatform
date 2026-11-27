@@ -140,6 +140,8 @@ SIGNOFF_EVENT_TYPES = {'签收', '客户签收', '完成签收', '交付签收',
 MAX_SHIPMENT_SUMMARY_TABLES = 3
 ROAD_TRANSPORT_TIMES = ('loading_started_at', 'loading_completed_at', 'warehouse_outbound_at',
                         'departed_at', 'arrived_at', 'signed_at')
+WAREHOUSE_HANDOFF = {'movement_id', 'batch_id', 'movement_type', 'paired_movement_id', 'quantity_change', 'occurred_at'}
+PRODUCT_DIMENSIONS = {'width_mm', 'depth_mm', 'height_mm'}
 FOLLOW_UP = re.compile(r'这(?:一)?批|那(?:一)?批|该批|同一批|这票|那票|该票|这(?:笔|条|单)|那(?:笔|条|单|复测)|它(?:配套|的)|'
                        r'(?:刚才|前一轮|上一轮|上次)(?:的)?(?:那|这|同一)?(?:批|票|笔|条|单|记录|工单|订单|产品|型号|对象)|'
                        r'(?:刚才|前一轮|上一轮|上次)(?:查|问|看的|的)?(?:那|这)?(?:一)?(?:项|行|个|份|结果)')
@@ -162,6 +164,7 @@ PRODUCTION_RELEASE = {'finished_batch_id', 'sku_id', 'qc_id', 'tested_at', 'rele
 PRODUCTION_DURATION_FIELDS = {'tested_at', 'released_at'}
 PRODUCTION_RECORD_KEYS = {'manufacturing_batch_id', 'finished_batch_id', 'sku_id', 'qc_id'}
 PRODUCTION_FINAL_INSPECTION = {'object_id', 'sku_id', 'qc_id', 'qc_type', 'measured_at', 'item', 'result'}
+PRODUCTION_INSPECTION_MEASUREMENT = {'actual_value', 'unit'}
 INSPECTION_QUANTITY_FIELDS = {'object_id', 'qc_id', 'qc_type', 'quantity_checked', 'quantity_checked_unit', 'qualified_count'}
 REPLENISHMENT_LINK_FIELDS = {'object_id', 'qc_id', 'related_qc_id', 'qc_type', 'sku_id', 'item', 'measured_at', 'disposition'}
 REPLENISHMENT_VALUE_FIELDS = {'quantity_checked', 'quantity_checked_unit', 'lower_limit', 'unit'}
@@ -180,6 +183,7 @@ DRAIN_TIMING_FIELDS = {'service_id', 'sku_id', 'drain_timing_method', *DRAIN_CLO
 SERVICE_CONTRACT_LINK = {'service_id', 'service_contract_id', 'customer_id'}
 SERVICE_REGISTRATION_FIELDS = {'service_id', 'service_contract_id', 'serial_id', 'delivery_line_id'}
 CONTRACT_BUYER_FIELDS = {'buyer_id', 'buyer_ids_json'}
+CONTRACT_PROVIDER_FIELDS = {'seller_id', 'seller_ids', 'seller_ids_json'}
 COOLING_RATING = {'rated_cooling_w', 'rated_cooling_input_w', 'spec_condition'}
 RATED_INPUT_POWER_FIELDS = {'rated_input_power_w', 'rated_cooling_input_w', 'rated_heating_input_w'}
 SALES_FULFILLMENT = {'order_line_id', 'sku_id', 'quantity', 'unit', 'due_at',
@@ -358,6 +362,9 @@ def _fields(question, table):
         for required in (PRODUCTION_RELEASE, PRODUCTION_FINAL_INSPECTION):
             if required <= names:
                 reconciliation_fields.update(required)
+        if (PRODUCTION_FINAL_INSPECTION | PRODUCTION_INSPECTION_MEASUREMENT) <= names and re.search(
+                r'温差|实测|测量|测值', question):
+            reconciliation_fields.update(PRODUCTION_INSPECTION_MEASUREMENT | (names & {'aggregation_method'}))
     if PRODUCTION_RELEASE <= names and _production_release_question(question):
         reconciliation_fields.update(PRODUCTION_RELEASE)
     if CONTRACT_SETTLEMENT <= names and _contract_settlement_question(question):
@@ -389,6 +396,11 @@ def _fields(question, table):
         reconciliation_fields.update(ORDER_ALLOCATION)
     if _road_transport_question(question) and set(ROAD_TRANSPORT_TIMES) <= names:
         reconciliation_fields.update(ROAD_TRANSPORT_TIMES)
+    if WAREHOUSE_HANDOFF <= names and asks_warehouse_handoff(question):
+        reconciliation_fields.update(WAREHOUSE_HANDOFF | (names & {'source_document_id', 'slot_id', 'note', 'unit'}))
+    if (PRODUCT_DIMENSIONS <= names and names & {'sku_id', 'model'}
+            and re.search(r'尺寸|外形', question) and re.search(r'更宽|更高|差多少|相差', question)):
+        reconciliation_fields.update(PRODUCT_DIMENSIONS | (names & {'sku_id', 'model', 'installation_type'}))
     if _fulfillment_question(question):
         if SALES_FULFILLMENT <= names:
             reconciliation_fields.update(SALES_FULFILLMENT)
@@ -418,6 +430,10 @@ def _fields(question, table):
                            if field['name'] in quantity_fields and field.get('unitField'))
         selected.extend(field for field in table['fields'] if field['name'] in unit_fields - names)
     return selected
+
+
+def asks_warehouse_handoff(question):
+    return bool(re.search(r'出库|运输交接', question) and re.search(r'拣货|暂存|移位|移库', question))
 
 
 def _model_ids(entities, tables):
@@ -1341,6 +1357,7 @@ def _service_registration_question(question):
 
 def _service_contract_buyers(client, scope, tables, assets, tokens, aliases, trace):
     reader = Reader(client, scope)
+    execution_identity = any(aliases.get(token,token).upper().startswith(('SKU-', 'SVC-', 'SN-')) for token in tokens)
     work_orders = []
     for table in tables:
         fields = {field['name'] for field in table['fields']}
@@ -1353,7 +1370,8 @@ def _service_contract_buyers(client, scope, tables, assets, tokens, aliases, tra
         if not all(token in selected or aliases.get(token) in selected for token in tokens):
             continue
         asset = assets[str(table['assetId'])]
-        columns = sorted(SERVICE_CONTRACT_LINK | {key['field'] for key in selectors})
+        detail = fields & {'serial_id', 'sku_id'} if execution_identity else set()
+        columns = sorted(SERVICE_CONTRACT_LINK | detail | {key['field'] for key in selectors})
         metadata = reader.metadata(asset)
         rows, _ = scan_table(reader, asset, table, set(columns), columns, max_rows=MAX_BUSINESS_ROWS)
         work_orders.extend((asset, table, metadata, columns, row) for row in _match_rows(rows, selectors)
@@ -1372,7 +1390,8 @@ def _service_contract_buyers(client, scope, tables, assets, tokens, aliases, tra
         if 'contract_id' not in fields or not fields & CONTRACT_BUYER_FIELDS:
             continue
         asset = assets[str(table['assetId'])]
-        columns = sorted({'contract_id'} | fields & (CONTRACT_BUYER_FIELDS | {'contract_type', 'contract_nature'}))
+        detail = CONTRACT_PROVIDER_FIELDS if execution_identity else set()
+        columns = sorted({'contract_id'} | fields & (CONTRACT_BUYER_FIELDS | detail | {'contract_type', 'contract_nature'}))
         metadata = reader.metadata(asset)
         rows, _ = scan_table(reader, asset, table, set(columns), columns, max_rows=MAX_BUSINESS_ROWS)
         contracts.extend((asset, table, metadata, columns, row) for row in _match_rows(rows, [contract_key]))

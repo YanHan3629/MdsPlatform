@@ -41,7 +41,9 @@
     const priorRoot=bound;
     revision++;abort.abort();abort=new AbortController();identity=null;activation=null;checking=null;rotating=null;
     if(drop){access='';refresh='';sessionGeneration='';persist();}
-    for(const key of ['qaIndex','qaDraft','retrievalDraft'])sessionStorage.removeItem(key);
+    if(reason!=='page-hidden'){
+      for(const key of ['qaIndex','qaDraft','retrievalDraft','qaSelection','retrievalSelection'])sessionStorage.removeItem(key);
+    }
     localStorage.removeItem('activeBusiness');
     emit(reason);
     if(announce){const current=bound;bound=priorRoot;broadcast(reason);bound=current;}
@@ -57,8 +59,53 @@
       throw new Error('后端地址已变化，请重新登录。');
     return url.href;
   }
-  async function errorMessage(response,fallback) {
-    try {const body=await response.json();return body.detail||body.message||body.errorType||fallback;} catch {return fallback;}
+  const responseMessages = {
+    400:'请核对必填项和输入格式后重试。',401:'登录已失效，请重新登录。',
+    403:'当前账号无法访问此资源，请核对授权或返回列表。',
+    404:'当前账号无法访问此资源，请核对授权或返回列表。',
+    408:'处理超时，请稍后重试。',409:'记录或授权已变化，请刷新后重试。',
+    410:'该链接或授权已到期，请重新获取。',412:'授权版本已变化，请刷新后重试。',
+    413:'文件或请求超出大小限制，请缩小后重试。',415:'格式不受支持，请核对文件类型。',
+    422:'资料无法解析，请检查文件内容和格式。',428:'请刷新授权后重新提交。',
+    429:'请求较多，请稍后重试。',502:'后端服务暂时无法连接，请稍后重试。',
+    503:'服务暂时不可用，请稍后重试。',504:'处理超时，请缩小范围后重试。'
+  };
+  function requestNumber(value) {
+    return typeof value==='string'&&/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value)?value:null;
+  }
+  function apiError(message,status,code,requestId) {
+    return Object.assign(new Error(requestId?`${message} 请求编号 ${requestId}`:message),{status,code,requestId});
+  }
+  async function readResponse(response,method,args=[]) {
+    try { return await response[method](...args); }
+    catch(error) {
+      if(error?.name==='AbortError')throw error;
+      if(error?.name==='TimeoutError')throw new DOMException('连接或处理超时，请稍后重试。','TimeoutError');
+      const malformed=method==='json'&&error?.name==='SyntaxError';
+      throw apiError(malformed?'平台返回的响应格式无效，请刷新页面后重试。':'读取平台响应失败，请检查网络或访问隧道后重试。',
+        response.status,malformed?'INVALID_RESPONSE_FORMAT':'RESPONSE_READ_FAILED',requestNumber(response.headers.get('X-Request-Id')));
+    }
+  }
+  async function responseError(response, fallback) {
+    let body;
+    try { body=await response.json(); } catch {}
+    const status=response.status;
+    const requestId=requestNumber(body?.requestId)||requestNumber(response.headers.get('X-Request-Id'));
+    const allowedDetail=typeof body?.message==='string' && body.message.length<=300 &&
+      /^\p{Script=Han}/u.test(body.message) && !/[<>\r\n]/.test(body.message) &&
+      !/\b(?:[\w.$]*(?:Exception|Error)|Traceback)\b|[A-Za-z]:[\\/]/i.test(body.message) &&
+      status!==403&&status!==404&&(status<500||requestId);
+    const message=allowedDetail?body.message:responseMessages[status]||fallback||'请求处理失败，请稍后重试。';
+    return apiError(message,status,body?.errorType,requestId);
+  }
+  async function networkFetch(url, options) {
+    try { return await fetch(url, options); }
+    catch(error) {
+      if(error.name==='AbortError')throw error;
+      if(error.name==='TimeoutError')throw new DOMException('连接或处理超时，请稍后重试。','TimeoutError');
+      if(error instanceof TypeError)throw new Error('无法连接平台，请检查网络或访问隧道后重试。');
+      throw error;
+    }
   }
   async function rotate(expected) {
     if(!refresh||expected!==revision)return false;
@@ -74,9 +121,9 @@
           return false;
         }
         if(!response.ok)throw new Error('服务器暂时无法刷新会话。');
-        const value=await response.json();
+        const value=await readResponse(response,'json');
         if(expected!==revision||old!==refresh||!checkSessionGeneration())throw interrupted();
-        if(typeof value.token!=='string'||typeof value.refreshToken!=='string')throw new Error('刷新会话响应无效。');
+        if(typeof value?.token!=='string'||typeof value.refreshToken!=='string')throw new Error('刷新会话响应无效。');
         access=value.token;refresh=value.refreshToken;persist();return true;
       } catch(error) {
         if(expected!==revision)throw interrupted();
@@ -91,7 +138,7 @@
     const expected=revision, sentAccess=access, headers=new Headers(options.headers||{});
     headers.set('Authorization','Bearer '+sentAccess);
     const signal=options.signal?AbortSignal.any([options.signal,abort.signal]):abort.signal;
-    const response=await fetch(scopedUrl(url),{...options,headers,signal,credentials:'omit',redirect:'error'});
+    const response=await networkFetch(scopedUrl(url),{...options,headers,signal,credentials:'omit',redirect:'error'});
     if(expected!==revision||!checkSessionGeneration())throw interrupted();
     if(response.status===401&&allowRotate) {
       const renewed=sentAccess!==access||await rotate(expected);
@@ -113,9 +160,9 @@
           invalidate('session-invalid',{announce:true});return null;
         }
         if(!result.response.ok)throw new Error('服务器暂时无法验证身份。');
-        const value=await result.response.json();
+        const value=await readResponse(result.response,'json');
         if(result.expected!==revision||!checkSessionGeneration())throw interrupted();
-        if(!value.userId||!value.orgId||!Array.isArray(value.operations))throw new Error('身份验证响应无效。');
+        if(!value?.userId||!value.orgId||!Array.isArray(value.operations))throw new Error('身份验证响应无效。');
         const previous=identity;
         const changed=previous&&(previous.userId!==value.userId||previous.orgId!==value.orgId||
           previous.permissionVersion!==value.permissionVersion||previous.policyVersion!==value.policyVersion);
@@ -137,9 +184,8 @@
     return new Proxy(response,{get(target,key){
       if(['json','text','blob','arrayBuffer','formData'].includes(key))return async(...args)=>{
         if(expected!==revision||!checkSessionGeneration())throw interrupted();
-        const value=await target[key](...args);
-        if(expected!==revision||!checkSessionGeneration())throw interrupted();
-        return value;
+        try { return await readResponse(target,key,args); }
+        finally { if(expected!==revision||!checkSessionGeneration())throw interrupted(); }
       };
       const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;
     }});
@@ -148,11 +194,11 @@
     if(!identity||!access)throw new Error('请先登录数据空间账号。');
     const result=await rawAccess(url,options);
     if(!result.response.ok) {
-      const status=result.response.status, message=await errorMessage(result.response,'请求失败（'+status+'）。');
+      const status=result.response.status, error=await responseError(result.response);
       if(result.expected!==revision||!checkSessionGeneration())throw interrupted();
       if(status===401)invalidate('session-invalid',{announce:true});
       else if(status===403||status===404)void checkIdentity();
-      const error=new Error(message);error.status=status;throw error;
+      throw error;
     }
     const permission=result.response.headers.get('X-Identity-Permission-Version');
     const policy=result.response.headers.get('X-Authorization-Policy-Version');
@@ -219,19 +265,19 @@
     if(captured.access&&!await revokeCaptured(captured.access,captured.refresh,captured.root))
       throw new Error('旧会话撤销未确认，请恢复连接后重试。');
     if(expected!==revision||startingGeneration!==latestGeneration(root))throw interrupted();
-    const response=await fetch(root+'/auth/login',{method:'POST',credentials:'omit',redirect:'error',signal:timedSignal(controller.signal),
+    const response=await networkFetch(root+'/auth/login',{method:'POST',credentials:'omit',redirect:'error',signal:timedSignal(controller.signal),
       headers:{'Content-Type':'application/json'},body:JSON.stringify(credentials)});
-    if(response.status>=500)throw new Error(await errorMessage(response,'服务器暂时无法登录，请重试。'));
-    const value=await response.json();
+    const outcome=response.ok?await readResponse(response,'json'):await responseError(response,'登录失败，请核对账号和密码。');
     if(expected!==revision||startingGeneration!==latestGeneration(root))throw interrupted();
-    if(!response.ok)throw new Error(value.detail||value.message||value.errorType||'登录失败。');
+    if(!response.ok)throw outcome;
+    const value=outcome;
     bound=root;sessionGeneration=startingGeneration;
-    if(value.activationRequired) {
+    if(value?.activationRequired) {
       if(typeof value.activationToken!=='string')throw new Error('账号激活凭据无效。');
       activation={token:value.activationToken,username:value.user?.username||credentials.userName,root};emit('activation-required');
       return {activationRequired:true};
     }
-    if(typeof value.token!=='string'||!value.token)throw new Error('登录响应缺少有效会话。');
+    if(typeof value?.token!=='string'||!value.token)throw new Error('登录响应缺少有效会话。');
     access=value.token;refresh=value.refreshToken||'';recordSwitch('login');
     const verified=await checkIdentity({force:true});
     if(!verified)throw new Error('登录身份未能通过服务端确认，请重新登录。');
@@ -241,11 +287,11 @@
   async function activate(newPassword) {
     if(!activation||!checkSessionGeneration())throw new Error('请先使用待激活账号登录。');
     const pending=activation,expected=revision;
-    const response=await fetch(pending.root+'/auth/activate',{method:'POST',credentials:'omit',redirect:'error',signal:timedSignal(abort.signal),
+    const response=await networkFetch(pending.root+'/auth/activate',{method:'POST',credentials:'omit',redirect:'error',signal:timedSignal(abort.signal),
       headers:{Authorization:'Bearer '+pending.token,'Content-Type':'application/json'},body:JSON.stringify({newPassword})});
-    const value=await response.json();
+    const error=response.ok?null:await responseError(response,'激活失败，请核对密码要求后重试。');
     if(expected!==revision||activation!==pending||!checkSessionGeneration())throw interrupted();
-    if(!response.ok)throw new Error(value.detail||value.message||value.errorType||'激活失败。');
+    if(error)throw error;
     activation=null;invalidate('activated');recordSwitch('activation');return pending.username;
   }
   async function policyChanged() {

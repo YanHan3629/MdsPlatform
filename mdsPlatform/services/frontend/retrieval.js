@@ -1,7 +1,10 @@
 (() => {
   const session = window.dataSpaceSession;
   let capabilities = null, capabilityKey = '', scopeKey = '', loadSequence = 0, requestSequence = 0, controller = null;
-  let conditions = [], conditionFields = [], authRevision = session.revision;
+  let conditions = [], conditionFields = [], authRevision = session.revision, perScope = [], scopeLoad;
+  const selected = ()=>session.selectedScopes('data.search');
+  const scopeIdentity = rows=>JSON.stringify(rows.map(window.mdsScopePicker.frozen));
+  const isMulti = ()=>selected().length>1;
   const operationLabels = {search:'浏览 / 检索',filter:'条件筛选',sort:'排序',count:'计数',sum:'求和',min:'最小值',max:'最大值',average:'样本平均',time_weighted_average:'时间加权平均',duration_above:'超阈值时长',compare_periods:'时段比较',trend_start_end:'起止趋势',trend_regression:'回归趋势',trend_monotonic:'单调趋势',similar_shape:'同空间近似相似'};
   const operators = {eq:'等于',in:'集合（多个值 OR）',gt:'大于',gte:'大于等于',lt:'小于',lte:'小于等于',between:'闭区间',is_null:'已记录为 null',not_null:'已记录且非 null',contains:'数组包含成员'};
   const ops = {all:['search'],text:['search','filter'],visual:['search','filter'],structured:['search','filter','sort','count','sum','min','max','average'],timeseries:['search','count','sum','min','max','average','time_weighted_average','duration_above','compare_periods','trend_start_end','trend_regression','trend_monotonic','similar_shape'],geometry:['search','filter','similar_shape']};
@@ -95,13 +98,13 @@
     let html='';
     if(['text','visual'].includes(kind))html+=label('retrievalDocumentStage','文档 / 图像关联业务类型',selectHtml('retrievalDocumentStage'),true)+'<p class="full" id="retrievalDocumentTimeInfo"></p>';
     if(kind==='text')html+=label('retrievalQueryImage','可选查询图片（图搜文，最多10 MB）','<input id="retrievalQueryImage" type="file" accept="image/png,image/jpeg,image/webp" />',true);
-    if(kind==='structured'){
+    if(kind==='structured'&&!isMulti()){
       html+=label('retrievalTable','业务表 / 工作表',selectHtml('retrievalTable'),true);
       if(['sum','min','max','average','sort'].includes(operation))html+=label('retrievalField',operation==='sort'?'排序字段':'统计字段',selectHtml('retrievalField'));
       if(['sum','min','max','average'].includes(operation))html+='<div id="retrievalAggregateUnitControl"></div>';
       if(operation==='sort')html+=label('retrievalDescending','排序方向','<select id="retrievalDescending"><option value="false">升序（空值最后）</option><option value="true">降序（空值最后）</option></select>');
     }
-    if(kind==='timeseries'){
+    if(kind==='timeseries'&&!isMulti()){
       html+=label('retrievalSeries','序列与来源文件',selectHtml('retrievalSeries'),true)+label('retrievalMetric','实际测量指标',selectHtml('retrievalMetric'));
       html+='<p id="retrievalSeriesInfo" class="full"></p>';
       if(operation!=='similar_shape')html+=label('retrievalTimeStart','开始时间（来源时区）','<input id="retrievalTimeStart" type="datetime-local" step="1" />')+label('retrievalTimeEnd','结束时间（不包含端点）','<input id="retrievalTimeEnd" type="datetime-local" step="1" />');
@@ -120,7 +123,7 @@
       $('#retrievalDocumentTimeInfo').textContent=!stage?'选择具体业务类型后，才提供已核验的事件时间或关联上下文条件。图像关联时间不代表拍摄时间。':dates.some(field=>field.timeRole==='actual_business_event')?'时间字段来自已核验的同一业务记录；有效期/约定期限另标为关联上下文，均不代表图片拍摄时间。':'此类型未登记独立实际事件时间。有效期、记录创建时间等如有登记，只作为关联上下文。';
       $('#retrievalDocumentStage').onchange=()=>{invalidate();renderConditions();saveDraft();renderSpecific();};
     }
-    if(kind==='structured'){
+    if(kind==='structured'&&!isMulti()){
       const ids=new Set(assets().map(a=>a.assetId));
       select('retrievalTable',(capabilities?.tables||[]).filter(t=>ids.has(t.assetId)).map(t=>({value:t.tableId,label:`${t.logicalPath} · ${JSON.stringify(t.locator)} · ${t.rowCount}行`})),null,saved.retrievalTable);
       if($('#retrievalField'))select('retrievalField',(table()?.fields||[]).filter(f=>operation==='sort'||f.aggregations.includes(operation)).map(f=>({value:f.name,label:`${f.description} (${f.name})${f.unit?' · '+f.unit:''}${f.type==='mixed'&&operation!=='sort'?' · 仅数值参与计算':''}`})),null,saved.retrievalField);
@@ -131,7 +134,7 @@
       }
       $('#retrievalTable').onchange=()=>{invalidate();renderSpecific();saveDraft();};
     }
-    if(kind==='timeseries'){
+    if(kind==='timeseries'&&!isMulti()){
       const ids=new Set(assets().map(a=>a.assetId)), unique=new Map();
       (capabilities?.series||[]).filter(s=>ids.has(s.assetId)).forEach(s=>unique.set(s.assetId+'|'+s.seriesId,s));
       select('retrievalSeries',[...unique].map(([key,s])=>({value:key,label:`${s.seriesId} · ${s.logicalPath}`})),null,saved.retrievalSeries);
@@ -146,16 +149,17 @@
     for(const [id,value]of Object.entries(saved)){const e=$('#'+id);if(e&&(e.tagName!=='SELECT'||['retrievalDescending','retrievalScaleInvariant','retrievalRotationInvariant'].includes(id)))e.value=value;}
     renderConditions();
   }
-  function renderType(reset=false){
-    invalidate();if(reset)conditions=[];
-    const kind=type();select('retrievalOperation',ops[kind].map(op=>({value:op,label:operationLabels[op]})),null);
+  function renderType(reset=false, keepExecution=false){
+    if(!keepExecution)invalidate();
+    if(reset)conditions=[];
+    const kind=type();select('retrievalOperation',(isMulti()?ops[kind].filter(op=>['search','filter'].includes(op)):ops[kind]).map(op=>({value:op,label:operationLabels[op]})),null);
     const formats=kind==='all'?[...new Set((capabilities?.assets||[]).filter(a=>a.scope===$('#retrievalScope').value).map(a=>a.originalFormat))]:(capabilities?.dataTypes||[]).find(t=>t.id===kind)?.formats||[];
     select('retrievalFormat',formats.sort().map(f=>({value:f,label:f})),'全部适用格式');
     renderSpecific();saveDraft();
   }
   function saveDraft(){
     const values=Object.fromEntries([...$('#retrievalForm').querySelectorAll('[id]')].filter(e=>['INPUT','SELECT','TEXTAREA'].includes(e.tagName)&&e.type!=='file').map(e=>[e.id,e.value]));
-    sessionStorage.setItem('retrievalDraft',JSON.stringify({scope:session.scopeFor('data.search')?.indexVersionId,values,conditions,hadFile:!!$('#retrievalQueryImage')?.files.length}));
+    sessionStorage.setItem('retrievalDraft',JSON.stringify({scope:scopeIdentity(selected()),values,conditions,hadFile:!!$('#retrievalQueryImage')?.files.length}));
   }
   function clearScopeForm(){
     conditions=[];conditionFields=[];$('#retrievalForm').reset();
@@ -164,34 +168,79 @@
     select('retrievalOperation',[{value:'search',label:operationLabels.search}],null,'search');
     select('retrievalFormat',[],'全部适用格式','');
   }
-  async function load(){
-    const scope=session.scopeFor('data.search'), seq=++loadSequence;
-    const nextScope=scope?.indexVersionId||'';
-    if(authRevision!==session.revision||scopeKey!==nextScope){
-      authRevision=session.revision;scopeKey=nextScope;capabilities=null;capabilityKey='';
-      clearScopeForm();invalidate();clearResults();$('#retrievalProgress').textContent='等待检索';
+  function combineCapabilities(entries) {
+    if(entries.length===1)return entries[0];
+    const assets=entries.flatMap(value=>value.assets||[]);
+    const types=new Map();
+    for(const entry of entries)for(const type of entry.dataTypes||[]){
+      const prior=types.get(type.id)||{...type,assetCount:0,formats:[]};
+      prior.assetCount+=type.assetCount;
+      prior.formats=[...new Set([...prior.formats,...type.formats])];
+      types.set(type.id,prior);
     }
-    select('retrievalDataset',session.datasetsFor('data.search').map(d=>({value:d.indexVersionId,label:`${d.datasetName} / ${d.versionName} / ${d.isOwnerCandidate?'私有候选（未启用）':d.isActiveIndex?'当前索引':'产品冻结索引'} ${d.indexVersionId.slice(0,8)}`})),'选择数据集',scope?.indexVersionId||'');
-    if(!scope){capabilities=null;capabilityKey='';clearScopeForm();$('#retrievalCapabilityStatus').textContent='请登录并选择可用索引。';$('#retrievalSubmit').disabled=true;return;}
-    if(capabilityKey===scope.indexVersionId)return;
-    $('#retrievalSubmit').disabled=true;$('#retrievalCapabilityStatus').textContent='正在核对当前快照的实际能力…';
+    const compatibleFields=(entries[0]?.objectFields||[]).filter(field=>entries.every(entry=>
+      entry.objectFields?.some(other=>other.name===field.name&&other.type===field.type&&
+        JSON.stringify(other.contentTypes)===JSON.stringify(field.contentTypes))));
+    return {assets,dataTypes:[...types.values()],tables:[],series:[],geometry:entries.flatMap(value=>value.geometry||[]),
+      objectFields:compatibleFields};
+  }
+  async function load(){
+    const scopes=selected();
+    const key=scopeIdentity(scopes);
+    if(authRevision===session.revision&&scopeKey===key&&(capabilityKey===key||scopeLoad))return;
+    const seq=++loadSequence;
+    scopeLoad?.abort();
+    scopeLoad=null;
+    const savedDraft=JSON.parse(sessionStorage.getItem('retrievalDraft')||'null');
+    if(authRevision!==session.revision||scopeKey!==key){
+      const question=$('#retrievalQuery').value;
+      authRevision=session.revision;scopeKey=key;capabilities=null;capabilityKey='';
+      clearScopeForm();$('#retrievalQuery').value=question;
+      invalidate();clearResults();$('#retrievalProgress').textContent='等待检索';
+    }
+    if(!scopes.length){
+      capabilities=null;capabilityKey='';perScope=[];
+      $('#retrievalCapabilityStatus').textContent='请选择至少一个获授权的数据集。';
+      $('#retrievalSubmit').disabled=true;
+      return;
+    }
+    if(capabilityKey===key)return;
+    $('#retrievalSubmit').disabled=scopes.length===1;
+    $('#retrievalCapabilityStatus').textContent=scopes.length>1?
+      '可先执行综合检索。所选范围的类型与筛选条件正在核对…':'正在核对所选范围的实际能力…';
+    const pending=new AbortController();
+    scopeLoad=pending;
     try{
-      const result=await(await session.request(`/capabilities/${scope.datasetId}/${scope.versionId}/${scope.indexVersionId}`)).json();
-      if(seq!==loadSequence||session.scopeFor('data.search')?.indexVersionId!==scope.indexVersionId)return;
-      capabilities=result.filters;capabilityKey=scope.indexVersionId;conditions=[];
-      select('retrievalType',[{value:'all',label:'综合检索'},...capabilities.dataTypes.filter(t=>t.assetCount).map(t=>({value:t.id,label:t.label}))],null);
-      $('#retrievalCapabilityStatus').textContent=`${scope.versionName} · ${capabilities.assets.length}个原始文件 · 枚举来自当前快照`;
-      const draft=JSON.parse(sessionStorage.getItem('retrievalDraft')||'null');
-      if(draft?.scope===scope.indexVersionId){for(const id of ['retrievalType','retrievalScope','retrievalFormat','retrievalOperation'])if($('#'+id))$('#'+id).value=draft.values[id]||$('#'+id).value;conditions=draft.conditions||[];}
-      renderType();
-      if(draft?.scope===scope.indexVersionId){
-        for(const [id,value]of Object.entries(draft.values)){const e=$('#'+id);if(e)e.value=value;}
-        renderSpecific();for(const[id,value]of Object.entries(draft.values)){const e=$('#'+id);if(e)e.value=value;}
+      await new Promise(resolve=>setTimeout(resolve,150));
+      if(pending.signal.aborted)return;
+      // Keep browser connections available for identity checks while cold
+      // indexes load. Saturating the HTTP/1.1 pool can time out those checks.
+      const checks=[];
+      for(let start=0;start<scopes.length;start+=2){
+        if(pending.signal.aborted)return;
+        checks.push(...await Promise.all(scopes.slice(start,start+2).map(async scope=>(await session.request(
+          `/capabilities/${scope.datasetId}/${scope.versionId}/${scope.indexVersionId}`,{signal:pending.signal})).json())));
+      }
+      if(seq!==loadSequence||scopeIdentity(selected())!==key)return;
+      perScope=checks.map(check=>check.filters);
+      capabilities=combineCapabilities(perScope);capabilityKey=key;conditions=[];
+      const dataTypes=capabilities.dataTypes.filter(t=>t.assetCount).map(t=>({value:t.id,label:t.label}));
+      select('retrievalType',[{value:'all',label:'综合检索'},...dataTypes],null);
+      const typeNames=Object.fromEntries(dataTypes.map(t=>[t.value,t.label]));
+      $('#retrievalCapabilityStatus').textContent=scopes.map((scope,i)=>
+        mdsDatasetName(scope)+' · '+perScope[i].dataTypes.filter(t=>t.assetCount).map(t=>typeNames[t.id]).join('、')).join('；');
+      const draft=savedDraft?.scope===key?savedDraft:null;
+      if(draft){for(const id of ['retrievalType','retrievalScope','retrievalFormat','retrievalOperation'])if($('#'+id))$('#'+id).value=draft.values[id]||$('#'+id).value;conditions=draft.conditions||[];}
+      renderType(false,true);
+      if(draft){
+        for(const [id,value] of Object.entries(draft.values)){const e=$('#'+id);if(e)e.value=value;}
+        renderSpecific();for(const [id,value] of Object.entries(draft.values)){const e=$('#'+id);if(e)e.value=value;}
         conditions=draft.conditions||[];renderConditions();
         if(draft.hadFile)$('#retrievalProgress').textContent='本地查询图片需要重新选择。';
       }
       $('#retrievalSubmit').disabled=false;
     }catch(e){if(seq===loadSequence&&e.name!=='AbortError')$('#retrievalCapabilityStatus').textContent=`能力未就绪：${e.message}`;}
+    finally{if(scopeLoad===pending)scopeLoad=null;}
   }
   function parseValue(c,f){
     if(['is_null','not_null'].includes(c.op))return {value:null};
@@ -220,16 +269,16 @@
   }
   function plan(){
     const kind=type(), op=$('#retrievalOperation').value;
-    const value={taskIntent:`${kind}_${op}`,retrievers:kind==='all'?['text','visual']:[kind],contentType:kind,operation:op,
+    const value={taskIntent:`${kind}_${op}`,retrievers:kind==='all'?(isMulti()?capabilities.dataTypes.filter(t=>t.assetCount&&ops[t.id]).map(t=>t.id):['text','visual']):[kind],contentType:kind,operation:op,
       queryText:$('#retrievalQuery').value.trim(),corpusScope:$('#retrievalScope').value,topK:Number($('#retrievalTopK').value),formats:$('#retrievalFormat').value?[$('#retrievalFormat').value]:[]};
     if(['text','visual'].includes(kind)&&$('#retrievalDocumentStage').value)value.objectConditions=[{field:'business_stage',op:'eq',value:$('#retrievalDocumentStage').value}];
-    if(kind==='structured'){
+    if(kind==='structured'&&!isMulti()){
       value.tableId=$('#retrievalTable').value;
       if(!value.tableId)throw new Error('请选择实际业务表/工作表');
       if(op==='sort'){value.sortField=$('#retrievalField').value;value.sortDescending=$('#retrievalDescending').value==='true';}
       if(['sum','min','max','average'].includes(op)){value.aggregateField=$('#retrievalField').value;const f=table().fields.find(f=>f.name===value.aggregateField);if(f?.unit)value.unit=f.unit;else if(f?.unitField)value.unit=$('#retrievalAggregateUnit').value;}
     }
-    if(kind==='timeseries'){
+    if(kind==='timeseries'&&!isMulti()){
       const [asset,series]=$('#retrievalSeries').value.split('|');value.assetIds=[asset];value.targetEntity=series;value.metric=$('#retrievalMetric').value;
       const metric=capabilities.series.find(s=>s.assetId===asset&&s.seriesId===series&&s.metric===value.metric);
       if(metric?.unit)value.unit=metric.unit;
@@ -237,10 +286,15 @@
       if(op!=='similar_shape'){const r=range('retrievalTimeStart','retrievalTimeEnd');if(r)value.timeRange=r;if(op!=='search'&&!r)throw new Error('精确计算需要明确时间范围');}
       if(op==='compare_periods')value.compareTimeRange=range('retrievalCompareStart','retrievalCompareEnd');
       if(op==='duration_above'){if(!$('#retrievalThreshold').value)throw new Error('请输入阈值');value.threshold=Number($('#retrievalThreshold').value);}
-      if(op==='similar_shape')value.querySeries=JSON.parse($('#retrievalCurve').value);
+      if(op==='similar_shape')value.querySeries=mdsParseJson($('#retrievalCurve').value,'查询曲线');
     }
     if(kind==='geometry'&&op==='similar_shape'){value.queryAssetId=$('#retrievalSample').value;value.tolerance=Number($('#retrievalTolerance').value);value.scaleInvariant=$('#retrievalScaleInvariant').value==='true';value.rotationInvariant=$('#retrievalRotationInvariant').value==='true';}
     for(const c of conditions){const f=conditionFields.find(f=>f.name===c.field&&f.source===c.source);if(!f)continue;const key=c.source==='object'?'objectConditions':'hardConditions';const unit=!['is_null','not_null'].includes(c.op)&&(f.type!=='mixed'||valueType(c,f)==='number')&&(f.unitField?c.unit:f.unit);(value[key]||=[]).push({field:c.field,op:c.op,...parseValue(c,f),...(unit?{unit}:{})});}
+    if(isMulti()&&(conditions.length||value.objectConditions?.length||op==='filter')){
+      if(!perScope.every(entry=>entry.assets.some(asset=>asset.contentTypes.includes(kind)&&asset.scope===value.corpusScope&&
+           (!value.formats.length||value.formats.includes(asset.originalFormat)))))
+        throw new Error('有数据集不支持所选类型或硬条件，请调整范围或移除条件。');
+    }
     return value;
   }
   function professionalSummary(e){
@@ -263,41 +317,59 @@
   }
   async function submit(event){
     event.preventDefault();if(!session.authenticated)return toast('请先登录数据空间账号');
-    const scope=session.scopeFor('data.search');if(!scope)return toast('请选择数据集');
-    if(!capabilities||capabilityKey!==scope.indexVersionId)return toast('请等待当前快照能力加载完成');
+    const scopes=selected();if(!scopes.length)return toast('请选择数据集');
+    if(scopes.length>window.mdsScopePicker.maxDataScopes)
+      return toast(`一次最多选择 ${window.mdsScopePicker.maxDataScopes} 个数据集，请先移除多余范围。`);
+    const frozen=scopes.map(window.mdsScopePicker.frozen);
+    const verified=capabilities&&capabilityKey===scopeIdentity(scopes);
+    if(!verified&&scopes.length===1)return toast('请等待所选范围的能力加载完成');
     invalidate();clearResults();
-    let query;try{query=plan();}catch(e){$('#retrievalProgress').textContent=`条件无效：${e.message}`;return;}
+    let query;
+    try {
+      query=verified?plan():{taskIntent:'all_search',operation:'search',contentType:'all',
+        retrievers:['text','visual','structured','timeseries','geometry'],corpusScope:'corpus',
+        queryText:$('#retrievalQuery').value.trim(),topK:Number($('#retrievalTopK').value),formats:[]};
+    } catch(e) {
+      $('#retrievalProgress').textContent=`条件无效：${e.message}`;
+      return;
+    }
     const seq=requestSequence,revision=session.revision;
     const image=$('#retrievalQueryImage')?.files[0];
-    let path='/retrieval/execute', body=JSON.stringify({datasetId:scope.datasetId,versionId:scope.versionId,indexVersionId:scope.indexVersionId,plan:query}),headers={'Content-Type':'application/json'};
+    let path='/retrieval/execute', body=JSON.stringify({scopes:frozen,plan:query}),headers={'Content-Type':'application/json'};
     if(image){
       if(image.size>10*1024*1024||query.operation!=='search'){$('#retrievalProgress').textContent='图搜文需要检索操作，查询图片不得超过10 MB';return;}
       path='/retrieval/image-to-text';body=new FormData();headers={};
-      ['datasetId','versionId','indexVersionId'].forEach(k=>body.set(k,scope[k]));body.set('plan',JSON.stringify(query));body.set('file',image);
+      body.set('scopes',JSON.stringify(frozen));body.set('plan',JSON.stringify(query));body.set('file',image);
     }
     controller=new AbortController();
     $('#retrievalProgress').textContent='正在执行检索…';
     const described=conditions.map(c=>{const f=conditionFields.find(f=>f.name===c.field&&f.source===c.source);return `${f?.description||c.field}${f?.type==='mixed'&&!['is_null','not_null'].includes(c.op)?'（'+(valueTypeLabels[valueType(c,f)]||valueType(c,f))+'）':''} ${operators[c.op]} ${c.value||'空值'}`;});
-    $('#retrievalApplied').textContent=`${scope.datasetName} / ${scope.versionName} · ${operationLabels[query.operation]}${query.formats.length?' · '+query.formats.join('、'):''}${table()?' · '+table().logicalPath:''} · 生效条件：${described.join('；')||'无额外硬条件'}${query.timeRange?' · 左闭右开窗口 '+query.timeRange.start+' 至 '+query.timeRange.end:''}`;
-    $('#retrievalApplied').dataset.request=JSON.stringify({datasetId:scope.datasetId,versionId:scope.versionId,indexVersionId:scope.indexVersionId,plan:query});
+    $('#retrievalApplied').textContent=`${scopes.length} 个冻结数据集 · ${operationLabels[query.operation]}${query.formats.length?' · '+query.formats.join('、'):''}${table()?' · '+table().logicalPath:''} · 生效条件：${described.join('；')||'无额外硬条件'}${query.timeRange?' · 左闭右开窗口 '+query.timeRange.start+' 至 '+query.timeRange.end:''}`;
+    $('#retrievalApplied').dataset.request=JSON.stringify({scopes:frozen,plan:query});
     try{
       const result=await(await session.request(path,{method:'POST',headers,body,signal:controller.signal})).json();
       if(seq!==requestSequence||revision!==session.revision)return;
       const evidence=result.evidence||[];
       const incomplete=evidence.find(e=>e.evidenceType==='calculation'&&e.facts.status);
       $('#retrievalProgress').textContent=incomplete?`计算未完成：${incomplete.facts.status}`:evidence.length?`已返回${evidence.length}条结果${result.limitations?.length?'；部分能力有说明':''}`:'零条匹配结果（条件已执行）';
-      const sources=evidence.map(e=>({asset_id:e.assetId,logical_path:e.preview?.logicalPath,source_type:e.semanticSpace,
+      const sources=evidence.map(e=>({asset_id:e.assetId,dataset_id:e.datasetId,data_version:e.dataVersion,index_version:e.indexVersion,logical_path:e.preview?.logicalPath,source_type:e.semanticSpace,
         content_preview:(e.semanticSpace?.startsWith('geometry.')?'三维模型近似相似不能证明工程可替换性。\n':'')+professionalSummary(e),locator:e.locator,time_range:e.timeRange,units:e.units,quality_flags:e.qualityFlags,
         original_format:e.provenance?.originalFormat,provenance:e.provenance}));
-      const output=document.createElement('div');await session.renderSources(output,sources,scope,revision);
+      const output=document.createElement('div');await session.renderSources(output,sources,scopes[0],revision);
       if(seq!==requestSequence||revision!==session.revision)return;
       $('#retrievalResults').replaceChildren(...output.childNodes);
+      if(result.scopeResults?.length){
+        const summary=document.createElement('p');
+        summary.textContent=result.scopeResults.map((entry,index)=>
+          mdsDatasetName(scopes[index])+'：'+entry.candidates+' 条候选').join('；');
+        $('#retrievalResults').prepend(summary);
+      }
       for(const message of result.limitations||[]){const p=document.createElement('p');p.textContent=message;$('#retrievalResults').append(p);}
     }catch(e){if(seq===requestSequence&&revision===session.revision&&e.name!=='AbortError')$('#retrievalProgress').textContent=`检索失败：${e.message}`;}
     finally{if(seq===requestSequence)controller=null;}
   }
   window.addEventListener('dataspace-business-ready',()=>{
-    window.addEventListener('dataspace-scope',load);$('#retrievalDataset').onchange=()=>{invalidate();session.selectIndex($('#retrievalDataset').value,'data.search');};
+    window.addEventListener('dataspace-scope',load);
     $('#retrievalType').onchange=()=>renderType(true);$('#retrievalScope').onchange=()=>renderType(true);$('#retrievalFormat').onchange=()=>{invalidate();conditions=[];renderSpecific();saveDraft();};
     $('#retrievalOperation').onchange=()=>{invalidate();renderSpecific();saveDraft();};
     $('#retrievalForm').oninput=saveDraft;$('#retrievalForm').onsubmit=submit;

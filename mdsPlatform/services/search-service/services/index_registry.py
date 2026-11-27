@@ -1,7 +1,7 @@
 from core.worker_authority import require_scope
 from dataclasses import dataclass
 from collections import OrderedDict
-from threading import Lock
+from threading import BoundedSemaphore, Lock
 from typing import Dict, Optional
 from weakref import WeakValueDictionary
 from contextlib import contextmanager
@@ -42,6 +42,12 @@ class LoadedCapabilities:
     source_bytes: int
 
 
+@dataclass
+class CandidateImages:
+    image_index: object
+    image_metadata: object
+
+
 class IndexRegistry:
     def __init__(self):
         self._cache: OrderedDict[str, LoadedIndex] = OrderedDict()
@@ -53,6 +59,7 @@ class IndexRegistry:
         self._capability_cache_bytes = 0
         self._guard = Lock()
         self._operation_guard = RLock()
+        self._reference_guard = BoundedSemaphore(3)
         self._loader = ManifestLoader()
 
     @contextmanager
@@ -153,6 +160,56 @@ class IndexRegistry:
                     loaded.professional_files or {}, cache=loaded.professional_cache).preload()
                 loaded.preloaded = True
         return loaded
+
+    @contextmanager
+    def reference_query_suite(self, dataset_id: str, version_id: str, index_version_id: str):
+        # Exact reference scans only keep a bounded top K in memory. Their
+        # short independent lease does not wait for a full dense index load.
+        acquired = self._reference_guard.acquire(timeout=settings.request_timeout_seconds)
+        if not acquired:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=503, detail='业务编号检索正在排队，请稍后重试。')
+        try:
+            capabilities = self.ensure_capabilities(dataset_id, version_id, index_version_id)
+            manifest, files, _ = self._loader.load_professional_subset(
+                dataset_id, version_id, index_version_id, {'structured.typed'}, reference_only=True)
+            yield ProfessionalRetrieverSuite(manifest.get('indexes', []), files,
+                                             cache={'snapshot.scope': capabilities.scope})
+        finally:
+            self._reference_guard.release()
+
+    def professional_query_suite(self, dataset_id: str, version_id: str, index_version_id: str, *, retrievers: set[str]):
+        suite, _ = self._professional_query(dataset_id, version_id, index_version_id, retrievers)
+        return suite
+
+    def candidate_query(self, dataset_id: str, version_id: str, index_version_id: str, *, text: bool, visual: bool):
+        return self._professional_query(dataset_id, version_id, index_version_id,
+                                        {'text'} if text else set(), visual=visual)
+
+    def _professional_query(self, dataset_id: str, version_id: str, index_version_id: str, retrievers: set[str],
+                            *, visual: bool = False):
+        spaces = set()
+        if 'structured' in retrievers:
+            spaces.add('structured.typed')
+        if 'text' in retrievers:
+            spaces.update({'text.lexical.zh', 'text.semantic.zh'})
+        with self.operation():
+            scope_key = self.build_key(dataset_id,version_id,index_version_id)
+            active = self.get(dataset_id,version_id,index_version_id)
+            if active is not None:
+                suite = ProfessionalRetrieverSuite(active.manifest.get('indexes',[]),active.professional_files,
+                                                   cache=active.professional_cache)
+                return suite, active if visual else None
+            with self._guard:
+                # Preserve the full-index memory lease while an independent subset is active.
+                self._cache.clear()
+                capabilities = self._capabilities_cache.get(scope_key)
+            manifest, files, bundle = self._loader.load_professional_subset(dataset_id,version_id,index_version_id,spaces)
+            cache = {'snapshot.scope':capabilities.scope} if capabilities else {}
+            suite = ProfessionalRetrieverSuite(manifest.get('indexes',[]),files,cache=cache)
+            images = CandidateImages(*self._loader.load_candidate_images(dataset_id, version_id, index_version_id,
+                                                                         bundle)) if visual else None
+            return suite, images
 
     def ensure_capabilities(self, dataset_id: str, version_id: str, index_version_id: str) -> LoadedCapabilities:
         require_scope(dataset_id,version_id,index_version_id)

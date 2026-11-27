@@ -442,7 +442,11 @@ public class AuthorizationService {
         Actor a=actor();var result=new LinkedHashMap<String,Object>();
         result.put("userId",a.userId());result.put("orgId",a.orgId());result.put("username",a.username());
         result.put("orgName",jdbc.queryForObject("SELECT org_name FROM org WHERE org_id=?",String.class,a.orgId()));
-        var enterprise=jdbc.queryForList("SELECT entity_id AS \"entityId\",industry_kind AS \"industryKind\",state,identity_kind AS \"identityKind\" FROM ds_enterprise_identity WHERE org_id=?",a.orgId());
+        var enterprise=jdbc.queryForList("""
+                SELECT entity_id AS "entityId",industry_kind AS "industryKind",state,identity_kind AS "identityKind",
+                       CASE WHEN state='CONFIRMED' THEN enterprise_name END AS "enterpriseName"
+                FROM ds_enterprise_identity WHERE org_id=?
+                """,a.orgId());
         result.put("enterpriseIdentity",enterprise.isEmpty()?null:enterprise.get(0));
         result.put("operations",a.operations().stream().sorted().toList());result.put("platformAdmin",a.platformAdmin());
         result.put("enterpriseMemberManager",a.enterpriseManager());result.put("permissionVersion",a.permissionVersion());

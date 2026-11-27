@@ -35,10 +35,21 @@ async def image_to_text(
 
 
 @router.post("/search/execute", response_model=EvidencePack)
-@registry.serialized
 def execute_professional_search(req: ProfessionalSearchRequest):
     """Execute only schema-validated, bounded and read-only retrieval steps."""
-    loaded = registry.ensure_loaded(str(req.dataset_id), str(req.version_id), str(req.index_version_id))
+    scope_ids = (str(req.dataset_id),str(req.version_id),str(req.index_version_id))
+    if req.plan.reference_terms:
+        with registry.reference_query_suite(*scope_ids) as suite:
+            return suite.execute(req.plan,*scope_ids[1:])
+    return _execute_professional_search(req, scope_ids)
+
+
+@registry.serialized
+def _execute_professional_search(req: ProfessionalSearchRequest, scope_ids):
+    if req.plan.all_tables_search and set(req.plan.retrievers) <= {'structured','text'}:
+        suite = registry.professional_query_suite(*scope_ids,retrievers=set(req.plan.retrievers))
+        return suite.execute(req.plan,*scope_ids[1:])
+    loaded = registry.ensure_loaded(*scope_ids)
 
     def visual_search(plan):
         scope = SnapshotScope.from_suite(suite)
@@ -53,8 +64,16 @@ def execute_professional_search(req: ProfessionalSearchRequest):
 
 
 @router.get("/indexes/{dataset_id}/{version_id}/{index_version_id}/capabilities")
-def index_capabilities(dataset_id: UUID, version_id: UUID, index_version_id: UUID):
+def index_capabilities(dataset_id: UUID, version_id: UUID, index_version_id: UUID, summary: bool = False, detail: str = ""):
     loaded = registry.ensure_capabilities(str(dataset_id), str(version_id), str(index_version_id))
+    if detail == "qa":
+        filters = {"assets": list(loaded.scope.assets.values()), "tables": list(loaded.scope.tables.values()),
+                   "entities": list(loaded.scope.entities.values())}
+    elif summary:
+        filters = {"assets": [{key: asset.get(key) for key in ("scope", "originalFormat", "contentTypes")}
+                              for asset in loaded.scope.assets.values()]}
+    else:
+        filters = loaded.scope.describe()
     # The frozen descriptor already consists of JSON primitives. Render it
     # directly so FastAPI does not recursively copy every facet before encoding.
     return JSONResponse({
@@ -62,7 +81,7 @@ def index_capabilities(dataset_id: UUID, version_id: UUID, index_version_id: UUI
         "versionId": str(version_id),
         "indexVersionId": str(index_version_id),
         "snapshot": {"dataVersion": str(version_id), "indexVersion": str(index_version_id)},
-        "filters": loaded.scope.describe(),
+        "filters": filters,
         "capabilities": [{
             "semanticSpace": item.get("semanticSpace"),
             "indexType": item.get("indexType"),
@@ -143,6 +162,8 @@ def qa_candidates(req: CandidateRequest):
     from services.qa_query import requests_product_picture
     product_picture=requests_product_picture(req.question,entities,known)
     formats = req.formats or sorted({a["originalFormat"] for a in scope.assets.values() if a["scope"] == "corpus"})
+    available = {(asset['originalFormat'], kind) for asset in scope.assets.values()
+                 if asset['scope'] == 'corpus' for kind in asset['contentTypes']}
     installation_targets = set()
     if (not named_files and len(set(entities)) == 1 and len(formats) == 1 and formats[0] in {'JPG', 'PNG', 'WEBP'}
             and re.search(r'相对位置|安装位置|墙面|地面', req.question)):
@@ -157,9 +178,19 @@ def qa_candidates(req: CandidateRequest):
                 for binding in scope.visual_bindings(asset_id, {})
             ):
                 installation_targets.add(asset_id)
-    loaded = registry.ensure_loaded(*snapshot)
-    suite = ProfessionalRetrieverSuite(loaded.manifest.get("indexes", []), loaded.professional_files or {},
-        cache=loaded.professional_cache if loaded.professional_cache is not None else {})
+    # A multi-scope request uses the same QA ranking, with only the text and
+    # image artifacts needed by the eligible formats in this child.
+    if req.multi_scope:
+        has_text = any((fmt, 'text') in available for fmt in formats)
+        has_visual = any((fmt, 'visual') in available for fmt in formats)
+        if not has_text and not has_visual:
+            return {"evidence": [], "status": "OK", "counts": {},
+                    "snapshot": {"dataVersion": snapshot[1], "indexVersion": snapshot[2]}}
+        suite, loaded = registry.candidate_query(*snapshot,text=has_text,visual=has_visual)
+    else:
+        loaded = registry.ensure_loaded(*snapshot)
+        suite = ProfessionalRetrieverSuite(loaded.manifest.get("indexes", []), loaded.professional_files or {},
+            cache=loaded.professional_cache if loaded.professional_cache is not None else {})
     evidence, counts = [], {}
     visual_service=TextToImageService()
     visual_ranking=None
@@ -167,7 +198,7 @@ def qa_candidates(req: CandidateRequest):
     text_ranking=None
     for fmt in formats:
         for kind in ["text", "visual"]:
-            if not any(a["scope"] == "corpus" and a["originalFormat"] == fmt and kind in a["contentTypes"] for a in scope.assets.values()):
+            if (fmt, kind) not in available:
                 continue
             plan = QueryPlan(taskIntent="qa_candidates", retrievers=[kind],
                              contentType=kind, formats=[fmt], topK=req.per_format)

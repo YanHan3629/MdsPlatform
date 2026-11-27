@@ -45,8 +45,8 @@
   };
   function message(error){
     const value=String(error?.message||error||'操作失败。');
-    const key=Object.keys(errorLabels).find(code=>value.includes(code));
-    if(key)return errorLabels[key];
+    const key=error?.code||Object.keys(errorLabels).find(code=>value.includes(code));
+    if(errorLabels[key])return errorLabels[key];
     if(/LAST.*ADMIN|LAST_USABLE|最后.*管理员/.test(value))return '至少保留一名可登录的平台管理员；请先新增并验证接任管理员。';
     return value;
   }
@@ -265,12 +265,12 @@
       const management=[identity.platformAdmin?'平台管理员':'',identity.enterpriseMemberManager?'企业成员管理者':''].filter(Boolean).join('、')||'无管理资格';
       const mapping=identity.enterpriseIdentity;
       $('#identitySummary').innerHTML='<p><b>'+esc(identity.username)+'</b> · '+esc(states[identity.account?.accountState]||'启用')+'</p>'+
-        '<p>当前企业组织：'+esc(identity.orgName||identity.orgId)+(mapping?.entityId?' · '+esc(mapping.entityId)+' · '+esc(industries[mapping.industryKind]||mapping.industryKind):' · 企业映射待确认')+'</p>'+
+        '<p>当前企业组织：'+esc(mdsOrganizationName(identity))+(mapping?.entityId?' · '+esc(mapping.entityId)+' · '+esc(industries[mapping.industryKind]||mapping.industryKind):' · 企业映射待确认')+'</p>'+
         '<p>业务主配置：'+esc(primary?.name||'仅账号自助')+primaryStatus+'</p><p>管理资格：'+esc(management)+'</p>';
       for(const code of identity.operations||[]){
         const item=document.createElement('span');item.textContent=operationLabels[code]||code;$('#identityEffectiveOperations').append(item);
       }
-      if(!state.snapshot)$('#currentOrgName').textContent=identity.orgName||identity.orgId;
+      if(!state.snapshot)$('#currentOrgName').textContent=mdsOrganizationName(identity);
     }
     const manager=!!identity&&(identity.platformAdmin||identity.enterpriseMemberManager);
     $('#identityManageNav').hidden=!manager;$('#identityBulkLogout').hidden=!identity?.platformAdmin;
@@ -298,13 +298,15 @@
       $('#identityManagementContent').hidden=false;selectUser('');selectType('');
     }catch(error){if(sequence===loadSequence)report(error);}
   }
-  const formOperations={spaceForm:'dataset.create',sourceForm:'dataset.draft.manage',uploadForm:'dataset.upload',catalogForm:'dataset.draft.manage',governForm:'dataset.quality.run',indexForm:'dataset.index.build',publishForm:'product.publish',intentForm:'application.submit',receiverForm:'delivery.endpoint.manage',contractForm:'contract.edit',qaIngestForm:'dataset.upload',qaForm:'data.qa',retrievalForm:'data.search',identityPasswordForm:'identity.self.password',identityCloseForm:'identity.self.close',identityUserForm:selectedUser?'identity.member.update':'identity.member.create',identityResetForm:'identity.member.reset',identityDeleteForm:'identity.member.close',identityPlatformForm:'identity.platform-admin.manage',identityMemberManagerForm:'identity.platform-admin.manage',identityTypeForm:'identity.type.manage',identityDeleteTypeForm:'identity.type.manage'};
+  const formOperations={spaceForm:'dataset.create',sourceForm:'dataset.draft.manage',catalogForm:'dataset.draft.manage',governForm:'dataset.quality.run',indexForm:'dataset.index.build',publishForm:'product.publish',intentForm:'application.submit',receiverForm:'delivery.endpoint.manage',contractForm:'contract.edit',qaIngestForm:'dataset.upload',qaForm:'data.qa',retrievalForm:'data.search',identityPasswordForm:'identity.self.password',identityCloseForm:'identity.self.close',identityUserForm:selectedUser?'identity.member.update':'identity.member.create',identityResetForm:'identity.member.reset',identityDeleteForm:'identity.member.close',identityPlatformForm:'identity.platform-admin.manage',identityMemberManagerForm:'identity.platform-admin.manage',identityTypeForm:'identity.type.manage',identityDeleteTypeForm:'identity.type.manage'};
   function applyCapabilities(){
     if(!document.getElementById('identitySummary'))return;
+    const ingestionAllowed=['dataset.upload','dataset.create','dataset.index.build'].some(code=>auth.has(code));
+    $('#dashboardIngestion').hidden=!ingestionAllowed;
     formOperations.identityUserForm=selectedUser?'identity.member.update':'identity.member.create';
     for(const [id,operation] of Object.entries(formOperations)){
       const form=document.getElementById(id);if(!form)continue;
-      const blocked=!auth.has(operation)||(id==='qaIngestForm'&&!!form.dataset.ingestBusy)||(id==='identityUserForm'&&currentUser()?.accountState==='CLOSED')||(id.startsWith('identity')&&['identityResetForm','identityDeleteForm','identityPlatformForm','identityMemberManagerForm'].includes(id)&&(!currentUser()||currentUser().accountState==='CLOSED'));
+      const blocked=(id==='qaIngestForm'?!ingestionAllowed||!!form.dataset.ingestBusy:!auth.has(operation))||(id==='identityUserForm'&&currentUser()?.accountState==='CLOSED')||(id.startsWith('identity')&&['identityResetForm','identityDeleteForm','identityPlatformForm','identityMemberManagerForm'].includes(id)&&(!currentUser()||currentUser().accountState==='CLOSED'));
       form.inert=blocked;form.setAttribute('aria-disabled',String(blocked));
       // The retrieval form also depends on the selected index's loaded capabilities.
       if(id==='retrievalForm')continue;
@@ -313,9 +315,12 @@
     const ingestSubmit=$('#qaIngestSubmit');
     const ingestBusy=!!$('#qaIngestForm')?.dataset.ingestBusy;
     const creatingDataset=!!$('#qaNewDataset')?.value.trim();
-    const ingestLabel=creatingDataset?'创建数据集':!auth.has('dataset.publish')?'上传并保存草稿':
+    const ingestLabel=creatingDataset||!auth.has('dataset.upload')?'创建数据集':!auth.has('dataset.publish')?'上传并保存草稿':
       auth.has('dataset.index.build')?'上传并发布，自动建立索引':'上传并发布版本';
-    if(ingestSubmit&&ingestSubmit.textContent!==ingestLabel)ingestSubmit.textContent=ingestLabel;
+    if(ingestSubmit){
+      ingestSubmit.textContent=ingestLabel;
+      ingestSubmit.disabled=ingestBusy||!(creatingDataset?auth.has('dataset.create'):auth.has('dataset.upload'));
+    }
     for(const id of ['qaNewSpace','qaNewDataset'])$('#'+id).disabled=ingestBusy||!auth.has('dataset.create');
     for(const id of ['qaIngestFiles','qaIngestFolder'])$('#'+id).disabled=ingestBusy||creatingDataset||!auth.has('dataset.upload');
     $('#qaNewVersion').disabled=ingestBusy||creatingDataset||!auth.has('dataset.upload')||!auth.has('dataset.draft.manage');
